@@ -145,3 +145,59 @@ writing-plans skill for an implementation plan.
 goxlr-utility exposes a documented local API (see its wiki, "The GoXLR Utility
 API"). apprecorder could read fader/mute state or trigger recording from a GoXLR
 button. User wrote parts of this — ask him rather than researching it.
+
+---
+
+## 2026-08-25 (later still) — Approved; autonomous build started
+
+**Design approved.** Spec at `docs/superpowers/specs/2026-08-25-apprecorder-design.md`,
+committed as `70e7bcb` along with the build system and repo skeleton.
+
+### Assumption locked in (asked 3x, unanswered — decided rather than blocked)
+
+**Sample-accurate drift correction.** Alignment cannot be retrofitted into files
+already written, and WAV was among the requested formats. Over-built is
+recoverable; under-built is not. Revisit only if it proves expensive.
+
+### Toolchain verified present — nothing to install
+
+- MSVC 14.42.34433 (VS 2022 Build Tools), Hostx64/x64
+- CMake + Ninja bundled at `Common7/IDE/CommonExtensions/Microsoft/CMake/`
+- Clang/LLVM also bundled
+- Windows SDK 10.0.22621 — confirmed ships `audioclientactivationparams.h` with
+  `AUDIOCLIENT_ACTIVATION_PARAMS` and `VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK`
+- Driver: `build.cmd [Debug|Release] [spikes] [test]` — wraps vcvars64; never
+  invoke `cl.exe` directly.
+- `/W4 /WX`, static CRT, COBJMACROS defined globally.
+
+### Parallelisation strategy (deliberate, not maximal)
+
+Maximum fan-out is wrong for this codebase *because* DRY was requested: parallel
+agents writing C over shared hand-authored COM vtables and one audio pipeline
+produce four subtly different ring buffers. So: **sequence the core, parallelise
+the leaves.** Graph/capture/clock are built once, in order. Encoders are ideal
+fan-out (isolated `ActionVTable`, same interface, no shared state), as are
+theme/dpi/darkmode/tree_panel once the canvas exists.
+
+### Wave 1 — in flight
+
+| Agent | Scope | Files |
+|---|---|---|
+| Capture spike | Prove `IActivateAudioInterfaceCompletionHandler` hand-written vtable works in C; capture real PCM from a real PID | `spike/` |
+| Foundation | test harness, `err`, `log`, `ringbuf` (SPMC), `clock` (exact QPC arithmetic) | `src/platform/`, `src/core/`, `tests/` |
+
+Disjoint file sets, hence safe to run concurrently.
+
+**The spike's most valuable output** is not the capture code — it is an empirical
+answer to: *does a silent app produce no buffers, or silent-flagged buffers, and
+do the QPC positions keep advancing across silence?* The entire drift-correction
+design in section 5 rests on that, and it is currently an assumption.
+
+### Waves not yet started
+
+3. Core (sequential): graph, source, bus, mix, resample, drift controller
+4. Encoders (parallel x4): WAV, MP3, OGG/Opus, M4A via Media Foundation
+5. UI: app/canvas/node_window sequential, then theme/dpi/darkmode/tree_panel parallel
+6. Session persistence, polish
+
+Reviewer and tester passes run against every wave.
