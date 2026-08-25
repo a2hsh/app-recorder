@@ -1,0 +1,148 @@
+/*
+ * capture.c -- the capture factory and the shared status cell.
+ *
+ * apr_capture_create is, per include/capture.h, the ONLY place in the codebase
+ * permitted to switch on AprSourceKind. Nothing above this file may ask what
+ * kind a source is; that is what makes design section 4.3 true -- the whole
+ * core runs on capture_fake with no audio hardware present.
+ *
+ * Design section 7 lists five files under src/capture/. This is a sixth: the
+ * factory and the status cell belong to no one kind, and putting them in
+ * wasapi_common.c would drag the fake source through WASAPI headers for no
+ * reason. Reported as a deliberate deviation from the module layout.
+ */
+#include "apr_winver.h"
+
+#include <windows.h>
+#include <stdlib.h>
+
+#include "capture_internal.h"
+#include "ringbuf.h"
+
+/* ---------------------------------------------------------------------------
+ * Status cell. See capture_internal.h for why it is shaped this way.
+ * ------------------------------------------------------------------------- */
+
+void apr_capstat_init(AprCapStatus *s)
+{
+    ZeroMemory(s, sizeof(*s));
+    s->alive = 1;
+    s->err   = apr_ok();
+}
+
+void apr_capstat_set_error(AprCapStatus *s, const AprErr *e)
+{
+    InterlockedIncrement(&s->err_seq);   /* -> odd: readers retry */
+    MemoryBarrier();
+    s->err = *e;
+    MemoryBarrier();
+    InterlockedIncrement(&s->err_seq);   /* -> even: readers proceed */
+}
+
+void apr_capstat_clear_error(AprCapStatus *s)
+{
+    AprErr ok = apr_ok();
+    apr_capstat_set_error(s, &ok);
+}
+
+void apr_capstat_set_alive(AprCapStatus *s, int alive) { s->alive = alive ? 1 : 0; }
+void apr_capstat_set_muted(AprCapStatus *s, int muted) { s->muted = muted ? 1 : 0; }
+int  apr_capstat_alive(const AprCapStatus *s) { return s->alive != 0; }
+
+void apr_capstat_read(const AprCapStatus *s, AprCaptureStatus *out)
+{
+    int tries;
+
+    out->anchor_ticks    = (uint64_t)s->anchor_ticks;
+    out->frames_written  = (uint64_t)s->frames_written;
+    out->discontinuities = (uint64_t)s->discontinuities;
+    out->alive           = (int)s->alive;
+    out->muted           = (int)s->muted;
+
+    /* Seqlock read. An error is raised a handful of times in a whole session,
+     * so this loop effectively always runs once; the bound is there so a
+     * pathological writer cannot spin a mixer tick forever. */
+    for (tries = 0; tries < 8; tries++) {
+        LONG a = s->err_seq;
+        MemoryBarrier();
+        out->last_error = s->err;
+        MemoryBarrier();
+        if (!(a & 1) && a == s->err_seq) return;
+    }
+}
+
+/* ---------------------------------------------------------------------------
+ * Shared validation
+ * ------------------------------------------------------------------------- */
+
+AprErr apr_capture_check_common(const AprCaptureConfig *cfg, const RingBuf *rb)
+{
+    size_t want;
+
+    if (!cfg) return APR_ERR(APR_E_INVALID_ARG, L"config is NULL");
+    if (!rb)  return APR_ERR(APR_E_INVALID_ARG, L"ring buffer is NULL");
+    if (cfg->sample_rate == 0)
+        return APR_ERR(APR_E_INVALID_ARG, L"sample_rate is 0");
+    if (cfg->channels == 0 || cfg->channels > 8)
+        return APR_ERR(APR_E_INVALID_ARG, L"channels %u outside 1..8",
+                       (unsigned)cfg->channels);
+
+    /* Every source in apprecorder produces interleaved float32; the ring has
+     * to have been created for that or frames silently shear. */
+    want = (size_t)cfg->channels * sizeof(float);
+    if (rb_frame_bytes(rb) != want)
+        return APR_ERR(APR_E_INVALID_ARG,
+                       L"ring frame is %zu bytes, %u float32 channels need %zu",
+                       rb_frame_bytes(rb), (unsigned)cfg->channels, want);
+
+    return apr_ok();
+}
+
+/* ---------------------------------------------------------------------------
+ * The factory
+ * ------------------------------------------------------------------------- */
+
+AprErr apr_capture_create(const AprCaptureConfig *cfg, RingBuf *rb,
+                          AprCapture **out)
+{
+    const AprCaptureVTable *vt;
+    AprCapture *c;
+    AprErr e;
+
+    if (!out) return APR_ERR(APR_E_INVALID_ARG, L"out is NULL");
+    *out = NULL;
+
+    e = apr_capture_check_common(cfg, rb);
+    if (apr_failed(&e)) return e;
+
+    switch (cfg->kind) {
+    case APR_SRC_PROCESS: vt = apr_capture_process_vtable(); break;
+    case APR_SRC_DEVICE:  vt = apr_capture_device_vtable();  break;
+    case APR_SRC_FAKE:    vt = apr_capture_fake_vtable();    break;
+    default:
+        return APR_ERR(APR_E_INVALID_ARG, L"unknown source kind %d",
+                       (int)cfg->kind);
+    }
+
+    c = (AprCapture *)calloc(1, sizeof(*c));
+    if (!c) return APR_ERR(APR_E_NO_MEMORY, L"AprCapture");
+    c->vt   = vt;
+    c->impl = NULL;
+
+    e = vt->open(c, cfg, rb);
+    if (apr_failed(&e)) {
+        if (c->impl) vt->close(c);
+        free(c);
+        return e;
+    }
+
+    *out = c;
+    return apr_ok();
+}
+
+void apr_capture_destroy(AprCapture *c)
+{
+    if (!c) return;
+    if (c->vt && c->vt->close) c->vt->close(c);
+    free(c);
+}

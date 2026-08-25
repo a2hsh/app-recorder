@@ -962,3 +962,242 @@ one agent's work to another's commit.)
 
 **Next:** CLI wiring — the author's chosen first usable milestone — then a review
 and integration pass, then the UI starting with the `.rc` catalog.
+
+---
+
+## 2026-08-26 — Capture layer built (wave 2). EXCLUDE mode tested and answered.
+
+Design section 12 step 2. `include/capture.h` implemented **unchanged** — the
+header as written needed no edits. `build.cmd Debug test` and
+`build.cmd Release test`: **12/12 suites pass**, `/W4 /WX` clean in both.
+
+### Shipped
+
+| File | Owns |
+|---|---|
+| `src/capture/apr_winver.h` | the NTDDI floor, with an `#error` if included after `windows.h` |
+| `src/capture/capture_internal.h` | the status cell contract, per-kind vtable getters |
+| `src/capture/com_shim.c` | `IActivateAudioInterfaceCompletionHandler`, graduated from the spike |
+| `src/capture/wasapi_common.c` | format, Initialize, event handle, pump thread, packet drain, GUIDs |
+| `src/capture/capture_process.c` | process loopback + death detector + mute poll |
+| `src/capture/capture_device.c` | `IMMDeviceEnumerator`/`eCapture`, gap fill, endpoint death |
+| `src/capture/capture_fake.c` + `.h` | the synthetic source and its test driver |
+| `src/capture/capture.c` | `apr_capture_create` (**the only switch on `AprSourceKind`**) + status cell |
+| `tests/test_capture_fake.c` | 23 cases, no hardware |
+| `tests/test_capture_wasapi.c` | 6 cases, skips rather than fails with no audio engine |
+
+**Deviation from the section 7 module layout:** `capture.c` plus three internal
+headers are extra files under `capture/`. The factory and the status cell belong
+to no one kind, and putting them in `wasapi_common.c` would drag the fake source
+through WASAPI headers for nothing. Said out loud here rather than quietly.
+
+### The COM shim graduated intact, and the leak is fixed
+
+Kept verbatim from `spike/spike_loopback.c` 68-219 because it worked first try:
+SDK interface embedded **by value** as the first member, `IID_IAgileObject` in
+`QueryInterface`, the `CONST_VTBL` cast, **both** activation HRESULTs checked.
+
+The known spike leak — a late completion callback whose `punk` was never
+released after a timeout — is closed **twice**, because either fix alone has a
+race:
+
+1. the waiter sets an `abandoned` flag *before* dropping its reference, so a
+   late callback releases the interface instead of storing it; and
+2. the handler destructor releases anything still stored, covering the window
+   where the callback read that flag just before it was set.
+
+Whichever fires, the reference is dropped exactly once.
+
+### EXCLUDE mode: tested, and it does exactly what it says
+
+Four measurements, 48 kHz stereo, captured through the real `AprCapture`
+interface with `cfg.process.exclude` as the only thing changed:
+
+| # | mode | target | result |
+|---|---|---|---|
+| A | INCLUDE | the player | **peak 0.000025000**, 440 Hz, 167,040 frames, 0 gaps |
+| B | EXCLUDE | the player | **0 of 335,040 samples non-zero** — pure silence |
+| C | EXCLUDE | a process rendering nothing | **peak 0.000025000**, 440 Hz — the sibling tone |
+| D | EXCLUDE | an *ancestor shell* of the player | **silence** |
+
+- **The `exclude` flag drives it correctly.** A and B differ in nothing but that
+  flag, and differ completely in outcome.
+- **When the excluded process is the only thing playing, you get silence** — but
+  a *full, continuous, gapless stream* of it (167,520 frames in 3.490 s =
+  48,000.0 fps, zero discontinuities). Same shape as every other process tap.
+- **EXCLUDE walks the process tree too** — row D. Excluding a launcher excludes
+  everything it spawned. That is a real UI trap: "record everything except
+  Discord" also drops anything Discord started, and excluding a terminal drops
+  every app launched from it. Worth surfacing in the UI wording.
+- **No WAV was written at any point.** The probe computed peak / RMS / non-zero
+  count / zero-crossing rate in memory and printed only those; no audio ever
+  reached disk. The probe itself (`tests/test_zz_exclude_probe.c`, armed only by
+  an environment variable) was deleted afterwards along with its build output.
+  Also swept up five stale WAVs the earlier spike had left in the agent
+  scratchpad (`idle.wav`, `tree.wav`, `trace.wav`, two `capture.wav`) — all
+  INCLUDE-mode captures of the silent test player, about 64 MB, now gone.
+
+### Design section 10 reproduced through the real code
+
+- **Death.** Player self-terminating at ~11 s, capture running 16 s: `alive`
+  flipped to **0**, and loopback carried on producing 767,520 frames over
+  15.990 s — **48,000.0 fps of perfect silence, 0 discontinuities**, exactly as
+  section 4.1 note 6 warns. `OpenProcess(SYNCHRONIZE, ...)` really is the only
+  signal there is.
+- **Mute.** Player at session volume **0.0**: `muted` flipped to **1** and the
+  capture was **0 of 383,040 samples non-zero**. This is the "why is my
+  recording empty" case, now detectable before the user loses an evening.
+
+### Decisions worth not relitigating
+
+- **`anchor_ticks` is `apr_qpc_now()` at buffer arrival.** `pu64QPCPosition` is
+  never read. `pu64DevicePosition` is never read.
+- **The status cell is a seqlock, not a mutex.** `capture.h` promises `status()`
+  never blocks, and `AprErr` is 180+ bytes so it cannot be a plain atomic. The
+  64-bit counters are naturally aligned and x64-atomic; only `last_error` needs
+  the sequence counter, and it is written a handful of times per session.
+- **Death does NOT stop the pump.** Section 10 says one source dying must not
+  take the session down; the owner decides. The source reports `alive == 0` and
+  a `last_error`, and keeps its place on the timeline.
+- **In EXCLUDE mode there is no death detection and no mute polling**, because
+  the named process is the one thing *not* being captured — its exit merely
+  means the capture starts including it. Doing otherwise would kill a healthy
+  source.
+- **A wedged pump is leaked, not killed.** If the pump will not join in 5 s,
+  `close()` deliberately skips every release: leaking a COM reference is
+  survivable, a use-after-free under a live audio thread is not.
+- **Device format:** the session format is imposed, and on
+  `AUDCLNT_E_UNSUPPORTED_FORMAT` the client is **re-activated** (a failed
+  `Initialize` leaves it unusable) and retried with `AUTOCONVERTPCM |
+  SRC_DEFAULT_QUALITY`. That is the OS converter, not a second resampler in this
+  tree, and it does not hide drift — drift is still delivered frames against
+  elapsed QPC. On this rig the default endpoint took 48 kHz / 2 ch / float32
+  directly, so the retry path did not fire.
+- **`capture_fake` has two mutually exclusive modes.** Driven
+  (`apr_capture_fake_advance`: no threads, no real time) and real-time
+  (`start`/`stop`). Driven is what makes a three-hour session take a second, and
+  it is byte-deterministic — sample n is a pure function of n, so how the
+  timeline is chopped into calls changes nothing. A test asserts exactly that.
+
+### HRESULTs actually hit this wave
+
+Nothing unexpected, and nothing new to table in `err.c`.
+`ActivateAudioInterfaceAsync`, `GetActivateResult` and its out-parameter,
+`Initialize`, `SetEventHandle`, `GetService`, `Start`, `Stop`, `GetBuffer` and
+`ReleaseBuffer` all returned `S_OK` every time, in both INCLUDE and EXCLUDE
+mode. `GetMixFormat` / `GetDevicePeriod` were not called on the process path at
+all — the spike already proved both are `E_NOTIMPL`, so the code supplies the
+format and passes `hnsBufferDuration = 0` without asking.
+`AUDCLNT_BUFFERFLAGS_SILENT`, `DATA_DISCONTINUITY` and `TIMESTAMP_ERROR` were
+**never** set, across every run — consistent with the spike.
+
+### Nothing in the spec was contradicted
+
+Sections 4.1, 4.2, 4.3, 5.1, 5.2 and 10 all held up under measurement. The one
+genuinely new fact is the EXCLUDE tree-walking in row D above, which the spec
+does not mention because the spike never ran it.
+
+### Caveats / not done
+
+- The device path is **opened and closed but never started** by any automated
+  test: starting it records the author's microphone, which is not an automated
+  test's call to make. Its pump, gap fill and discontinuity handling therefore
+  have no hardware coverage yet — only the fake source exercises that
+  arithmetic. **Needs a manual pass with the author awake and consenting.**
+- Endpoint death is inferred from `AUDCLNT_E_DEVICE_INVALIDATED` and friends
+  rather than from an `IMMNotificationClient`, to avoid hand-vtabling a second
+  COM callback before anything needs one.
+- Mute polling inspects only the named PID session. A muted *child* inside an
+  unmuted tree will not raise the flag.
+- `open()` and `close()` must run on the same thread for the two WASAPI kinds —
+  they own a `CoInitializeEx` reference. `capture.h` does not say so; the source
+  does.
+
+### What was played, exactly (AGENTS.md rule 1 disclosure)
+
+440 Hz sine, source amplitude 0.25, rendered by `spike_silentplayer.exe` — the
+existing structurally-safe harness, reused unmodified. Six one-shot runs. Three
+at session volume **0.0001** (endpoint amplitude 0.000025 = **-92 dBFS**,
+inaudible) and three at **0.0** (digital silence). Every run read its volume
+back and verified it before `Start()`; every run was finite, watchdogged and
+self-terminating; **nothing was looped**; zero leftover processes afterwards,
+confirmed. Longest single render 9.0 s. Before any of it, active render sessions
+were enumerated to confirm the machine was quiet — the only one was an idle
+NVDA.
+
+---
+
+## 2026-08-26 — Capture layer COMPLETE
+
+`include/capture.h` implemented **unchanged** — the contract needed no edits,
+which is the payoff for writing it before launching the parallel agents.
+
+| File | Owns |
+|---|---|
+| `src/capture/apr_winver.h` | NTDDI floor, with an `#error` if included after `windows.h` — that ordering makes `audioclientactivationparams.h` compile to nothing |
+| `src/capture/com_shim.c/.h` | graduated completion-handler vtable |
+| `src/capture/wasapi_common.c/.h` | format, Initialize, event handle, pump thread, packet drain, GUIDs |
+| `src/capture/capture_process.c` | loopback + death detector + mute poll |
+| `src/capture/capture_device.c` | `IMMDeviceEnumerator`/`eCapture`, gap fill, endpoint death |
+| `src/capture/capture_fake.c/.h` | synthetic source + deterministic driver |
+| `src/capture/capture.c` | `apr_capture_create` — the only `switch` on `AprSourceKind` |
+
+23 fake-source cases (zero hardware) + 6 WASAPI cases that **skip** rather than
+fail with no audio engine. Debug and Release both `/W4 /WX` clean.
+
+**The spike's `punk` leak is closed twice, deliberately** — either fix alone
+races. The waiter sets an `abandoned` flag *before* dropping its ref, and the
+destructor releases anything still stored.
+
+**Accepted deviation from design §7:** `capture.c` plus three internal headers
+are extra files. The factory and status cell belong to no single kind, and
+folding them into `wasapi_common.c` would drag the fake source through WASAPI
+headers — which would break the no-hardware testability requirement (§4.3).
+
+### Design §10 reproduced through real code
+
+- **Death:** target exited at ~11 s, capture ran 16 s → `alive` = 0, while
+  loopback produced 767,520 frames over 15.990 s of perfect silence, 0
+  discontinuities. Confirms WASAPI never signals death.
+- **Mute:** session volume 0.0 → `muted` = 1, 0 of 383,040 samples non-zero.
+
+### EXCLUDE mode — verified, and it has a UI trap (now in spec §4.1.1)
+
+Flag drives correctly; excluding the only thing playing gives silence but still a
+full gapless stream. **New fact: EXCLUDE walks the process tree too.** Excluding
+a launcher excludes everything it spawned — "record everything except Discord"
+also drops what Discord started, and excluding a terminal drops every app
+launched from it. **This is a UI-wording problem**: never present it as
+"everything except X"; name the tree and show the affected processes first.
+Localization note: "except" is exactly the word that flattens a tree relationship
+when translated carelessly.
+
+**No WAV was ever written** — the probe computed peak/RMS/non-zero in memory.
+The agent also swept ~64 MB of stale WAVs left by the *earlier* spike. Verified
+by me: zero audio files anywhere in the tree.
+
+### CAVEAT — the one real gap
+
+**Device capture is opened and closed but never `start()`ed by any test, because
+starting it records the author's microphone.** Correct call by the agent. Its
+pump, gap-fill and discontinuity handling therefore have **no hardware coverage**.
+**Needs a manual pass with the author awake and consenting.** This is the
+highest-risk untested path in the project — and it is the path that carries all
+the real drift (§5.1).
+
+Lesser caveats: endpoint death is inferred from `AUDCLNT_E_DEVICE_INVALIDATED`
+rather than an `IMMNotificationClient` (avoids a second hand-written COM
+callback); mute polling inspects only the named PID's session, so a muted child
+in an unmuted tree will not flag; `open()`/`close()` must share a thread for the
+WASAPI kinds since they hold a `CoInitializeEx` ref.
+
+### HRESULTs
+
+None unexpected, nothing new needed in `err.c`. Everything `S_OK` every run in
+both modes. `GetMixFormat`/`GetDevicePeriod` are never called on the process path
+— the spike already settled that they return `E_NOTIMPL`. `SILENT`,
+`DATA_DISCONTINUITY` and `TIMESTAMP_ERROR` never set. The device endpoint
+accepted 48k/2ch/f32 directly, so the `AUTOCONVERTPCM` retry path never fired
+and is also untested.
+
+**Nothing contradicted the spec.**

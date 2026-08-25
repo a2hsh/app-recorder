@@ -19,6 +19,17 @@ add_compile_definitions(
   _CRT_SECURE_NO_WARNINGS
 )
 
+# core/registry.c holds the static action table (design 3.3). Each entry is
+# guarded by APR_HAVE_ACTION_<ID>, defined here from the presence of the source
+# file, so an encoder that is half written cannot break the link for everyone
+# else and a finished one needs no build-system edit.
+foreach(_action wav mp3 ogg m4a)
+  if(EXISTS ${CMAKE_SOURCE_DIR}/src/actions/action_${_action}.c)
+    string(TOUPPER ${_action} _ACTION)
+    add_compile_definitions(APR_HAVE_ACTION_${_ACTION})
+  endif()
+endforeach()
+
 # Size goals: static CRT, no runtime redistributable required.
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 

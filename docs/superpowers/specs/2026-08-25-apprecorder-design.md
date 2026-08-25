@@ -214,6 +214,38 @@ ActivateAudioInterfaceAsync(VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
    capturing a shell's PID picks up a tone rendered by its child. Required for
    browsers and Electron apps.
 
+### 4.1.1 EXCLUDE mode — verified, and it has a UI trap
+
+`PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE` captures everything *except*
+the named process. Verified across four runs varying nothing but the flag:
+
+| mode | target | result |
+|---|---|---|
+| INCLUDE | the player | peak 0.000025, 440 Hz, 0 gaps |
+| EXCLUDE | the player | **0 of 335,040 samples non-zero** |
+| EXCLUDE | a process rendering nothing | peak 0.000025 — the *sibling's* tone |
+| EXCLUDE | an ancestor shell of the player | **silence** |
+
+The flag works, and excluding the only thing playing yields silence — but still a
+**full gapless stream** of it (48,000.0 fps, 0 discontinuities), consistent with
+4.1 #2.
+
+**The trap: EXCLUDE walks the process tree as well.** Excluding a launcher
+excludes everything it ever spawned. "Record everything except Discord" will also
+drop whatever Discord started, and excluding a terminal silently drops every app
+launched from it — including ones the user never associated with that terminal.
+
+**This is a UI-wording problem, not a bug.** The interface must never present
+this as "everything except X". It has to say the tree is excluded, name what is
+currently in that tree, and ideally show the user the affected processes before
+they commit. Note for localization (6.2): the Arabic phrasing needs the same
+precision, and "except" is exactly the kind of word that flattens a tree
+relationship into a single item when translated carelessly.
+
+**Privacy.** EXCLUDE records whatever the machine is playing. It must never be
+the default, never be silently enabled by a session file without confirmation,
+and the UI must make clear that everything else on the system is being captured.
+
 Capture is **passive** — the app keeps rendering to its real endpoint untouched.
 This is why it avoids the cost of a virtual-cable approach: no insertion into the
 signal path, no extra engine round trip, no reroute. It is also per-**PID**, not
