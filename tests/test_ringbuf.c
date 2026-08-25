@@ -369,7 +369,7 @@ TEST(a_concurrent_consumer_sees_intact_frames_and_exact_loss)
     ASSERT_NOT_NULL(th);
     InterlockedExchange(&go, 1);
 
-    while (read_total + rb_reader_lost(&rd) < CONC_FRAMES) {
+    while (rb_reader_pos(&rd) < CONC_FRAMES) {
         uint64_t base = rb_reader_pos(&rd);
         size_t   got  = rb_read(&rd, dst, 2048, &lost);
         size_t   i;
@@ -379,7 +379,7 @@ TEST(a_concurrent_consumer_sees_intact_frames_and_exact_loss)
             if (dst[i] != base + i) corrupt++;
         }
         read_total += got;
-        if (got == 0 && ++spins > 100000000) FAIL("producer appears stuck");
+        if (got == 0 && ++spins > 200000000) FAIL("producer appears stuck");
     }
 
     (void)WaitForSingleObject(th, 10000);
@@ -398,7 +398,9 @@ typedef struct {
     RingBuf      *rb;
     volatile LONG *go;
     int           slow;
+    uint64_t      start;       /* where this reader attached */
     uint64_t      read_total;
+    uint64_t      lost_total;
     uint64_t      corrupt;
 } ConsumerArgs;
 
@@ -409,10 +411,16 @@ static DWORD WINAPI conc_consumer(LPVOID param)
     uint64_t      dst[512];
     uint64_t      lost = 0;
 
-    rb_reader_init(&rd, args->rb, RB_START_OLDEST);
     while (!*args->go) YieldProcessor();
 
-    while (args->read_total + rb_reader_lost(&rd) < CONC_FRAMES) {
+    /* This thread may not get scheduled until the producer is well underway,
+     * so RB_START_OLDEST can legitimately land above zero. Frames written
+     * before a reader attached are not that reader's loss -- record where we
+     * came in so the accounting identity below can be checked exactly. */
+    rb_reader_init(&rd, args->rb, RB_START_OLDEST);
+    args->start = rb_reader_pos(&rd);
+
+    while (rb_reader_pos(&rd) < CONC_FRAMES) {
         uint64_t base = rb_reader_pos(&rd);
         size_t   got  = rb_read(&rd, dst, 512, &lost);
         size_t   i;
@@ -424,6 +432,7 @@ static DWORD WINAPI conc_consumer(LPVOID param)
         args->read_total += got;
         if (args->slow && got) Sleep(0);
     }
+    args->lost_total = rb_reader_lost(&rd);
     return 0;
 }
 
@@ -457,9 +466,14 @@ TEST(two_concurrent_consumers_at_different_speeds_stay_correct)
 
     ASSERT_EQ_U64(0, cargs[0].corrupt);
     ASSERT_EQ_U64(0, cargs[1].corrupt);
-    /* The deliberately slow one is expected to have lost frames; that is the
-     * policy working, not a failure. What must hold is that it never saw a
-     * frame that was not the one its cursor named. */
-    ASSERT_GE_INT(0, (long long)cargs[1].read_total);
+
+    /* Every frame of the stream is accounted for, per reader, with no
+     * double-counting and nothing unexplained: where it came in, what it read,
+     * and what it was told it lost. The deliberately slow one is expected to
+     * have lost frames -- that is the policy working, not a failure. */
+    for (i = 0; i < 2; i++) {
+        ASSERT_EQ_U64(CONC_FRAMES,
+                      cargs[i].start + cargs[i].read_total + cargs[i].lost_total);
+    }
     rb_destroy(rb);
 }

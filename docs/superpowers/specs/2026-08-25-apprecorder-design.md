@@ -98,6 +98,23 @@ typedef struct Source {
 read the same source. The ring buffer is single-producer / multi-consumer, each
 consumer holding its own read cursor.
 
+**`refcount` is bus bookkeeping, not buffer lifetime.** Because consumers hold
+their own cursors, the ring has no idea how many readers exist and must not be
+taught. Do not wire `refcount` into `ringbuf`.
+
+**Ring sizing.** Rings absorb *mixer scheduling jitter only* — **250 ms**, which
+is 96 KB per source at 48 kHz stereo float32. They are deliberately not sized for
+disk stalls: a slow encoder must not back pressure into a buffer shared by every
+other bus. Each action owns its own write-behind buffering, so I/O hiccups are
+absorbed where they happen. Sizing rings for disk instead would cost ~384 KB per
+source per second of tolerance and blow the single-digit-MB budget for no gain.
+
+**Overrun policy** (implemented, do not revisit without cause): the producer is
+an audio callback and can never block, so the oldest frames are overwritten and
+loss is confined to the reader that fell behind. `rb_read` reports the exact
+skipped-frame count — that number is **not** a diagnostic, it is the input the
+drift corrector uses to synthesize exactly that many frames of silence.
+
 ### 3.2 Bus
 
 Owns N sources, mixes to float32 at the session rate, fans out to M actions.
@@ -341,9 +358,12 @@ src/
   ui/        app.c  canvas.c  node_window.c  tree_panel.c
              theme.c  darkmode.c  dpi.c
   session/   session_load.c  session_save.c
-  platform/  err.c  log.c  str.c  fs.c
+  platform/  err.c  log.c
 tests/       test_runner.h  test_*.c
 ```
+
+`platform/str.c` and `fs.c` appeared in an earlier draft and were never written,
+because nothing needed them. Add them when a second caller exists, not before.
 
 Single owners of cross-cutting concerns:
 

@@ -9,7 +9,8 @@ An Audio Hijack-style **recorder** for Windows: capture audio from chosen apps
 buses, written out to files. Built to give the user more capture buses than his
 GoXLR provides in hardware.
 
-**Status:** brainstorming / design. No code written. No approach approved yet.
+**Status:** design approved. **Wave 1 (Foundation) complete** — see the
+2026-08-25 (wave 1) entry at the bottom. Next: wave 2, the capture spike.
 
 ---
 
@@ -430,3 +431,156 @@ Worth having as a product feature ("record everything except Discord").
 - Then: graduate the COM shim into `src/capture/com_shim.c` + `capture_process.c`.
 - Known spike-level leak to fix on graduation: a late completion callback's
   `punk` is never released after a timeout.
+
+---
+
+## 2026-08-25 (wave 1) — Foundation built, TDD, all green
+
+Build order step 1 of design section 12. `build.cmd Debug test` and
+`build.cmd Release test`: **74 cases across 5 test binaries, 0 failures**,
+`/W4 /WX` clean in both configurations.
+
+### Shipped
+
+| File | What it owns |
+|---|---|
+| `tests/test_runner.h` | Single-header harness. `TEST()` self-registers via `.CRT$XCU`, pinned with `#pragma comment(linker, "/include:...")` so `/OPT:REF` cannot silently empty a Release suite; `main()` also fails outright if zero tests registered. |
+| `include/err.h`, `src/platform/err.c` | `AprErr` value type (no heap, no ownership, copyable, safe to build on a capture thread) + the **only** HRESULT decoder. Hand-written `AUDCLNT_*` table because FormatMessage has no message resource for facility 0x889. |
+| `include/log.h`, `src/platform/log.c` | Levelled log. Compile-time floor erases levels entirely; runtime gate skips argument evaluation. Lock-free bounded MPSC ring, static storage, never allocates. |
+| `include/ringbuf.h`, `src/core/ringbuf.c` | SPMC ring, independent reader cursors, exact overrun accounting. |
+| `include/clock.h`, `src/core/clock.c` | QPC/hns/frame conversions, all exact 128-bit integer; drift and gap arithmetic. |
+
+### Decisions worth not relitigating
+
+- **ringbuf overrun = overwrite the oldest, and tell the reader exactly how
+  many frames it lost.** Blocking the producer is off the table (it is an audio
+  callback); dropping the newest would punish readers that were keeping up. The
+  loss count is not a diagnostic — it is the input the drift corrector needs to
+  synthesise exactly that many frames of silence (design section 5).
+- **ringbuf needs TWO producer cursors,** `claim_pos` (published before the
+  memcpy) and `write_pos` (published after). Publishing only after the copy
+  understates how far into storage the producer has scribbled, so a consumer
+  checking against `write_pos` alone will return frames being overwritten under
+  it. This was a real bug the concurrency tests caught; do not "simplify" it
+  back to one cursor.
+- **log overflow drops the NEWEST record** — the opposite of ringbuf, on
+  purpose. A log ring only fills when the drain is starved, the queued records
+  are the context that explains the stall, and refusing at the door is the only
+  policy that never writes over a slot the consumer is reading. Both files say
+  so in their headers.
+- **Log has a separate real-time path** (`APR_RT0/1/2`): stores a pointer to a
+  static format literal plus up to two int64 values and expands them on the
+  drain thread. It also deliberately does **not** `SetEvent` — a real-time
+  producer makes no kernel call; the drain thread's 250 ms timeout collects
+  them.
+- **clock.c is all integer, and every call takes an ABSOLUTE timestamp.**
+  Converting per buffer and summing floors once per buffer; over 1.08 million
+  10 ms buffers that is minutes of error. There is deliberately no
+  "advance by dt" call, because someone would use it.
+
+### Gotchas for whoever is next
+
+- `AUDCLNT_E_EFFECT_NOT_AVAILABLE` / `_EFFECT_STATE_READ_ONLY` exist only in
+  the Win11 SDK; `err.c` `#ifdef`s them. `AUDCLNT_E_OUT_OF_OFFLOAD_RESOURCES`
+  is the real spelling (not `..._MODES`).
+- `build.cmd` prints a harmless `vswhere.exe not recognized` line from vcvars.
+- The ringbuf and log concurrency tests are real thread tests; if one ever
+  hangs, check the *test's* accounting first — a consumer thread can reach
+  `rb_reader_init` after the producer has started, so `RB_START_OLDEST`
+  legitimately begins above zero and frames written before it attached are not
+  its loss.
+
+### Not done, deliberately
+
+`src/platform/str.c` and `fs.c` from the module layout: nothing needs them yet,
+and inventing an API with no caller is how they end up wrong.
+
+### Reconciled with the spike's section 5 correction
+
+Section 5 was rewritten (commit `e00fef1`) while this wave was in flight.
+Checked the foundation against it — no rework needed, and one thing was already
+right for the right reason:
+
+- **QPF is never assumed to be 10 MHz.** Every `clock.c` conversion takes
+  `qpc_freq` explicitly, and `test_clock.c` runs its whole three-hour timeline
+  at **3,579,545 Hz** precisely so a tick and an hns unit do not coincide. That
+  is the "entire class of unit bug" section 5.2 warns about, and it cannot hide
+  in this suite.
+- `clock.h` now says outright that the anchor comes from `apr_qpc_now()` at
+  buffer arrival and **not** from `pu64QPCPosition` (which the spike showed is
+  the frame counter rescaled, +0.00 ppm by construction), and that
+  `apr_clock_drift` is for **device captures** — process taps are the reference
+  timeline and need none of it.
+- The drift/gap API is unchanged and still correct: it is generic over "frames
+  the clock expected vs frames the source delivered", which is exactly what a
+  device capture needs. `apr_clock_drift(c, t, 0)` returning the whole interval
+  as missing frames is the dropout case, not the silent-app case that turned
+  out not to exist.
+
+---
+
+## 2026-08-25 — Foundation layer COMPLETE and independently verified
+
+74 test cases across 5 suites. **Verified by me, not taken on report:** `build`
+deleted, clean Release build from scratch, `5/5 passed`, and the per-suite
+counts confirmed real (`22 run, 22 passed` clock; `18 run, 18 passed` ringbuf).
+That check mattered specifically because the harness self-registers via
+`.CRT$XCU`; had the `/OPT:REF` pin been wrong, Release would run **zero** tests
+and still report success. It holds.
+
+| File | Owns |
+|---|---|
+| `tests/test_runner.h` | single-header harness, `.CRT$XCU` registration pinned with `/include:` |
+| `include/err.h` + `src/platform/err.c` | error value type; the only HRESULT decoder (41 `AUDCLNT_*` codes hand-tabled) |
+| `include/log.h` + `src/platform/log.c` | levelled log, no alloc on the hot path |
+| `include/ringbuf.h` + `src/core/ringbuf.c` | SPMC ring, per-consumer cursors |
+| `include/clock.h` + `src/core/clock.c` | exact QPC/frame arithmetic + device drift |
+
+### Two things worth not losing
+
+**The ringbuf two-cursor invariant.** One producer cursor is not enough:
+publishing `write_pos` only *after* the memcpy understates how far into storage
+the producer has actually scribbled, so a reader validating against it returns
+frames being overwritten under it. Fixed with `claim_pos` published *before* the
+copy (all safety decisions) and `write_pos` after (availability only).
+**Do not "simplify" this back to one cursor.** Flagged in the source too.
+
+**Clock exactness.** Every conversion is `floor((a*b)/d)` via `_umul128` /
+`_udiv128` — exact 128-bit intermediate, one truncation, error bounded below one
+frame at any session length. No floating point in position math (`apr_drift_ppm`
+is display-only) and **no accumulation**: every call takes an absolute timestamp
+from the anchor, and there is deliberately no "advance by dt" entry point,
+because someone would use it. Tests run a 3-hour timeline at **3,579,545 Hz** so
+a tick and an hns unit cannot coincide — i.e. the tests already avoid the exact
+QPF unit trap that section 5.2 warns about. A control test shows naive
+per-buffer summing drifting >100,000 frames on the same timeline. `clock.c` was
+mutation-tested to prove the tests bite.
+
+### Spec updated from its findings
+
+- **`refcount` is bus bookkeeping, not buffer lifetime** — consumers hold their
+  own cursors, so the ring does not know how many readers exist and must not be
+  taught. Do not wire `refcount` into `ringbuf`. (§3.1)
+- **Ring sizing settled: 250 ms / 96 KB per source.** Rings absorb *mixer
+  scheduling jitter only*. Disk stalls are absorbed by write-behind buffering
+  inside each action, so a slow encoder cannot back-pressure a buffer shared by
+  every other bus. Sizing rings for disk instead would cost ~384 KB per source
+  per second and blow the memory budget for no gain. (§3.1)
+- **`platform/str.c` and `fs.c` removed from the layout** — never written, nothing
+  needed them. Add when a second caller exists. (§7)
+
+### Process note — my error
+
+I ran `git add -A` while agents were mid-flight, so `err.c`, `log.c`,
+`ringbuf.c`, their headers and tests landed in history under a commit message
+about the capture spike. Harmless but wrong attribution. **Stage explicit paths
+while agents are running.**
+
+### Next
+
+- Graduate the COM shim from `spike/spike_loopback.c` (lines 68-219) into
+  `src/capture/com_shim.c`, then `capture_process.c` + `capture_device.c` +
+  `capture_fake.c`. Fix on graduation: late completion callback's `punk` is
+  never released after a timeout.
+- Then core: `graph`, `source`, `bus`, `mix`, `resample`, drift controller.
+- Encoders fan out only after the core shape is settled.
