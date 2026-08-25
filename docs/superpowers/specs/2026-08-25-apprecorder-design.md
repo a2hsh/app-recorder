@@ -554,6 +554,33 @@ Single owners of cross-cutting concerns:
 Each is one `ActionVTable` in one file. They share no state and touch no core
 internals, which makes them the natural unit of parallel work.
 
+### 8.1 LAME is LGPL — this constrains how the binary may be released
+
+`vendor/lame/` holds LAME 3.100, **LGPL-2.0-or-later**, statically linked. Static
+linking is permitted, but **LGPL §6 requires a recipient be able to relink**. So
+a binary release must ship either the object files or this source tree, plus the
+notice. This is a release-engineering obligation, not a build one — it does not
+affect development, and it must not be discovered at release time. Full
+provenance in `vendor/lame/PROVENANCE.md`.
+
+The source was verified across three channels that do not share a distribution
+path: SourceForge (upstream), the Debian archive (**byte-identical by `cmp`**),
+and nixpkgs' pinned hash. No LAME source file is patched; the only file that is
+ours is `vendor/lame/config.h`.
+
+**The decoder is deliberately excluded from the shipping binary.** `config.h`
+defines `HAVE_MPGLIB` without `DECODE_ON_THE_FLY`, so `hip_decode` exists for the
+MP3 test to verify its own output and is absent everywhere else — confirmed by
+string-scanning Release images. Cost of MP3 support overall: 226 KB of
+`lame.lib`, **58 KB in the final image**.
+
+### 8.2 Encoding runs on the writer thread, not `on_audio`
+
+WAV never had to decide this because writing a float is free. LAME's rate loop is
+not: leaving it in `on_audio` would put its per-frame jitter in front of **every
+other bus** sharing the mixer tick. So the ring carries raw float frames and the
+encode happens on the encoder's own writer thread. Opus must do the same.
+
 ---
 
 ## 9. Session persistence

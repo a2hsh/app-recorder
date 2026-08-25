@@ -1616,3 +1616,235 @@ work now.
   too-small buffer trips the CRT invalid-parameter handler, which in Debug is a
   **modal dialog — i.e. a hang** on whatever thread formatted a number. Cost the
   agent real time; do not undo it.
+
+---
+
+## 2026-08-26 — MP3 (`src/actions/action_mp3.c`) + vendored libmp3lame
+
+**Status: landed, 19/19 in its own suite, 17/17 across ctest.** Uncommitted, as
+instructed.
+
+### Vendoring — LAME 3.100, verified three ways
+
+`vendor/lame/` holds LAME 3.100 source, built as one static lib
+(`vendor/lame/CMakeLists.txt`), so there is still no DLL to ship.
+LGPL-2.0-or-later. `vendor/lame/PROVENANCE.md` has the full record; short
+version:
+
+- sha256 `ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e`
+- corroborated by three channels that do not share a distribution path:
+  SourceForge (upstream), the Debian archive (downloaded separately,
+  **byte-identical by `cmp`**), and nixpkgs' pinned nix-base32 hash (decodes to
+  the same digest).
+- **LGPL obligation flagged for release engineering, not code:** static linking
+  is permitted but §6 requires a recipient be able to relink against a modified
+  libmp3lame. That means shipping the object files or this source directory
+  alongside any binary release, plus the licence text and a notice. Recorded in
+  PROVENANCE.md so it is not discovered late.
+
+No `.c` or `.h` under `libmp3lame/` or `mpglib/` was patched — everything diffs
+clean against the tarball. The single file that is ours is
+`vendor/lame/config.h`, standing in for the `config.h` autoconf would generate.
+
+**The one trick worth knowing there:** it defines `HAVE_MPGLIB` *without*
+`DECODE_ON_THE_FLY`. `HAVE_MPGLIB` only controls whether `mpglib_interface.c`
+compiles its `hip_*` entry points; `DECODE_ON_THE_FLY` is the only thing that
+makes the *encoder* reference them. Split that way, the test decodes its own
+output with `hip_decode` while the shipping binary never links the decoder.
+Verified by string-scanning the Release images: mpglib appears in
+`test_action_mp3.exe` and in **none** of `test_registry.exe` (which links the
+whole action table), `test_action_wav.exe`, `test_action_m4a.exe`.
+
+### CMake
+
+One additive block in the root `CMakeLists.txt` (`add_subdirectory` + link);
+nothing existing was touched. `APR_HAVE_ACTION_MP3` needed no edit — the
+registry agent's glob picks the file up on its own.
+
+Warnings for the vendored target: the vendor directory **clears** the inherited
+`COMPILE_OPTIONS` rather than appending `/W0` to `/W4`. Appending works but
+emits D9025 for every translation unit, and 60 lines of "overriding /W4" per
+build is how people learn to stop reading build output. `/W4 /WX` is untouched
+everywhere else.
+
+Consequence to know about: clearing also drops the tree-wide Release `/O1`, so
+it is put back explicitly on the vendor target. Measured: `/O1` vs the default
+`/O2` costs 226 KB of `lame.lib` and **58 KB of the final linked image** — 6% of
+the sub-1 MB budget — and buys back CPU nobody needs.
+
+### The action
+
+Follows `action_wav.c` deliberately: one writer thread, write-behind through
+`core/ringbuf.c`, `on_audio` is `rb_write` + `SetEvent` and nothing else.
+
+**Difference from WAV worth carrying forward: the ring holds raw float frames,
+not encoded bytes, and the ENCODER runs on the writer thread too.** WAV has
+nothing to do on the mixer thread, so it never has to make this choice. LAME is
+a psychoacoustic model plus an iterative rate loop whose cost varies per frame
+with the signal; running it on the mixer thread would make every other bus in
+the session pay this one's bitrate-loop jitter. Any future encoder (Opus) should
+do the same.
+
+- **Float in, float in.** `lame_encode_buffer_interleaved_ieee_float` (stereo) /
+  `lame_encode_buffer_ieee_float` (mono). No int16 round trip anywhere.
+- **CBR 192 kbps by default; VBR supported.** `quality == 0` → CBR at
+  `bitrate_kbps` (0 = 192); `quality` 1..10 → VBR at V(quality-1). CBR is the
+  default because of the kill story below: a VBR file whose Xing tag never got
+  stamped reports a duration estimated from its first frame, while CBR is exact
+  by arithmetic.
+- **Overrun → silence**, exactly the frame count `rb_read` reports, so a stall
+  costs a hole and never a desync.
+- **Sample rate is resampled, not refused.** A 96 kHz session comes out at
+  48 kHz with the same duration (MPEG stops at 48 k). **Channels > 2 ARE
+  refused** at create — a 5.1 bus needs a downmix decision that belongs to the
+  session. `apr_mix_map_channels` is the one-line upgrade if it ever wants that.
+- **The non-finite guard is float-domain and local; it does NOT duplicate the
+  mix.c fix.** `mix.c` clamps NaN/Inf on the float→**integer** path; LAME takes
+  float directly and never goes near that path, so the guard here (NaN/±Inf → 0,
+  finite values clamped to ±1) is an encoder-input precondition, not a format
+  conversion. It matters because one NaN goes through LAME's FFT and turns a
+  whole frame's spectrum into noise — full-scale hash in the user's ears.
+  Tested through LAME end to end.
+
+### Kill mid-recording: verified, not assumed
+
+**MP3 degrades gracefully, and this was checked externally rather than
+asserted.** An MP3 is a bare sequence of self-describing frames, so every byte
+already handed to `WriteFile` is already decodable — no index, no size field, no
+moov atom. There is therefore **no periodic header rewrite here**, unlike WAV.
+
+At the instant of a kill the file holds LAME's reserved frame at offset 0 (a
+valid frame header followed by zeroes — no `Xing`/`Info` magic yet, so a decoder
+treats it as one ordinary 24 ms frame of silence) plus every complete frame
+produced so far. What is missing is only the LAME tag: duration, seek table,
+gapless delay/padding. `finalize` stamps it by writing `lame_get_lametag_frame`
+back over that reserved frame, on every exit path including error paths and a
+`destroy` that never saw a `finalize`.
+
+The exact kill state was reconstructed byte-for-byte (zero the reserved frame,
+cut mid-frame) and run through **ffmpeg/ffprobe**, an implementation independent
+of LAME:
+
+- decodes with **no errors**;
+- 12,225 bytes of 128 kbps CBR → ffprobe reports **0.764 s**, which is
+  `12225*8/128000` to three decimals. Exact by arithmetic — the reason CBR is
+  the default.
+
+ffprobe also confirmed the finalized files: 48 k / stereo / 192 kbps / 1.032 s
+for 1 s of input; an explicit 128 kbps honoured; a 96 kHz session emerging at
+48 kHz with the same duration; and the overrun file reading back at its **full
+input duration** (6.024 s when the test fed 6 s — the suite now feeds 12 s and
+asserts the same property through the decoder).
+
+### Tests: `tests/test_action_mp3.c` (19 cases)
+
+Decoding is via `hip_decode` (see the config.h trick above), so the suite needs
+no Media Foundation and renders nothing to any output device. Covers zero
+frames, double-finalize, destroy-without-finalize, on_audio-after-close,
+NaN/Inf, mid-stream I/O error, first-byte I/O error, bad configs, an unopenable
+path, CBR/VBR, resampling, a mid-recording snapshot, and mid-frame truncation.
+
+**The two headline tests were mutation-checked — they bite:**
+
+- Delete the overrun silence fill → the 12 s recording decodes as 271,872
+  samples instead of 576,000. Fails loudly.
+- Move encode+write into `on_audio` → the feeder thread is still inside its
+  first call after 5 s (`WAIT_TIMEOUT`). Fails loudly.
+
+`apr_wav_test_write_gate`'s technique transferred unchanged as
+`apr_mp3_test_write_gate` / `apr_mp3_test_fail_after_bytes`. **The WAV agent's
+note stands and is now double-confirmed: any action owning a writer thread
+should copy it.**
+
+### Notes for whoever is next
+
+- **A gated test that trips an assertion will hang the whole suite** unless the
+  gate is released on the failing path too — `ASSERT_*` returns immediately, the
+  next test's writer thread parks in the still-installed gate, and `shutdown`'s
+  INFINITE join parks on that. `tp_gate_release()` in the mp3 test exists for
+  exactly this and is called before every early-return assert in a gated test.
+  This bit for real: a mutant build left a `test_action_mp3.exe` hung for
+  minutes with two threads and no CPU, which then held the link lock. **If a
+  build fails with `LNK1168: cannot open <test>.exe for writing`, look for a
+  hung test process before assuming another agent has it open.** Copy the
+  pattern into any future gated test.
+- `lame_get_lametag_frame(gfp, NULL, 0)` returns the *required size*; call it
+  once for the size and once for the bytes. The write-back deliberately bypasses
+  the full-disk seam — overwriting an already-allocated block is exactly what
+  still succeeds on a full volume, and that is what keeps the file playable.
+- LAME's own diagnostics are routed into `log.h` via `lame_set_errorf`; `msgf`
+  and `debugf` are no-ops. It is chatty at init and a GUI process has no stderr
+  worth writing to.
+
+---
+
+## 2026-08-26 — MP3 COMPLETE. All four encoders done.
+
+`vendor/lame/` = **LAME 3.100**, one static library. 19 cases, 17/17 suites,
+Debug and Release green.
+
+### Vendoring verified three ways
+
+sha256 `ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e`,
+corroborated across three channels that do not share a distribution path:
+SourceForge (upstream), the Debian archive (downloaded separately,
+**byte-identical by `cmp`**), and nixpkgs' pinned nix-base32 hash. Record in
+`vendor/lame/PROVENANCE.md`. No LAME `.c`/`.h` patched — everything diffs clean
+against the tarball. The only file that is ours is `vendor/lame/config.h`.
+
+### ⚠ RELEASE OBLIGATION — do not discover this at release time
+
+**LGPL-2.0-or-later. Static linking is permitted, but §6 requires a recipient be
+able to relink**, so a binary release must ship the object files or this source
+tree plus the notice. Now recorded in spec **§8.1**. Development is unaffected.
+
+**Decoder deliberately excluded from the shipping binary:** `config.h` defines
+`HAVE_MPGLIB` **without** `DECODE_ON_THE_FLY`, so `hip_decode` exists for the MP3
+test to verify its own output and is absent everywhere else — confirmed by
+string-scanning Release images (present in `test_action_mp3.exe`, in none of
+`test_registry`, `test_action_wav`, `test_action_m4a`). Cost: 226 KB of
+`lame.lib`, **58 KB of final image** — 6% of the size budget.
+
+### CBR 192 kbps default; VBR supported (`quality` 0 = CBR, 1–10 = V0–V9)
+
+**CBR wins the default on the kill case:** a VBR file whose Xing tag was never
+stamped reports a duration estimated from its first frame, while CBR duration is
+exact by arithmetic.
+
+### Kill mid-recording — verified externally, and MP3 degrades gracefully
+
+No periodic header rewrite is needed (unlike WAV). A kill leaves LAME's reserved
+frame at offset 0 (valid header + zeroes → one 24 ms silent frame) plus every
+complete frame written; only the LAME tag is missing. The agent reconstructed
+that state byte-for-byte and ran it through **ffmpeg/ffprobe, independent of
+LAME**: decodes with no errors, and 12,225 bytes of 128 kbps CBR reports
+**0.764 s** = `12225*8/128000` exactly.
+
+**So: WAV and MP3 both survive a kill. M4A does not** — that decision is still
+open for the author.
+
+### Encoding runs on the writer thread — now spec §8.2
+
+The ring carries raw float; encode happens on the encoder's writer thread. LAME's
+rate loop in `on_audio` would put per-frame jitter in front of **every other
+bus** sharing the mixer tick. Opus must do the same.
+
+### ⚠ Explains the earlier `LNK1168`
+
+A gated test that trips an assertion **hangs the whole suite** — the next test's
+writer thread parks in the still-installed gate. `tp_gate_release()` fixes it.
+This happened for real: a mutant build left a hung `test_action_mp3.exe` holding
+the link lock, which presents as `LNK1168: cannot open ... for writing` and looks
+exactly like another agent's file lock. **My earlier diagnosis of that as an
+inter-agent race was wrong** — worth knowing, because the real cause is a hung
+test process that will not clear on its own.
+
+### Note
+
+Clearing the vendor directory's inherited warning flags (to avoid 60 D9025 lines
+per build) also drops the tree-wide Release `/O1`; it is put back explicitly in
+the vendor target. Do not remove that line.
+
+### Status: all four encoders complete — WAV, MP3, OGG*, M4A
+
+*OGG/Opus not yet written; WAV, MP3, M4A are done.
