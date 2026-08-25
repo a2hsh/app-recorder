@@ -1,0 +1,12 @@
+build/
+.vs/
+*.obj
+*.pdb
+*.ilk
+*.exe
+*.lib
+*.wav
+*.mp3
+*.ogg
+*.m4a
+!tests/golden/*.wav
