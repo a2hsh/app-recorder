@@ -249,3 +249,184 @@ since volume 0 cannot be loud.** Answer this before restarting the spike.
 `spike/spike_loopback.c` exists but is unreviewed and unverified. Its findings —
 including the silence-behaviour question that section 5 depends on — are still
 unknown. Restart only under the rules above.
+
+---
+
+## 2026-08-25 (later) — Capture spike RESTARTED and COMPLETE (under AGENTS.md rule #1)
+
+Spike agent re-run. **No audio was rendered to the default endpoint audibly at any
+point.** See "What was played" below for the exact disclosure.
+
+### Files
+
+- `spike/spike_silentplayer.c` — **NEW.** Inaudible-by-construction WASAPI render
+  process, built only so loopback has something to capture. Three enforced
+  safety properties: volume gate (set + read back + verify before `Start()`,
+  fail-closed), finite frame budget (no playback loop, bounded twice), watchdog
+  thread armed before any audio object that `TerminateProcess`es itself.
+  `MAX_SAFE_VOLUME 0.001f` is a hard ceiling; default volume is `0.0`.
+- `spike/spike_loopback.c` — reviewed, kept, extended with a non-silence check
+  and a "is `pu64QPCPosition` an independent clock?" analysis.
+
+Both compile clean under `/W4 /WX` and are **left uncommitted** in the working tree.
+
+### Answer to the standing open question
+
+**Does process loopback capture non-silent data from a process whose session
+volume is 0?  NO.** Loopback sits **post-session-volume**.
+
+| player session volume | endpoint amplitude | captured PEAK |
+|---|---|---|
+| 0.0 | 0.0 | **0.000000000** (0 of 1,534,080 samples non-zero) |
+| 0.0001 | 0.000025 | **0.000025000** (= 0.25 x 1e-4 exactly) |
+
+The volume-0 player was independently proven to have really rendered:
+`IAudioClock` reported 3456000/384000 = **9.000 s actually consumed by the
+engine**. So the app rendered, and loopback still recorded pure digital silence.
+
+**Consequences.**
+1. Session volume 0 is **not** a usable test harness — it records as silence.
+   A tiny non-zero volume (1e-4 = -80 dB, i.e. -92 dBFS at the endpoint) **is**,
+   and that is what the remaining measurements used.
+2. **Product fact for the design:** a user who mutes an app in the Windows volume
+   mixer will record silence from it. Section 4.1 must say so, and the UI should
+   probably warn when a captured source's session volume is 0.
+
+### Section 5 is CONTRADICTED — the drift design must change
+
+Design 4.1 gotcha #2 and section 5 assume *"a silent app produces no buffers at
+all"* and that silence must be synthesized from timestamp gaps. **Both false for
+process loopback.** Measured:
+
+- **The stream is continuous and gapless regardless of the target.** 120 s
+  capture against a process that never called `Start()`: 11,999 packets,
+  every one exactly 480 frames, **100% fill, zero gaps, zero timeouts**.
+  It also keeps delivering after the target process **exits**.
+- `AUDCLNT_BUFFERFLAGS_SILENT` was **never** set — not once in ~190 s of capture.
+  Quiet arrives as ordinary buffers full of real 0.0f samples.
+- `AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY` / `TIMESTAMP_ERROR`: never seen.
+- `pu64DevicePosition` is **always 0** and never advances. Unusable.
+- `pu64QPCPosition` advances by **exactly** `frames * 1e7 / 48000` — 11,998 of
+  11,998 deltas exact, +0.00 ppm. **It is the frame counter rescaled and carries
+  no independent clock information**, so it cannot reveal the app's render drift.
+  Stream rate vs `QueryPerformanceCounter`: -6.51 ppm over 120 s, within the
+  ~8 ppm noise of the measurement.
+
+So for **process** sources there is no gap to synthesize and no drift to detect
+from the timestamps: the OS already hands us a perfect 48 kHz timeline. The
+silence-synthesis and PI-controller machinery is still needed, but for **device**
+sources (real hardware crystals) and for aligning process sources against them —
+drift must be measured against `QueryPerformanceCounter` sampled at capture time.
+**Do not build section 5's gap detection on `pu64QPCPosition` for process taps.**
+
+Caveat: `QueryPerformanceFrequency` is exactly 10,000,000 Hz on this machine, so
+raw QPC ticks and 100 ns units coincide here. That masks a whole class of unit
+bug — production code must scale by QPF, never assume.
+
+### Other HRESULTs / facts worth not rediscovering
+
+- `GetMixFormat` -> `E_NOTIMPL (0x80004001)` on a process-loopback client, as the
+  design predicted. **`GetDevicePeriod` also returns `E_NOTIMPL`** — the design
+  does not mention this one.
+- Supplying 48000/2/float32 `WAVE_FORMAT_EXTENSIBLE` to `Initialize` with
+  `hnsBufferDuration = 0` yields a 480-frame (10 ms) buffer and works.
+- The hand-written vtable worked **first try**, including `IID_IAgileObject`.
+  Activation callback lands on a **different thread** (verified by TID).
+- `PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE` genuinely walks the tree:
+  capturing `cmd.exe`'s PID picked up a tone rendered by its **child** process.
+- Capture is bit-exact: recovered 440.0 Hz at RMS 0.000017678 vs theoretical
+  0.25 x 1e-4 / sqrt(2) = 0.000017678.
+
+### Deliberately NOT tested
+
+`PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE` captures everything *except*
+the target — running it would have written whatever the author was listening to
+into a WAV file. Privacy, not safety, but not the agent's call to make.
+
+### What was played, exactly (AGENTS.md disclosure)
+
+440 Hz sine, source amplitude 0.25, rendered by `spike_silentplayer.exe` to the
+default endpoint in 9 s bursts (3 s tone / 3 s digital zeros / 3 s tone), across
+5 runs. Session volume was **0.0** (2 runs, endpoint amplitude exactly 0.0) or
+**0.0001** (3 runs, endpoint amplitude 0.000025 = -92 dBFS, roughly -2 dB SPL —
+inaudible). Every run's volume was read back and verified before `Start()`.
+Longest single render: 9.000 s. All processes self-terminated; zero leftover
+processes afterwards. **Nothing was looped.**
+
+---
+
+## 2026-08-25 — Capture spike COMPLETE. Section 5 was wrong; spec corrected.
+
+**Process loopback works from plain C.** Vtable pattern proven first try,
+`IAgileObject` included. Zero unexpected HRESULTs. Capture verified bit-exact:
+recovered 440.0 Hz at RMS 0.000017678 against a theoretical 0.000017678.
+`INCLUDE_TARGET_PROCESS_TREE` confirmed to walk children (captured a shell's PID,
+got its child's tone) — required for browsers and Electron.
+
+Working shim: `spike/spike_loopback.c` lines 68-219, marked `COM SHIM`, ready to
+graduate into `src/capture/com_shim.c`. Load-bearing detail: embed the SDK
+interface **by value** as the first member (`IActivateAudioInterfaceCompletionHandler base;`)
+rather than hand-rolling `lpVtbl` — layout-identical but type-checks against
+`COBJMACROS`. `CONST_VTBL` is empty in C so the vtable assignment needs a cast.
+
+### The big finding: section 5's premise was false
+
+The design assumed *"a silent app produces no buffers"*, which is why silence was
+to be synthesized from timestamp gaps. **Measured: the opposite.** Over 120 s
+against a process that never called `Start()` — 11,999 packets, every one exactly
+480 frames, 100% fill, zero gaps. `AUDCLNT_BUFFERFLAGS_SILENT` never set in
+~190 s. Quiet arrives as real `0.0f` samples.
+
+Worse, `pu64QPCPosition` is **the frame counter rescaled** (+0.00 ppm,
+11,998/11,998 deltas exact) — it carries no independent clock information, so
+gap/drift detection built on it for process taps could never fire. Dead code.
+`pu64DevicePosition` is always 0 and unusable.
+
+**Spec rewritten (section 5.1/5.2):** process taps are the *reference timeline*;
+device captures are the only sources that drift and the only ones needing the PI
+controller, gap fill, and discontinuity handling. A mixed bus resamples the
+*device* side onto the engine timeline; the process side passes through
+untouched. Simpler than the original design, and the machinery now sits where the
+drift actually is.
+
+### Other verified facts now in the spec
+
+- **`GetDevicePeriod` also returns `E_NOTIMPL`** (design had only predicted
+  `GetMixFormat`). Pass `hnsBufferDuration = 0`, accept 480 frames / 10 ms.
+- **Loopback is post-session-volume**, linear, no other gain in the path. A
+  **muted app records as pure silence** while the engine still reports it
+  rendering. UI must warn on session volume 0. Also means volume-0 is *not* a
+  safe test harness; `1e-4` (-92 dBFS, inaudible) is — that is what the spike used.
+- **Capture continues forever after the target process exits**, silently, with no
+  error. WASAPI never signals source death. Section 10 now requires
+  `OpenProcess(SYNCHRONIZE, ...)` + wait as the only reliable detector.
+- **`QueryPerformanceFrequency` was exactly 10,000,000 Hz on this machine**, so
+  raw QPC ticks and 100 ns units coincide — this masks an entire class of unit
+  bug. Production code must always scale by QPF. **Check the foundation agent's
+  `clock.c` against this.**
+
+### Safety: clean
+
+440 Hz, 9 s one-shot bursts, 5 runs, session volume 0.0 or 0.0001 (-92 dBFS,
+inaudible), verified by read-back before every `Start()`. Nothing looped, all
+processes self-terminated, zero leftovers confirmed. `spike/spike_silentplayer.c`
+enforces this structurally: fail-closed volume gate, hard `MAX_SAFE_VOLUME 0.001f`
+ceiling that refuses before creating any COM object, doubly-bounded finite frame
+budget, and a watchdog thread armed before any audio object that
+`TerminateProcess`es itself.
+
+### Deferred to the author — a privacy call, not a technical one
+
+The spike deliberately did **not** test
+`PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE`, which captures everything
+*except* the named process — testing it would have written whatever the author
+was listening to into a WAV. Correct judgement. **Ask before exercising it.**
+Worth having as a product feature ("record everything except Discord").
+
+### Next
+
+- Review foundation agent's output when it lands, especially `clock.c` vs the QPF
+  caveat and the corrected section 5.
+- Then: graduate the COM shim into `src/capture/com_shim.c` + `capture_process.c`.
+- Known spike-level leak to fix on graduation: a late completion callback's
+  `punk` is never released after a timeout.

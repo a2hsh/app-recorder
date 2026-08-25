@@ -91,8 +91,8 @@ static const HrEntry g_hr_table[] = {
       L"A stream flag is not valid for this activation."),
     E(AUDCLNT_E_ENDPOINT_OFFLOAD_NOT_CAPABLE,
       L"The endpoint cannot do offloaded audio."),
-    E(AUDCLNT_E_OUT_OF_OFFLOAD_MODES,
-      L"No offload modes are available on this endpoint."),
+    E(AUDCLNT_E_OUT_OF_OFFLOAD_RESOURCES,
+      L"The endpoint has no offload resources left."),
     E(AUDCLNT_E_OFFLOAD_MODE_ONLY,
       L"The endpoint supports offload mode only."),
     E(AUDCLNT_E_NONOFFLOAD_MODE_ONLY,
@@ -109,10 +109,15 @@ static const HrEntry g_hr_table[] = {
       L"The operation is not allowed while head tracking is enabled."),
     E(AUDCLNT_E_HEADTRACKING_UNSUPPORTED,
       L"The endpoint does not support head tracking."),
+    /* Added in the Windows 11 SDK; the project's floor is the 19041 SDK. */
+#ifdef AUDCLNT_E_EFFECT_NOT_AVAILABLE
     E(AUDCLNT_E_EFFECT_NOT_AVAILABLE,
       L"The requested audio effect is not available on this endpoint."),
+#endif
+#ifdef AUDCLNT_E_EFFECT_STATE_READ_ONLY
     E(AUDCLNT_E_EFFECT_STATE_READ_ONLY,
       L"The audio effect's state is read-only."),
+#endif
 
     E(AUDCLNT_S_BUFFER_EMPTY,
       L"No capture data was available this pass."),

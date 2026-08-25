@@ -159,19 +159,43 @@ ActivateAudioInterfaceAsync(VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
                             &IID_IAudioClient, &pv, handler, &op);
 ```
 
-**Three gotchas that must be handled, not discovered:**
+**Verified behaviour** (spike, 2026-08-25 — measured, not assumed):
 
-1. **`GetMixFormat` returns `E_NOTIMPL` on a process-loopback client.** There is
+1. **`GetMixFormat` returns `E_NOTIMPL`** on a process-loopback client. There is
    no device to ask. We *supply* the format to `Initialize` — session rate, 2ch,
-   float32 — rather than negotiating it. This is why `WaveFormat` is a
-   session-level decision, not a per-source one.
-2. **A silent app produces no buffers at all.** If we simply append what arrives,
-   every track desyncs the moment an app goes quiet. Silence must be
-   *synthesized from timestamp gaps* (section 5). This is the single most likely
-   source of sync bugs in the project.
-3. Requires `AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK`,
-   MTA, and `hnsBufferDuration = 0`. The completion handler signals an event the
-   opening thread waits on.
+   float32 `WAVE_FORMAT_EXTENSIBLE` — rather than negotiating. This is why
+   `WaveFormat` is a session-level decision, not a per-source one.
+   **`GetDevicePeriod` returns `E_NOTIMPL` too.** Pass `hnsBufferDuration = 0`
+   and accept what you get (480 frames / 10 ms in practice).
+2. **The stream is continuous and gapless regardless of what the target does.**
+   Measured over 120 s against a process that never called `Start()`: 11,999
+   packets, *every one exactly 480 frames, 100% fill, zero gaps, zero timeouts*.
+   Quiet arrives as ordinary buffers full of real `0.0f` samples.
+   `AUDCLNT_BUFFERFLAGS_SILENT` was **never set** in ~190 s of capture, and
+   neither was `DATA_DISCONTINUITY` or `TIMESTAMP_ERROR`.
+   **There is nothing to synthesize for a process tap.** An earlier draft of this
+   document asserted the opposite; see section 5.
+3. **`pu64DevicePosition` is always 0.** Unusable. Do not read it.
+4. **`pu64QPCPosition` is the frame counter rescaled**, advancing by exactly
+   `frames × 1e7 / 48000` (11,998 of 11,998 deltas exact, +0.00 ppm). It carries
+   **no independent clock information** and cannot reveal an app's render drift.
+5. **Loopback is post-session-volume.** Captured amplitude scales linearly with
+   the target's volume in the Windows mixer, with no other gain in the path
+   (volume `1e-4` yielded captured peak `0.000025` = exactly `0.25 × 1e-4`).
+   **A muted app records as pure silence** even though the engine confirms it is
+   rendering. The UI must warn when a captured source's session volume is 0.
+6. **Capture continues after the target process exits** — silence, forever, with
+   no error. **WASAPI will never tell you a source died.** See section 10.
+7. Requires `AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK`,
+   MTA, and `hnsBufferDuration = 0`. The completion handler fires on a *different*
+   thread; signal an event the opening thread waits on.
+8. `QueryInterface` on the completion handler must succeed for `IID_IUnknown`,
+   `IID_IActivateAudioInterfaceCompletionHandler`, **and `IID_IAgileObject`**.
+   Two HRESULTs come back from activation — `GetActivateResult`'s own return
+   *and* its out-parameter. Check both.
+9. `PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE` genuinely walks the tree:
+   capturing a shell's PID picks up a tone rendered by its child. Required for
+   browsers and Electron apps.
 
 Capture is **passive** — the app keeps rendering to its real endpoint untouched.
 This is why it avoids the cost of a virtual-cable approach: no insertion into the
@@ -209,27 +233,57 @@ sample-appending leaves tracks visibly out of sync.
 **Decision: sample-accurate alignment.** Alignment cannot be retrofitted into
 files already written; over-building here is recoverable, under-building is not.
 
-**Mechanism:**
+### 5.1 Correction — the two source kinds are not symmetric
 
-1. `IAudioCaptureClient::GetBuffer` yields `pu64QPCPosition` (100 ns units). QPC
-   is the single master timeline for the whole session.
-2. Each source records a `ClockAnchor` at its first frame. Every buffer
-   thereafter carries an absolute QPC timestamp.
-3. The mixer pulls at a fixed cadence. For each source it compares *expected*
-   frame count (derived from elapsed QPC) against *actual* frames available:
-   - **Gap** (silent app, or dropout) then synthesize silence to fill it.
-   - **Steady divergence** is clock drift. A slow PI controller nudges a
-     fractional resample ratio; correction is applied gradually so it is never
-     audible.
-   - `AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY` is treated as a gap and logged.
+An earlier draft treated all sources alike and planned to detect gaps and drift
+from `pu64QPCPosition`. **The spike disproved that.** For process taps that field
+is the frame counter rescaled: it reports +0.00 ppm by construction and can never
+fire a gap or drift check. Code built on it would be dead code.
+
+The real picture:
+
+| | **Process tap** | **Device capture** |
+|---|---|---|
+| Timeline | audio engine — gapless, 100% fill, always | hardware crystal |
+| Silence | real `0.0f` samples, never a gap | genuine dropouts possible |
+| Drift vs QPC | none meaningful (measured −6.51 ppm over 120 s, inside the ~8 ppm noise floor) | **real, and the whole problem** |
+| Death signal | none — keeps emitting silence forever | endpoint removal is reported |
+
+**So process taps are the reference timeline, and device captures are what must
+be corrected onto it.** This is simpler than the original design, and it puts the
+machinery where the drift actually is.
+
+### 5.2 Mechanism
+
+1. **Master timeline is `QueryPerformanceCounter` sampled at capture time** — not
+   `pu64QPCPosition`, which is derived and therefore useless for this.
+   **Always scale by `QueryPerformanceFrequency`.** QPF happened to be exactly
+   10,000,000 Hz on the spike machine, which makes raw ticks and 100 ns units
+   coincide and silently hides an entire class of unit bug. Never assume it.
+2. Each source records a `ClockAnchor` at its first frame: QPC at arrival, plus
+   its own frame counter.
+3. **Process taps** are consumed directly. No gap synthesis, no silence fill, no
+   discontinuity handling. They arrive perfect; treat them as perfect.
+4. **Device captures** get the full treatment, because they are the only sources
+   that need it:
+   - Compare frames delivered against QPC elapsed since the anchor.
+   - **Steady divergence is crystal drift.** A slow PI controller nudges a
+     fractional resample ratio, applied gradually so it is never audible.
+   - `AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY` is a real gap here — fill with
+     silence and log it.
    - `AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR` falls back to frame counting for that
      buffer and must not poison the anchor.
-4. Resampling is windowed-sinc, in `core/resample.c`, shared by every path. One
-   implementation, used everywhere — no per-source variants.
+5. Resampling is windowed-sinc, in `core/resample.c`, shared by every path. One
+   implementation — no per-source variants.
+
+**Consequence for mixed buses.** A bus combining a process tap and a device
+capture (the common case: "Teams plus my mic") resamples the *device* side onto
+the engine timeline. The process side passes through untouched.
 
 **Test strategy:** the fake source can be given a deliberately wrong clock rate
-(for example +30 ppm). A simulated multi-hour session must end with alignment
-error below one sample. This runs in milliseconds and needs no hardware.
+(for example +30 ppm) to stand in for a device capture. A simulated multi-hour
+session must end with alignment error below one sample. Runs in milliseconds,
+needs no hardware.
 
 ---
 
@@ -330,10 +384,21 @@ matched on reopen by executable path and window class, falling back to prompting
 ## 10. Error handling
 
 Failure of one source must never take down a session. A source that fails to
-open, or dies mid-recording (app closed), transitions to a `SRC_FAILED` state,
-synthesizes silence to keep alignment intact, surfaces in the UI, and recording
-continues. Files are always finalized to a playable state — every action's
-`finalize` is called on any exit path.
+open, or dies mid-recording, transitions to `SRC_FAILED`, surfaces in the UI, and
+recording continues. Files are always finalized to a playable state — every
+action's `finalize` is called on any exit path.
+
+**Process death needs its own detector.** The spike confirmed that process
+loopback keeps delivering silence indefinitely after the target exits, with no
+error and no flag. WASAPI will never tell us the app is gone. Each process source
+therefore holds a handle from `OpenProcess(SYNCHRONIZE, ...)` and waits on it; a
+signalled handle is the *only* reliable death signal. Without this, closing Teams
+mid-session yields hours of silence that looks like a successful recording.
+
+**Muted sources look identical to dead ones.** Because loopback is
+post-session-volume, an app muted in the Windows mixer records as pure silence.
+Poll the source's `ISimpleAudioVolume` and warn in the UI — this will otherwise
+be the single most common "why is my recording empty" support question.
 
 ---
 

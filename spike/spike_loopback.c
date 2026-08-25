@@ -303,6 +303,10 @@ typedef struct PacketRec {
 static PacketRec  g_pkt[MAX_EVENTS];
 static size_t     g_pkt_n;
 static size_t     g_allzero_pkts;
+static float      g_peak_all;        /* max |sample| over the whole capture */
+static double     g_sumsq;           /* for overall RMS                     */
+static UINT64     g_nonzero_samples; /* samples with |x| > 0                */
+static UINT64     g_total_samples;
 
 static LARGE_INTEGER g_qpf;
 
@@ -504,10 +508,15 @@ int wmain(int argc, wchar_t **argv)
                     for (k = 0; k < n; k++) {
                         float a = s[k] < 0 ? -s[k] : s[k];
                         if (a > peak) peak = a;
+                        if (a > 0.0f) g_nonzero_samples++;
+                        g_sumsq += (double)s[k] * (double)s[k];
                     }
+                    g_total_samples += n;
+                    if (peak > g_peak_all) g_peak_all = peak;
                     wav_write(&wav, data, (size_t)frames * BYTES_PER_FR);
                     if (peak == 0.0f) g_allzero_pkts++;
                 } else {
+                    g_total_samples += (UINT64)frames * CHANNELS;
                     /* SILENT means pData is undefined -- must not be copied. */
                     wav_write_silence(&wav, frames);
                     silent_frames += frames;
@@ -568,6 +577,24 @@ stoploop:
         wprintf(L"DATA_DISCONTINUITY  : %zu\n", n_discont);
         wprintf(L"TIMESTAMP_ERROR     : %zu\n", n_tserr);
         wprintf(L"wav data bytes      : %llu\n", (unsigned long long)wav.data_bytes);
+        wprintf(L"wav duration        : %.3f s\n",
+                (double)wav.data_bytes / (double)(SAMPLE_RATE * BYTES_PER_FR));
+
+        wprintf(L"\n--- NON-SILENCE CHECK --------------------------------------\n");
+        wprintf(L"packets w/ all-zero PCM (not SILENT-flagged): %zu\n", g_allzero_pkts);
+        wprintf(L"samples examined    : %llu\n", (unsigned long long)g_total_samples);
+        wprintf(L"samples != 0        : %llu  (%.2f%%)\n",
+                (unsigned long long)g_nonzero_samples,
+                g_total_samples ? 100.0 * (double)g_nonzero_samples / (double)g_total_samples : 0.0);
+        wprintf(L"PEAK |sample|       : %.9f\n", (double)g_peak_all);
+        if (g_total_samples) {
+            double rms = sqrt(g_sumsq / (double)g_total_samples);
+            wprintf(L"RMS                 : %.9f  (%.1f dBFS)\n",
+                    rms, rms > 0 ? 20.0 * log10(rms) : -999.0);
+        }
+        wprintf(L"VERDICT             : %s\n",
+                g_peak_all > 0.0f ? L"NON-SILENT DATA CAPTURED"
+                                  : L"ALL SILENCE (no non-zero sample seen)");
     }
 
     /* QPC unit check: is pu64QPCPosition really 100ns and on the same base as
@@ -587,9 +614,50 @@ stoploop:
                 dq_100ns, dq_100ns / 10000.0, dwall_ms);
         wprintf(L"last pu64QPCPosition vs QPC-now: %.1f ms behind\n",
                 (now_100ns - (double)z->qpc) / 10000.0);
-        wprintf(L"device position delta     : %llu frames (%.1f ms)\n",
+        wprintf(L"device position delta     : %llu frames (%.1f ms)  %s\n",
                 (unsigned long long)(z->devpos - a->devpos),
-                (double)(z->devpos - a->devpos) * 1000.0 / SAMPLE_RATE);
+                (double)(z->devpos - a->devpos) * 1000.0 / SAMPLE_RATE,
+                (a->devpos == 0 && z->devpos == 0) ? L"<<< pu64DevicePosition NEVER ADVANCES" : L"");
+
+        /* Is pu64QPCPosition an independent clock, or just the frame counter
+         * rescaled?  If every inter-packet delta equals frames*1e7/rate exactly,
+         * it carries no clock information and cannot reveal drift. */
+        {
+            size_t k, exact = 0, jumps = 0;
+            double biggest_jump_ms = 0.0;
+            UINT64 frames_between = 0;
+            double ideal_100ns, recv_100ns, ppm_vs_ideal, ppm_vs_qpc;
+
+            for (k = 1; k < g_pkt_n; k++) {
+                double expect = (double)g_pkt[k - 1].frames * 10000000.0 / SAMPLE_RATE;
+                double actual = (double)(g_pkt[k].qpc - g_pkt[k - 1].qpc);
+                double err_ms = (actual - expect) / 10000.0;
+                if (err_ms < 0) err_ms = -err_ms;
+                if (err_ms < 0.0005) exact++;
+                else {
+                    jumps++;
+                    if (err_ms > biggest_jump_ms) biggest_jump_ms = err_ms;
+                }
+                frames_between += g_pkt[k - 1].frames;
+            }
+            ideal_100ns  = (double)frames_between * 10000000.0 / SAMPLE_RATE;
+            recv_100ns   = (z->t_ms - a->t_ms) * 10000.0;
+            ppm_vs_ideal = ideal_100ns > 0 ? (dq_100ns - ideal_100ns) / ideal_100ns * 1e6 : 0.0;
+            ppm_vs_qpc   = recv_100ns  > 0 ? (ideal_100ns - recv_100ns) / recv_100ns * 1e6 : 0.0;
+
+            wprintf(L"\n--- is pu64QPCPosition an independent clock? ---------------\n");
+            wprintf(L"inter-packet deltas EXACTLY frames*1e7/48000 : %zu of %zu\n",
+                    exact, g_pkt_n - 1);
+            wprintf(L"deltas that jumped                           : %zu (biggest %.2f ms)\n",
+                    jumps, biggest_jump_ms);
+            wprintf(L"sum(qpcpos deltas) vs frames-derived ideal   : %.0f vs %.0f (100ns) "
+                    L"=> %+.2f ppm\n", dq_100ns, ideal_100ns, ppm_vs_ideal);
+            wprintf(L"loopback stream rate vs QueryPerformanceCounter: %+.2f ppm over %.1f s\n",
+                    ppm_vs_qpc, recv_100ns / 1e7);
+            wprintf(L"=> %s\n", (jumps == 0)
+                    ? L"pu64QPCPosition is the FRAME COUNTER RESCALED. No independent clock info."
+                    : L"pu64QPCPosition is frame-derived between jumps; jumps are the only signal.");
+        }
     }
 
     /* Gap analysis: this is the silence-behaviour evidence. */
