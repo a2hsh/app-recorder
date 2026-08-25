@@ -111,25 +111,58 @@ source per second of tolerance and blow the single-digit-MB budget for no gain.
 
 **Overrun policy** (implemented, do not revisit without cause): the producer is
 an audio callback and can never block, so the oldest frames are overwritten and
-loss is confined to the reader that fell behind. `rb_read` reports the exact
-skipped-frame count — that number is **not** a diagnostic, it is the input the
-drift corrector uses to synthesize exactly that many frames of silence.
+loss is confined to the reader that fell behind.
+
+**Silence fill happens on two different sides — an earlier draft of this section
+conflated them.** They are not the same mechanism:
+
+- **Producer side.** `rb_write_silence()` is a *producer* call. It belongs to
+  `capture_device` filling a real hardware gap on
+  `AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY`. A reader can never call it.
+- **Consumer side.** `rb_read`'s skipped-frame count tells a *reader* it was
+  lapped. The mixer fills that by emitting zeros into **its own output**, then
+  resuming at the true absolute frame position.
+
+**The overrun contract, stated as policy rather than left to each reader:** a
+stall longer than the ring loses that audio permanently. When that happens we
+choose **alignment over content** — emit exactly as many zeros as were lost and
+resume at the correct absolute frame. A hole is recoverable; a permanent
+timeline shift silently ruins every track on the bus. This bound is pinned by a
+test.
 
 ### 3.2 Bus
 
 Owns N sources, mixes to float32 at the session rate, fans out to M actions.
 
+**An edge is a struct, not an index.** An earlier draft stored `SourceId
+sources[]` with a parallel `gain[]`, which is a *tree* — it has nowhere to put
+per-edge state. Two buses reading one source each need their **own** ring
+cursor, their own resampler, and their own drift controller, because they
+consume at independent positions. Per-edge state is what makes this a graph:
+
 ```c
+typedef struct BusEdge {
+    SourceId     source;
+    float        gain;          /* linear */
+    RingReader   reader;        /* this bus's own cursor into the source */
+    AprResampler *rs;           /* NULL for reference sources — see 5.2 */
+    AprDrift     drift;         /* this edge's own controller */
+} BusEdge;
+
 typedef struct Bus {
     BusId    id;
     wchar_t  name[64];
-    SourceId sources[MAX_SOURCES_PER_BUS];
-    float    gain[MAX_SOURCES_PER_BUS];   /* per-source, linear */
-    size_t   source_count;
+    BusEdge  edges[MAX_SOURCES_PER_BUS];
+    size_t   edge_count;
     Action  *actions[MAX_ACTIONS_PER_BUS];
     size_t   action_count;
 } Bus;
 ```
+
+**Which sources are "reference" cannot be derived from `AprSourceKind` alone.**
+Design 4.3 requires the whole core to be testable with no hardware, and a fake
+source standing in for a process tap is not `APR_SRC_PROCESS`. Reference status
+is therefore an explicit property with an override, not a `switch` on kind.
 
 "Record Teams and my mic" is one bus, two sources, one action. Recording them
 separately is two buses. Same code path.
@@ -303,6 +336,27 @@ be corrected onto it.** This is simpler than the original design, and it puts th
 machinery where the drift actually is.
 
 ### 5.2 Mechanism
+
+**The mixer deliberately lags wall clock by 50 ms.** This was missing from an
+earlier draft and is arguably the most load-bearing decision in the whole sync
+design. Nobody listens in real time (see 1.3), so latency is free — and buying
+it pays for three things at once:
+
+- Data is always already in the ring when a block renders.
+- **A device's jitter buffer costs no alignment.** Holding its backlog at exactly
+  the lookbehind means the instant its buffer fills is the instant the bus
+  reaches its true start. Without this, a mic sits a *fixed* 50 ms behind the
+  process taps it is mixed with — and that is a sync error, not a latency one,
+  which defeats the mixed-bus rule below.
+- The tick rate stops mattering: the mixer renders what QPC says is due rather
+  than counting ticks.
+
+**The control error signal is backlog, not rate.** `produced − consumed`, exact:
+an integer producer cursor against a Q32.32 consumer position. Holding that
+constant *is* sample-accurate alignment. Rate-based control leaves an
+uncorrected position offset and cannot reach sub-sample accuracy — naming "a PI
+controller" without naming its setpoint, as an earlier draft did, is not enough
+to build from.
 
 1. **Master timeline is `QueryPerformanceCounter` sampled at capture time** — not
    `pu64QPCPosition`, which is derived and therefore useless for this.

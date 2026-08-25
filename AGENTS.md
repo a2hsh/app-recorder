@@ -26,13 +26,20 @@ Therefore:
 
 In this order of preference:
 
-1. **Session volume zero.** Render the test tone with the *player process's* own
-   session volume set to 0 via `ISimpleAudioVolume::SetMasterVolume(0.0f, NULL)`.
-   Inaudible to the user by construction. Whether process loopback still yields
-   non-silent data in this state is **an open question worth answering** — if it
-   does, this is the permanent safe test harness. If it yields silence, we have
-   learned loopback is post-session-volume, which is itself a useful finding.
-   Testing this is safe either way: volume 0 cannot be loud.
+1. **Session volume `1e-4` — NOT zero.** This question has been measured and
+   settled: **process loopback is post-session-volume.** At volume 0 you capture
+   pure digital silence (0 of 1,534,080 samples non-zero) even though the engine
+   confirms the app is rendering, so volume 0 is useless as a test harness.
+   At `1e-4` the endpoint sits at **−92 dBFS — inaudible** — and loopback
+   captures a clean signal scaling linearly (peak `0.000025` = exactly
+   `0.25 × 1e-4`). That is the permanent safe harness, and it is what every
+   capture test already uses.
+
+   **Use `spike/spike_silentplayer.c` unmodified.** It already enforces all of
+   this structurally: a fail-closed volume gate before `Start()`, a hard
+   `MAX_SAFE_VOLUME 0.001f` ceiling that refuses before creating any COM object,
+   a doubly-bounded finite frame budget, and a watchdog armed before any audio
+   object that `TerminateProcess`es itself. Do not write your own player.
 2. **Ask the author to play something he controls** and can stop himself.
 3. **Capture with a fake source.** Most of the codebase never needs real audio at
    all — see design section 4.3. If you are reaching for a speaker, first check
@@ -77,7 +84,27 @@ is a review failure even if it works. If the existing one does not fit your case
 
 ---
 
-## 4. Accessibility is a correctness property here
+## 4. Action encoders: fixed conventions
+
+Adding an encoder is one file plus one test file. Nothing else.
+
+- **Export exactly `const AprActionVTable apr_action_<id>;`** — not
+  `apr_action_<id>_vtable`. `core/registry.c` picks it up by that name.
+- **Do not edit `CMakeLists.txt` to register it.** `APR_HAVE_ACTION_<ID>` is
+  defined automatically from the presence of `src/actions/action_<id>.c`, so a
+  half-written encoder cannot break the link for everyone else.
+- **Do not self-register.** The registry owns the table.
+- **`on_audio` must never block on disk.** Own a writer thread and write-behind
+  through `core/ringbuf.c` — never a private FIFO. Copy the proof seam from
+  `action_wav.c` (`apr_wav_test_write_gate`): hold the disk path shut, push
+  audio through `on_audio`, assert it still returns inside a bounded wait. Prove
+  it; do not assert it.
+- **`finalize` must leave a playable file on every exit path**, including error
+  paths and half-written recordings.
+- **Do not scrub NaN/Inf yourself.** `core/mix.c` handles it for every integer
+  format. Duplicating that is a rule 3 failure.
+
+## 5. Accessibility is a correctness property here
 
 - **`NM_CUSTOMDRAW`, never `LVS_OWNERDRAWFIXED`.** Custom-draw changes painting
   and keeps the accessibility tree; full owner-draw replaces the control's
@@ -88,7 +115,7 @@ is a review failure even if it works. If the existing one does not fit your case
 
 ---
 
-## 5. No user-facing string is ever a literal in code
+## 6. No user-facing string is ever a literal in code
 
 This app ships in Arabic. Retrofitting i18n is expensive, so it is designed in
 from the start — see design section 6.2.
@@ -110,7 +137,7 @@ from the start — see design section 6.2.
 
 Internal log messages and code comments are exempt — those are English.
 
-## 6. Scope discipline
+## 7. Scope discipline
 
 Do the task you were given. Do not build ahead into other waves — the core is
 deliberately sequenced because parallel edits to a shared audio pipeline produce

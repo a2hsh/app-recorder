@@ -1201,3 +1201,199 @@ accepted 48k/2ch/f32 directly, so the `AUTOCONVERTPCM` retry path never fired
 and is also untested.
 
 **Nothing contradicted the spec.**
+
+---
+
+## 2026-08-26 (wave 3) — Core built: graph, source, bus, mix, resample, drift, registry
+
+Build order step 3 of design section 12. TDD, `/W4 /WX` clean in Debug and
+Release. **14 suites, 0 failures** in both configurations (the two suites
+excluded belong to encoder agents still in flight).
+
+### Shipped
+
+| File | Owns |
+|---|---|
+| `include/graph.h` + `src/core/graph.c` | the model: nodes, first-class edges, both UI projections |
+| `include/source.h` + `src/core/source.c` | capture + ring + one reader per consuming bus |
+| `include/bus.h` + `src/core/bus.c` | the mixer tick; N sources in, M actions out |
+| `include/mix.h` + `src/core/mix.c` | **sole owner** of PCM conversion, channel mapping, summing |
+| `include/resample.h` + `src/core/resample.c` | **sole owner** of SRC; windowed sinc, one implementation |
+| `include/drift.h` + `src/core/drift.c` | the PI controller (its own file; §12 lists "drift" as a component) |
+| `src/core/registry.c` | the static action table + a built-in `"none"` discard sink |
+
+Tests: `test_graph` (21), `test_sync` (15), `test_drift` (11), `test_mix` (22),
+`test_resample` (13), `test_registry` (8).
+
+### The drift design, as implemented
+
+**The bus runs 50 ms behind wall clock.** Nobody listens in real time, so
+latency is free and this one decision pays for three things: every source's
+data is already in its ring when a block is rendered; a device's jitter buffer
+costs **no alignment**, because holding its backlog at exactly the lookbehind
+means the instant its buffer fills is the instant the bus reaches its true
+start; and the tick rate stops mattering, since the mixer renders what QPC says
+is due rather than counting ticks.
+
+**Error signal is backlog**, not rate: `produced - consumed`, exact (integer
+producer cursor vs a Q32.32 consumer position). Holding it constant *is*
+sample-accurate alignment. Controlling on rate would leave a position offset
+nothing corrects.
+
+**Feed-forward + PI trim.** `apr_drift_ratio_q32()` supplies the cumulative
+measured rate ratio as feed-forward — right by construction, very low noise —
+so the PI only corrects the residual. Critically damped double pole gives
+`Kp = 2/tau_frames`, `Ki = 1/tau_frames²`, independent of block size. tau = 10 s.
+Trim clamped to **0.2 % (3.5 cents)** with anti-windup: "never audible" is
+structural, not hoped for. Measured worst trim in a 3-hour run: **6.9 ppm**.
+
+**Process taps allocate no resampler at all** and are read straight from the
+ring. `apr_source_set_reference()` overrides the default so that path is
+testable without a real app rendering audio.
+
+**Resampler has zero group delay** (primed with silence so output 0 is centred
+on input 0) and **DC gain exactly 1** (normalised by the tap sum). At ratio 1.0
+it is bit-exact identity. A resampler with latency would shift a device source
+against the process taps it is mixed with — the very desync this exists to
+prevent.
+
+### Measured
+
+| Case | Result |
+|---|---|
+| 3 h process tap, full pipeline | 518,397,600 frames, alignment error **0.0000** |
+| 3 h device @ +30 ppm, controller | error **0.43 frames**, trim ≤ 6.9 ppm |
+| 2 h device @ +30 ppm, full pipeline incl. real sinc | error **0.5687 frames** |
+| 300 s device @ +30 ppm, 48 kHz | error **0.51 frames**, tone peak 0.4990 |
+| 3 h @ +30 ppm **uncorrected** (control) | 15,552 frames adrift (0.324 s) |
+
+### Fixed: `apr_pcm_from_float` turned NaN into full-scale audio
+
+Found by the M4A agent. The cast to integer happened **before** the clamp, and
+x86 `cvttsd2si` returns `INT64_MIN` for NaN and for both infinities — which the
+clamp then pinned to **−32768, full-scale negative**. Every encoder converts
+through this function. Now clamped in the float domain first: NaN → 0,
++Inf → max, −Inf → min, integer paths only. `APR_PCM_F32` stays a verbatim
+`memcpy` so the archival float WAV path remains bit-exact including NaN.
+`action_m4a.c`'s scrubbing workaround can be removed.
+
+### Decisions worth not relitigating
+
+- **Alignment over content.** A ring overrun emits exactly as many frames of
+  silence as were lost and resumes at the true absolute frame, rather than
+  sliding everything after the hole earlier. Costs at most one extra pull block
+  of audio, and only after a stall longer than the whole 250 ms ring.
+- **`rb_write_silence` is a PRODUCER call**, for `capture_device` on
+  `DATA_DISCONTINUITY`. Reader-side loss is filled by the mixer emitting zeros;
+  a reader cannot write into the ring. (§3.1's wording conflates the two.)
+- **Registry guards.** `CMakeLists.txt` defines `APR_HAVE_ACTION_<ID>` from the
+  presence of `src/actions/action_<id>.c`, so a half-finished encoder cannot
+  break the link for everyone and a finished one needs no build-system edit.
+  **Naming inconsistency to settle:** m4a exports `apr_action_m4a`, wav exports
+  `apr_action_wav_vtable`. registry.c accommodates both; one should be renamed.
+- **`"none"` action** is built into registry.c: it keeps the table non-empty
+  (an empty C array is ill-formed), makes the graph testable with no encoder
+  present, and is the sink a metering-only bus wants. Delete it once something
+  else guarantees a non-empty table.
+- **`apr_graph_arm` / `apr_graph_run` are split** from `apr_graph_start` so a
+  test can drive a synthetic capture without spawning a real-time pacing
+  thread, and so a UI can pre-roll sources before the user commits to record.
+
+### Cost note
+
+`test_sync` takes ~44 s in Debug, ~12 s in Release. The 3-hour and 2-hour runs
+dominate. Sync is the hard problem in this codebase; the runtime is the price
+of testing it at the length where it actually matters.
+
+### Not done, deliberately
+
+No encoders (the parallel agents own those), no UI, no session persistence, no
+`capture/` files touched.
+
+---
+
+## 2026-08-26 — CORE COMPLETE. Sample-accurate alignment achieved.
+
+| Case | Result |
+|---|---|
+| 3 h process tap, full pipeline | 518,397,600 frames, alignment error **0.0000** |
+| 3 h device @ +30 ppm, controller | **0.43 frames**, worst trim 6.9 ppm |
+| 2 h device @ +30 ppm, full pipeline incl. real sinc | **0.5687 frames** |
+| 3 h @ +30 ppm **uncorrected** (control) | **15,552 frames adrift (0.324 s)** |
+
+Sub-sample over three hours, against a third of a second uncorrected. The §1.3
+goal is met. 90 new cases across 6 suites; no real time elapses anywhere.
+
+### The design's most load-bearing addition — I had not specified it
+
+**The bus deliberately runs 50 ms behind wall clock.** Nobody listens in real
+time so latency is free, and it pays for three things at once: data is always
+already in the ring when a block renders; **a device's jitter buffer costs zero
+alignment** (holding its backlog at exactly the lookbehind means the instant its
+buffer fills is the instant the bus reaches its true start — otherwise a mic sits
+a *fixed* 50 ms behind the process taps it is mixed with, which is a sync error,
+not a latency one); and the tick rate stops mattering because the mixer renders
+what QPC says is due rather than counting ticks.
+
+**Error signal is backlog, not rate** — `produced − consumed`, exact, integer
+producer cursor against a Q32.32 consumer position. Holding it constant *is*
+alignment. Rate-based control leaves an uncorrected position offset and can never
+reach sub-sample. Both now in §5.2.
+
+**Feed-forward + PI trim.** `apr_drift_ratio_q32()` supplies the cumulative
+measured ratio as feed-forward (right by construction, low noise); the PI only
+corrects residual backlog. Critically damped double pole, `Kp = 2/tau`,
+`Ki = 1/tau²`, block-size independent, tau = 10 s. Trim clamped to 0.2 %
+(3.5 cents) with anti-windup, so "never audible" is **structural**, not a hope.
+**Process taps allocate no resampler at all**; at ratio 1.0 the sinc is bit-exact
+identity with zero group delay and DC gain exactly 1.
+
+### NaN fix — done, and it was worse than reported
+
+The cast to integer happened *before* the clamp. Now clamped in the float
+domain: NaN→0, +Inf→max, −Inf→min across S16/S24/S32 **and U8** (which the
+original report missed — it has an integer domain too, so it had the same
+hazard). `APR_PCM_F32` stays a verbatim `memcpy`, so archival float WAV remains
+bit-exact including NaN. **`action_m4a.c`'s scrubbing workaround can now be
+removed.**
+
+### Spec corrected from its findings
+
+- **§3.1** — an earlier draft conflated producer and consumer silence fill.
+  `rb_write_silence()` is a *producer* call belonging to `capture_device` on
+  `DATA_DISCONTINUITY`; reader-side loss is filled by the mixer emitting zeros
+  into its **own output**. Overrun policy now stated explicitly: **alignment over
+  content** — a hole is recoverable, a permanent timeline shift is not.
+- **§3.2** — the `Bus` struct was a *tree*. Two buses reading one source each
+  need their own cursor, resampler and controller, so **an edge is a struct**,
+  not an index into parallel arrays. Rewritten.
+- **§5.2** — the mixer lag and the backlog setpoint now documented (above).
+- **§3.2** — reference-source status **cannot** be derived from `AprSourceKind`,
+  because a fake standing in for a process tap is not `APR_SRC_PROCESS` and §4.3
+  requires hardware-free testing. It is an explicit property with an override.
+- **AGENTS.md rule 4** — action encoder conventions pinned: export
+  `apr_action_<id>`, never edit CMakeLists to register, never self-register,
+  never scrub NaN yourself.
+- **AGENTS.md rule 1** — the "is volume 0 a usable harness?" question was stale
+  and is now answered inline: **no**, loopback is post-session-volume; the
+  harness is `1e-4` (−92 dBFS) via the existing `spike_silentplayer.c`.
+
+### Housekeeping done
+
+`apr_action_wav_vtable` renamed to **`apr_action_wav`** across
+`action_wav.c`, `registry.c` and `test_action_wav.c`, so `registry.c` no longer
+special-cases one encoder. MP3 already matched.
+
+### Two things to remember
+
+- **`registry.c` contains a built-in `"none"` discard sink** (~40 lines, not an
+  encoder). It exists because an empty C array is ill-formed and it makes the
+  graph testable with no encoder present. **Delete it once something else
+  guarantees a non-empty table.**
+- `test_sync` takes ~44 s Debug / ~12 s Release; the multi-hour runs dominate.
+
+### Note
+
+A full-suite verification raced the still-running MP3 agent
+(`LNK1168: cannot open test_action_mp3.exe for writing` — it held its own test
+binary). Not a real failure. **Re-verify once MP3 lands.**

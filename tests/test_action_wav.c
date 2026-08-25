@@ -31,8 +31,8 @@
 
 /* The vtable core/registry.c will list. Declared here rather than in a public
  * header: registry.c is the only other caller, and it declares the same
- * `extern const AprActionVTable apr_action_wav_vtable;`. */
-extern const AprActionVTable apr_action_wav_vtable;
+ * `extern const AprActionVTable apr_action_wav;`. */
+extern const AprActionVTable apr_action_wav;
 
 /* Internal seams. See the "test seams" section of action_wav.c for what each
  * does and why it costs nothing on a real run. Deliberately not in a header:
@@ -205,7 +205,7 @@ static AprErr feed(void *st, const float *pcm, size_t frames, uint16_t ch,
         size_t n = frames - done;
         AprErr e;
         if (n > block) n = block;
-        e = apr_action_wav_vtable.on_audio(st, pcm + done * ch, n, 0);
+        e = apr_action_wav.on_audio(st, pcm + done * ch, n, 0);
         if (apr_failed(&e)) return e;
         done += n;
     }
@@ -216,13 +216,13 @@ static AprErr feed(void *st, const float *pcm, size_t frames, uint16_t ch,
 
 TEST(the_vtable_identifies_itself_as_wav)
 {
-    ASSERT_STR_EQ("wav", apr_action_wav_vtable.id);
-    ASSERT_WSTR_EQ(L"wav", apr_action_wav_vtable.extension);
-    ASSERT_NOT_NULL(apr_action_wav_vtable.display_name);
-    ASSERT_NOT_NULL((void *)(uintptr_t)apr_action_wav_vtable.create);
-    ASSERT_NOT_NULL((void *)(uintptr_t)apr_action_wav_vtable.on_audio);
-    ASSERT_NOT_NULL((void *)(uintptr_t)apr_action_wav_vtable.finalize);
-    ASSERT_NOT_NULL((void *)(uintptr_t)apr_action_wav_vtable.destroy);
+    ASSERT_STR_EQ("wav", apr_action_wav.id);
+    ASSERT_WSTR_EQ(L"wav", apr_action_wav.extension);
+    ASSERT_NOT_NULL(apr_action_wav.display_name);
+    ASSERT_NOT_NULL((void *)(uintptr_t)apr_action_wav.create);
+    ASSERT_NOT_NULL((void *)(uintptr_t)apr_action_wav.on_audio);
+    ASSERT_NOT_NULL((void *)(uintptr_t)apr_action_wav.finalize);
+    ASSERT_NOT_NULL((void *)(uintptr_t)apr_action_wav.destroy);
 }
 
 /* ---- headers ------------------------------------------------------------- */
@@ -239,13 +239,13 @@ TEST(a_recording_with_no_frames_is_a_valid_empty_wav)
     tmp_path(path, MAX_PATH, L"empty");
     cfg = cfg_of(path, 48000, 2);
 
-    e = apr_action_wav_vtable.create(&cfg, &st);
+    e = apr_action_wav.create(&cfg, &st);
     ASSERT_FALSE(apr_failed(&e));
     ASSERT_NOT_NULL(st);
 
-    e = apr_action_wav_vtable.finalize(st);
+    e = apr_action_wav.finalize(st);
     ASSERT_FALSE(apr_failed(&e));
-    apr_action_wav_vtable.destroy(st);
+    apr_action_wav.destroy(st);
 
     file = slurp(path, &len);
     ASSERT_NOT_NULL(file);
@@ -268,18 +268,18 @@ TEST(zero_frame_calls_are_a_no_op)
 
     tmp_path(path, MAX_PATH, L"zeroframes");
     cfg = cfg_of(path, 48000, 2);
-    e = apr_action_wav_vtable.create(&cfg, &st);
+    e = apr_action_wav.create(&cfg, &st);
     ASSERT_FALSE(apr_failed(&e));
 
     /* Zero frames is legal with a buffer and with no buffer at all. */
-    e = apr_action_wav_vtable.on_audio(st, &dummy, 0, 0);
+    e = apr_action_wav.on_audio(st, &dummy, 0, 0);
     ASSERT_FALSE(apr_failed(&e));
-    e = apr_action_wav_vtable.on_audio(st, NULL, 0, 0);
+    e = apr_action_wav.on_audio(st, NULL, 0, 0);
     ASSERT_FALSE(apr_failed(&e));
 
-    e = apr_action_wav_vtable.finalize(st);
+    e = apr_action_wav.finalize(st);
     ASSERT_FALSE(apr_failed(&e));
-    apr_action_wav_vtable.destroy(st);
+    apr_action_wav.destroy(st);
 
     file = slurp(path, &len);
     ASSERT_NOT_NULL(file);
@@ -383,15 +383,15 @@ static void roundtrip(const wchar_t *tag, uint32_t rate, uint16_t ch,
     ASSERT_NOT_NULL(pcm);
     fill_signal(pcm, frames * ch, (uint32_t)(frames * 2654435761u + ch));
 
-    e = apr_action_wav_vtable.create(&cfg, &st);
+    e = apr_action_wav.create(&cfg, &st);
     ASSERT_FALSE(apr_failed(&e));
 
     e = feed(st, pcm, frames, ch, block);
     ASSERT_FALSE(apr_failed(&e));
 
-    e = apr_action_wav_vtable.finalize(st);
+    e = apr_action_wav.finalize(st);
     ASSERT_FALSE(apr_failed(&e));
-    apr_action_wav_vtable.destroy(st);
+    apr_action_wav.destroy(st);
 
     (void)apr_wav_header_build(want_hdr, rate, ch, payload);
 
@@ -459,7 +459,7 @@ static DWORD WINAPI feed_thread(LPVOID param)
         AprErr        e;
         if (n > j->block) n = j->block;
         QueryPerformanceCounter(&a);
-        e = apr_action_wav_vtable.on_audio(j->st, j->pcm + done * j->ch, n, 0);
+        e = apr_action_wav.on_audio(j->st, j->pcm + done * j->ch, n, 0);
         QueryPerformanceCounter(&b);
         if (b.QuadPart - a.QuadPart > j->worst_ticks)
             j->worst_ticks = b.QuadPart - a.QuadPart;
@@ -502,7 +502,7 @@ TEST(on_audio_never_waits_for_the_disk)
     ASSERT_NOT_NULL(gate);
     apr_wav_test_write_gate = gate;
 
-    e = apr_action_wav_vtable.create(&cfg, &st);
+    e = apr_action_wav.create(&cfg, &st);
     ASSERT_FALSE(apr_failed(&e));
 
     memset(&job, 0, sizeof job);
@@ -520,11 +520,11 @@ TEST(on_audio_never_waits_for_the_disk)
     WaitForSingleObject(thread, INFINITE);
     CloseHandle(thread);
 
-    e = apr_action_wav_vtable.finalize(st);
+    e = apr_action_wav.finalize(st);
     apr_wav_test_write_gate = NULL;
     CloseHandle(gate);
     ASSERT_FALSE(apr_failed(&e));
-    apr_action_wav_vtable.destroy(st);
+    apr_action_wav.destroy(st);
 
     /* The whole point: a second of audio was accepted while not one payload
      * byte could reach the disk. */
@@ -574,7 +574,7 @@ TEST(an_overrun_becomes_silence_so_the_timeline_survives)
     ASSERT_NOT_NULL(gate);
     apr_wav_test_write_gate = gate;
 
-    e = apr_action_wav_vtable.create(&cfg, &st);
+    e = apr_action_wav.create(&cfg, &st);
     ASSERT_FALSE(apr_failed(&e));
 
     /* The disk is shut for all of this: far more audio than the buffer holds. */
@@ -582,11 +582,11 @@ TEST(an_overrun_becomes_silence_so_the_timeline_survives)
     ASSERT_FALSE(apr_failed(&e));
 
     SetEvent(gate);
-    e = apr_action_wav_vtable.finalize(st);
+    e = apr_action_wav.finalize(st);
     apr_wav_test_write_gate = NULL;
     CloseHandle(gate);
     ASSERT_FALSE(apr_failed(&e));
-    apr_action_wav_vtable.destroy(st);
+    apr_action_wav.destroy(st);
 
     file = slurp(path, &len);
     ASSERT_NOT_NULL(file);
@@ -634,7 +634,7 @@ TEST(the_header_is_patched_while_recording)
     ASSERT_NOT_NULL(pcm);
     fill_signal(pcm, frames * 2, 0x5EED01u);
 
-    e = apr_action_wav_vtable.create(&cfg, &st);
+    e = apr_action_wav.create(&cfg, &st);
     ASSERT_FALSE(apr_failed(&e));
     e = feed(st, pcm, frames, 2, 480);
     ASSERT_FALSE(apr_failed(&e));
@@ -655,9 +655,9 @@ TEST(the_header_is_patched_while_recording)
     ASSERT_EQ_U64(declared / 8u, rd32(hdr + 104));
     ASSERT_LE_INT(file_size(path), (long long)(WAV_HDR_BYTES + declared));
 
-    e = apr_action_wav_vtable.finalize(st);
+    e = apr_action_wav.finalize(st);
     ASSERT_FALSE(apr_failed(&e));
-    apr_action_wav_vtable.destroy(st);
+    apr_action_wav.destroy(st);
 
     ASSERT_EQ_U64(WAV_HDR_BYTES + payload, file_size(path));
     free(pcm);
@@ -682,12 +682,12 @@ TEST(destroy_without_finalize_still_leaves_a_playable_file)
     ASSERT_NOT_NULL(pcm);
     fill_signal(pcm, frames * 2, 0x1234u);
 
-    e = apr_action_wav_vtable.create(&cfg, &st);
+    e = apr_action_wav.create(&cfg, &st);
     ASSERT_FALSE(apr_failed(&e));
     e = feed(st, pcm, frames, 2, 1000);
     ASSERT_FALSE(apr_failed(&e));
 
-    apr_action_wav_vtable.destroy(st);        /* no finalize at all */
+    apr_action_wav.destroy(st);        /* no finalize at all */
 
     file = slurp(path, &len);
     ASSERT_NOT_NULL(file);
@@ -709,15 +709,15 @@ TEST(finalize_is_idempotent)
 
     tmp_path(path, MAX_PATH, L"twice");
     cfg = cfg_of(path, 48000, 2);
-    e = apr_action_wav_vtable.create(&cfg, &st);
+    e = apr_action_wav.create(&cfg, &st);
     ASSERT_FALSE(apr_failed(&e));
 
-    e = apr_action_wav_vtable.finalize(st);
+    e = apr_action_wav.finalize(st);
     ASSERT_FALSE(apr_failed(&e));
-    e = apr_action_wav_vtable.finalize(st);
+    e = apr_action_wav.finalize(st);
     ASSERT_FALSE(apr_failed(&e));
 
-    apr_action_wav_vtable.destroy(st);
+    apr_action_wav.destroy(st);
     ASSERT_EQ_U64(WAV_HDR_BYTES, file_size(path));
     DeleteFileW(path);
 }
@@ -745,16 +745,16 @@ TEST(finalize_after_a_write_error_leaves_a_playable_file)
     /* Every payload write fails, from the very first one. */
     apr_wav_test_fail_after_bytes = 1;
 
-    e = apr_action_wav_vtable.create(&cfg, &st);
+    e = apr_action_wav.create(&cfg, &st);
     ASSERT_FALSE(apr_failed(&e));
     (void)feed(st, pcm, frames, 2, 512);
 
-    e = apr_action_wav_vtable.finalize(st);
+    e = apr_action_wav.finalize(st);
     apr_wav_test_fail_after_bytes = 0;
 
     /* The failure is reported ... */
     ASSERT_TRUE(apr_failed(&e));
-    apr_action_wav_vtable.destroy(st);
+    apr_action_wav.destroy(st);
 
     /* ... and what is on disk is still a valid, if empty, WAV. */
     file = slurp(path, &len);
@@ -793,13 +793,13 @@ TEST(a_partial_recording_keeps_its_prefix_exactly)
     /* The disk takes ~200 KB and then refuses, as a full volume would. */
     apr_wav_test_fail_after_bytes = limit;
 
-    e = apr_action_wav_vtable.create(&cfg, &st);
+    e = apr_action_wav.create(&cfg, &st);
     ASSERT_FALSE(apr_failed(&e));
     (void)feed(st, pcm, frames, 2, 512);
-    e = apr_action_wav_vtable.finalize(st);
+    e = apr_action_wav.finalize(st);
     apr_wav_test_fail_after_bytes = 0;
     ASSERT_TRUE(apr_failed(&e));
-    apr_action_wav_vtable.destroy(st);
+    apr_action_wav.destroy(st);
 
     file = slurp(path, &len);
     ASSERT_NOT_NULL(file);
@@ -830,41 +830,41 @@ TEST(impossible_configurations_are_refused)
 
     tmp_path(path, MAX_PATH, L"badcfg");
 
-    e = apr_action_wav_vtable.create(NULL, &st);
+    e = apr_action_wav.create(NULL, &st);
     ASSERT_TRUE(apr_failed(&e));
     ASSERT_NULL(st);
 
     cfg = cfg_of(path, 48000, 2);
-    e = apr_action_wav_vtable.create(&cfg, NULL);
+    e = apr_action_wav.create(&cfg, NULL);
     ASSERT_TRUE(apr_failed(&e));
 
     cfg = cfg_of(NULL, 48000, 2);
     st  = (void *)(uintptr_t)1;
-    e = apr_action_wav_vtable.create(&cfg, &st);
+    e = apr_action_wav.create(&cfg, &st);
     ASSERT_TRUE(apr_failed(&e));
     ASSERT_NULL(st);
 
     cfg = cfg_of(path, 0, 2);
-    e = apr_action_wav_vtable.create(&cfg, &st);
+    e = apr_action_wav.create(&cfg, &st);
     ASSERT_TRUE(apr_failed(&e));
 
     cfg = cfg_of(path, 48000, 0);
-    e = apr_action_wav_vtable.create(&cfg, &st);
+    e = apr_action_wav.create(&cfg, &st);
     ASSERT_TRUE(apr_failed(&e));
 
     /* nBlockAlign is 16 bits: 20000 channels of float32 cannot be described. */
     cfg = cfg_of(path, 48000, 20000);
-    e = apr_action_wav_vtable.create(&cfg, &st);
+    e = apr_action_wav.create(&cfg, &st);
     ASSERT_TRUE(apr_failed(&e));
 
     ASSERT_EQ_U64(0, file_size(path));   /* nothing was created on the way out */
 
     /* NULL state is a caller bug, not a crash. */
-    e = apr_action_wav_vtable.on_audio(NULL, NULL, 0, 0);
+    e = apr_action_wav.on_audio(NULL, NULL, 0, 0);
     ASSERT_TRUE(apr_failed(&e));
-    e = apr_action_wav_vtable.finalize(NULL);
+    e = apr_action_wav.finalize(NULL);
     ASSERT_TRUE(apr_failed(&e));
-    apr_action_wav_vtable.destroy(NULL);
+    apr_action_wav.destroy(NULL);
 }
 
 TEST(an_unopenable_path_is_reported_not_crashed)
@@ -874,7 +874,7 @@ TEST(an_unopenable_path_is_reported_not_crashed)
     AprErr          e;
 
     cfg = cfg_of(L"Z:\\apprecorder-no-such-directory\\out.wav", 48000, 2);
-    e = apr_action_wav_vtable.create(&cfg, &st);
+    e = apr_action_wav.create(&cfg, &st);
     ASSERT_TRUE(apr_failed(&e));
     ASSERT_NULL(st);
 }

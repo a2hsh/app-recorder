@@ -1,0 +1,386 @@
+/*
+ * graph.c -- the model. See include/graph.h for why edges are first-class and
+ * why both UI views read this rather than each other.
+ */
+#include "graph.h"
+
+#include <stdlib.h>
+#include <string.h>
+
+#include "log.h"
+#include "mix.h"
+
+struct AprGraph {
+    uint32_t rate;
+    uint16_t channels;
+
+    AprSource  *sources[APR_MAX_SOURCES];
+    size_t      source_count;
+    AprSourceId next_source_id;
+
+    AprBus  *buses[APR_MAX_BUSES];
+    size_t   bus_count;
+    AprBusId next_bus_id;
+
+    int running;
+};
+
+/* ---------------------------------------------------------------------------
+ * Lifetime
+ * ------------------------------------------------------------------------- */
+
+AprErr apr_graph_create(uint32_t sample_rate, uint16_t channels, AprGraph **out)
+{
+    AprGraph *g;
+
+    if (!out) return APR_ERR(APR_E_INVALID_ARG, L"graph with no out slot");
+    *out = NULL;
+    if (sample_rate == 0 || channels == 0 || channels > APR_MAX_CHANNELS) {
+        return APR_ERR(APR_E_INVALID_ARG, L"session format %u Hz / %u channels",
+                       sample_rate, channels);
+    }
+
+    g = (AprGraph *)calloc(1, sizeof *g);
+    if (!g) return APR_ERR(APR_E_NO_MEMORY, L"graph state");
+
+    g->rate           = sample_rate;
+    g->channels       = channels;
+    g->next_source_id = 1;    /* 0 is "no source", so ids start at 1 */
+    g->next_bus_id    = 1;
+    *out = g;
+    return apr_ok();
+}
+
+void apr_graph_destroy(AprGraph *g)
+{
+    size_t i;
+
+    if (!g) return;
+    apr_graph_stop(g);
+    /* Buses first: each holds readers into sources and must give them back
+     * before the sources go. */
+    for (i = 0; i < g->bus_count; i++)    apr_bus_destroy(g->buses[i]);
+    for (i = 0; i < g->source_count; i++) apr_source_destroy(g->sources[i]);
+    free(g);
+}
+
+uint32_t apr_graph_rate(const AprGraph *g)     { return g ? g->rate : 0; }
+uint16_t apr_graph_channels(const AprGraph *g) { return g ? g->channels : 0; }
+int      apr_graph_running(const AprGraph *g)  { return g ? g->running : 0; }
+
+/* ---------------------------------------------------------------------------
+ * Nodes
+ * ------------------------------------------------------------------------- */
+
+AprErr apr_graph_add_source(AprGraph *g, const wchar_t *name,
+                            const AprCaptureConfig *cfg, AprSourceId *out_id)
+{
+    AprCaptureConfig local;
+    AprSource       *s = NULL;
+    AprErr           e;
+
+    if (out_id) *out_id = 0;
+    if (!g || !cfg) return APR_ERR(APR_E_INVALID_ARG, L"graph or config is null");
+    if (g->source_count >= APR_MAX_SOURCES) {
+        return APR_ERR(APR_E_STATE, L"graph already holds %d sources", APR_MAX_SOURCES);
+    }
+
+    /* Format is a session decision, not a per-source one: a process-loopback
+     * client cannot be asked what it wants (design 4.1). */
+    local              = *cfg;
+    local.sample_rate  = g->rate;
+    local.channels     = g->channels;
+
+    e = apr_source_create(g->next_source_id, name, &local, &s);
+    if (apr_failed(&e)) return e;
+
+    g->sources[g->source_count++] = s;
+    if (out_id) *out_id = g->next_source_id;
+    g->next_source_id++;
+    return apr_ok();
+}
+
+static size_t source_index(const AprGraph *g, AprSourceId id)
+{
+    size_t i;
+    for (i = 0; i < g->source_count; i++) {
+        if (apr_source_id(g->sources[i]) == id) return i;
+    }
+    return (size_t)-1;
+}
+
+static size_t bus_index(const AprGraph *g, AprBusId id)
+{
+    size_t i;
+    for (i = 0; i < g->bus_count; i++) {
+        if (apr_bus_id(g->buses[i]) == id) return i;
+    }
+    return (size_t)-1;
+}
+
+AprSource *apr_graph_source(const AprGraph *g, AprSourceId id)
+{
+    size_t i;
+    if (!g) return NULL;
+    i = source_index(g, id);
+    return i == (size_t)-1 ? NULL : g->sources[i];
+}
+
+size_t apr_graph_source_count(const AprGraph *g) { return g ? g->source_count : 0; }
+
+AprSource *apr_graph_source_at(const AprGraph *g, size_t index)
+{
+    return (g && index < g->source_count) ? g->sources[index] : NULL;
+}
+
+AprErr apr_graph_remove_source(AprGraph *g, AprSourceId id)
+{
+    size_t i, k;
+
+    if (!g) return APR_ERR(APR_E_INVALID_ARG, L"null graph");
+    i = source_index(g, id);
+    if (i == (size_t)-1) return APR_ERR(APR_E_NOT_FOUND, L"no source %u", id);
+
+    /* Every edge goes first: a bus left holding a reader into a freed source
+     * is the one lifetime bug this shape is meant to make impossible. */
+    for (k = 0; k < g->bus_count; k++) {
+        if (apr_bus_has_source(g->buses[k], id)) apr_bus_remove_source(g->buses[k], id);
+    }
+    apr_source_destroy(g->sources[i]);
+    for (; i + 1 < g->source_count; i++) g->sources[i] = g->sources[i + 1];
+    g->source_count--;
+    return apr_ok();
+}
+
+AprErr apr_graph_add_bus(AprGraph *g, const wchar_t *name, AprBusId *out_id)
+{
+    AprBus *b = NULL;
+    AprErr  e;
+
+    if (out_id) *out_id = 0;
+    if (!g) return APR_ERR(APR_E_INVALID_ARG, L"null graph");
+    if (g->bus_count >= APR_MAX_BUSES) {
+        return APR_ERR(APR_E_STATE, L"graph already holds %d buses", APR_MAX_BUSES);
+    }
+
+    e = apr_bus_create(g->next_bus_id, name, g->rate, g->channels, &b);
+    if (apr_failed(&e)) return e;
+
+    g->buses[g->bus_count++] = b;
+    if (out_id) *out_id = g->next_bus_id;
+    g->next_bus_id++;
+    return apr_ok();
+}
+
+AprBus *apr_graph_bus(const AprGraph *g, AprBusId id)
+{
+    size_t i;
+    if (!g) return NULL;
+    i = bus_index(g, id);
+    return i == (size_t)-1 ? NULL : g->buses[i];
+}
+
+size_t apr_graph_bus_count(const AprGraph *g) { return g ? g->bus_count : 0; }
+
+AprBus *apr_graph_bus_at(const AprGraph *g, size_t index)
+{
+    return (g && index < g->bus_count) ? g->buses[index] : NULL;
+}
+
+AprErr apr_graph_remove_bus(AprGraph *g, AprBusId id)
+{
+    size_t i;
+
+    if (!g) return APR_ERR(APR_E_INVALID_ARG, L"null graph");
+    i = bus_index(g, id);
+    if (i == (size_t)-1) return APR_ERR(APR_E_NOT_FOUND, L"no bus %u", id);
+
+    apr_bus_destroy(g->buses[i]);   /* finalizes actions, closes every reader */
+    for (; i + 1 < g->bus_count; i++) g->buses[i] = g->buses[i + 1];
+    g->bus_count--;
+    return apr_ok();
+}
+
+/* ---------------------------------------------------------------------------
+ * Edges
+ * ------------------------------------------------------------------------- */
+
+AprErr apr_graph_connect(AprGraph *g, AprSourceId source, AprBusId bus, float gain)
+{
+    AprSource *s;
+    AprBus    *b;
+
+    if (!g) return APR_ERR(APR_E_INVALID_ARG, L"null graph");
+    s = apr_graph_source(g, source);
+    b = apr_graph_bus(g, bus);
+    if (!s) return APR_ERR(APR_E_NOT_FOUND, L"no source %u", source);
+    if (!b) return APR_ERR(APR_E_NOT_FOUND, L"no bus %u", bus);
+    return apr_bus_add_source(b, s, gain);
+}
+
+AprErr apr_graph_disconnect(AprGraph *g, AprSourceId source, AprBusId bus)
+{
+    AprBus *b;
+
+    if (!g) return APR_ERR(APR_E_INVALID_ARG, L"null graph");
+    b = apr_graph_bus(g, bus);
+    if (!b) return APR_ERR(APR_E_NOT_FOUND, L"no bus %u", bus);
+    return apr_bus_remove_source(b, source);
+}
+
+int apr_graph_connected(const AprGraph *g, AprSourceId source, AprBusId bus)
+{
+    const AprBus *b = apr_graph_bus(g, bus);
+    return b && apr_bus_has_source(b, source);
+}
+
+size_t apr_graph_edge_count(const AprGraph *g)
+{
+    size_t i, n = 0;
+    if (!g) return 0;
+    for (i = 0; i < g->bus_count; i++) n += apr_bus_source_count(g->buses[i]);
+    return n;
+}
+
+/* ---------------------------------------------------------------------------
+ * Projections
+ * ------------------------------------------------------------------------- */
+
+size_t apr_graph_buses_for_source(const AprGraph *g, AprSourceId source,
+                                  AprBusId *out, size_t cap)
+{
+    size_t i, n = 0;
+
+    if (!g) return 0;
+    for (i = 0; i < g->bus_count; i++) {
+        if (!apr_bus_has_source(g->buses[i], source)) continue;
+        if (out && n < cap) out[n] = apr_bus_id(g->buses[i]);
+        n++;
+    }
+    return n;
+}
+
+size_t apr_graph_sources_for_bus(const AprGraph *g, AprBusId bus,
+                                 AprSourceId *out, size_t cap)
+{
+    const AprBus *b = apr_graph_bus(g, bus);
+    size_t        i, n;
+
+    if (!b) return 0;
+    n = apr_bus_source_count(b);
+    for (i = 0; i < n && out && i < cap; i++) {
+        out[i] = apr_source_id(apr_bus_source_at(b, i));
+    }
+    return n;
+}
+
+/* ---------------------------------------------------------------------------
+ * Actions
+ * ------------------------------------------------------------------------- */
+
+AprErr apr_graph_add_action(AprGraph *g, AprBusId bus, const char *action_id,
+                            const AprActionConfig *cfg)
+{
+    const AprActionVTable *vt;
+    AprActionConfig        local;
+    AprBus                *b;
+
+    if (!g || !cfg) return APR_ERR(APR_E_INVALID_ARG, L"graph or config is null");
+    b = apr_graph_bus(g, bus);
+    if (!b) return APR_ERR(APR_E_NOT_FOUND, L"no bus %u", bus);
+
+    vt = apr_action_find(action_id);
+    if (!vt) {
+        return APR_ERR(APR_E_NOT_FOUND, L"no action registered as \"%hs\"",
+                       action_id ? action_id : "(null)");
+    }
+
+    local              = *cfg;
+    local.sample_rate  = g->rate;
+    local.channels     = g->channels;
+    return apr_bus_add_action(b, vt, &local);
+}
+
+/* ---------------------------------------------------------------------------
+ * Running
+ * ------------------------------------------------------------------------- */
+
+AprErr apr_graph_arm(AprGraph *g)
+{
+    AprErr first = apr_ok();
+    size_t i;
+
+    if (!g) return APR_ERR(APR_E_INVALID_ARG, L"null graph");
+
+    /* A source that will not start is reported but does not stop the session:
+     * it simply never anchors, and the buses reading it mix silence for it. */
+    for (i = 0; i < g->source_count; i++) {
+        AprErr e = apr_source_start(g->sources[i]);
+        if (apr_failed(&e)) {
+            APR_LOG_ERR(APR_LOG_ERROR, &e);
+            if (!apr_failed(&first)) first = e;
+        }
+    }
+    return first;
+}
+
+AprErr apr_graph_run(AprGraph *g, uint64_t start_ticks)
+{
+    size_t i;
+
+    if (!g) return APR_ERR(APR_E_INVALID_ARG, L"null graph");
+    if (g->running) return apr_ok();
+
+    /* One anchor for every bus. */
+    for (i = 0; i < g->bus_count; i++) apr_bus_start(g->buses[i], start_ticks);
+    g->running = 1;
+    return apr_ok();
+}
+
+AprErr apr_graph_start(AprGraph *g, uint64_t start_ticks)
+{
+    AprErr armed;
+
+    if (!g) return APR_ERR(APR_E_INVALID_ARG, L"null graph");
+    if (g->running) return apr_ok();
+
+    /* Sources first, so their rings are already filling before any bus asks. */
+    armed = apr_graph_arm(g);
+    apr_graph_run(g, start_ticks);
+    return armed;
+}
+
+AprErr apr_graph_tick(AprGraph *g, uint64_t now_ticks)
+{
+    AprErr first = apr_ok();
+    size_t i;
+
+    if (!g) return APR_ERR(APR_E_INVALID_ARG, L"null graph");
+    if (!g->running) return APR_ERR(APR_E_STATE, L"graph is not running");
+
+    for (i = 0; i < g->bus_count; i++) {
+        AprErr e = apr_bus_tick(g->buses[i], now_ticks);
+        if (apr_failed(&e) && !apr_failed(&first)) first = e;
+    }
+    return first;
+}
+
+AprErr apr_graph_stop(AprGraph *g)
+{
+    AprErr first = apr_ok();
+    size_t i;
+
+    if (!g) return APR_ERR(APR_E_INVALID_ARG, L"null graph");
+    if (!g->running) return apr_ok();
+
+    /* Buses first: every action is finalized to a playable file before the
+     * sources feeding them go away. */
+    for (i = 0; i < g->bus_count; i++) {
+        AprErr e = apr_bus_stop(g->buses[i]);
+        if (apr_failed(&e) && !apr_failed(&first)) first = e;
+    }
+    for (i = 0; i < g->source_count; i++) apr_source_stop(g->sources[i]);
+
+    g->running = 0;
+    return first;
+}
