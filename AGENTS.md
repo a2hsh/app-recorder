@@ -88,7 +88,29 @@ is a review failure even if it works. If the existing one does not fit your case
 
 ---
 
-## 5. Scope discipline
+## 5. No user-facing string is ever a literal in code
+
+This app ships in Arabic. Retrofitting i18n is expensive, so it is designed in
+from the start — see design section 6.2.
+
+- **Every user-facing string goes in the `.rc` STRINGTABLE with a named ID.**
+  Not in a `wchar_t*` in your source. This includes error messages, CLI output,
+  UIA names and descriptions, and anything a screen reader will read.
+- **Never concatenate sentences from fragments.** Arabic word order differs and a
+  translator cannot reorder pieces joined in code. Use positional specifiers
+  (`%1$s`, `%2$d`) so arguments can move.
+- **Never use `printf("%d items")` shaped plurals.** Arabic has six plural forms
+  to English's two. Go through the plural-aware API.
+- **Never hardcode a layout direction.** Signal flow is left-to-right in English
+  and right-to-left in Arabic. Direction is a parameter.
+- **Never size a control to fit its English string.** Arabic needs more vertical
+  room at the same point size.
+- Logical order (source → bus → action) is language-independent. Only painting
+  mirrors; the accessibility tree does not.
+
+Internal log messages and code comments are exempt — those are English.
+
+## 6. Scope discipline
 
 Do the task you were given. Do not build ahead into other waves — the core is
 deliberately sequenced because parallel edits to a shared audio pipeline produce

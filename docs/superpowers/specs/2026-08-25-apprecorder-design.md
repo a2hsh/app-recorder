@@ -328,7 +328,59 @@ A **docked TreeView over the same model** ships alongside the canvas — not a
 substitute but a second real view: fast keyboard jumping, and a layers-panel
 overview for sighted users on a large graph.
 
-### 6.2 The beauty/accessibility line
+### 6.2 Localization — Arabic ships after v1, but is designed in now
+
+The app will be localized to Arabic before release. Retrofitting that into a
+Win32 codebase is expensive; designing for it before the UI exists is nearly
+free. **No user-facing string is ever a literal in code**, starting from the
+first line of UI.
+
+**Catalog.** Win32 `STRINGTABLE` resources in `.rc`, one `LANGUAGE` block per
+locale, all embedded in the single exe — `LoadStringW` selects by thread locale.
+No satellite DLLs, no extra files, and the cost is only the string bytes, which
+keeps the size goal intact. Every string gets a named ID in one enum; a build
+check fails if an ID exists without a string in every declared language.
+
+**Plurals are the trap.** Arabic has **six** plural forms (zero, one, two, few,
+many, other) against English's two. A `printf("%d sources")` shaped API is
+unfixable later, so the string API is plural-aware from day one:
+`apr_str_plural(id, n)`. English simply uses two of the six slots.
+
+**Never concatenate sentences.** Arabic word order differs, so fragments joined
+in code cannot be reordered by a translator. Use positional format specifiers
+(`%1$s`, `%2$d`) exclusively — the translator must be able to move the arguments.
+
+**RTL layout.** `WS_EX_LAYOUTRTL` mirrors standard child-control positioning for
+free. **It does not mirror anything we paint ourselves** — and our canvas nodes
+are custom-painted HWNDs (6.1), so the canvas owns its mirroring explicitly.
+
+**Signal-flow direction is a layout parameter, not a constant.** The graph reads
+left-to-right in English and must read **right-to-left in Arabic**: sources on
+the right, actions on the left. Hardcoding flow direction anywhere is a review
+failure.
+
+**Logical order stays language-independent.** The accessibility tree and the
+TreeView follow source → bus → action regardless of visual direction. Screen
+reader navigation order must not flip with the layout; only the painting does.
+
+**Digits.** Default to Western (Hindu-Arabic) numerals, which is standard Saudi
+UI practice. Confirm with the author before shipping — he is an accessibility
+expert at DGA and this is his domain.
+
+**Fonts.** Segoe UI Variable covers Arabic. Verify rendering at the target sizes
+rather than assuming; Arabic needs more vertical room than Latin at the same
+point size, so **never** size a control to fit its English string.
+
+**Translation process** (when the strings are actually written, not now): draft
+through the `ux-araby` skill for فصحى مبسطة, then a Gemini review pass. Keep the
+author's domain-term overrides — notably **«إمكانية الوصول»** for accessibility,
+never «الإتاحة».
+
+**CLI.** Same catalog, but English by default. Arabic console output needs
+`SetConsoleOutputCP(CP_UTF8)` and still renders poorly in some terminals; the CLI
+is an automation surface, so this is low priority.
+
+### 6.3 The beauty/accessibility line
 
 **`NM_CUSTOMDRAW`, never `LVS_OWNERDRAWFIXED`.** Custom-draw alters painting only
 and preserves the accessibility tree; full owner-draw replaces the control's

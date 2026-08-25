@@ -584,3 +584,66 @@ while agents are running.**
   never released after a timeout.
 - Then core: `graph`, `source`, `bus`, `mix`, `resample`, drift controller.
 - Encoders fan out only after the core shape is settled.
+
+---
+
+## 2026-08-25 — Author's decisions + Arabic localization requirement
+
+### Decided by the author
+
+| Question | Answer |
+|---|---|
+| First usable version | **CLI recorder end-to-end.** PIDs + Chat Mic on the command line, record to file. Proves capture → mix → drift → encode, usable immediately, and becomes the test harness for the UI. |
+| Overnight autonomous work | **Yes, quiet audio tests OK** — under AGENTS.md rules (session volume ≤1e-4 / −92 dBFS, one-shot, self-terminating). |
+| goxlr-utility integration | **Later.** Core first. Door stays open; nothing depends on it. |
+| EXCLUDE_TARGET_PROCESS_TREE | **Approved for testing.** Timed for while he sleeps, so nothing sensitive is playing. Captured WAVs must be deleted after. |
+| UI after CLI | **Yes.** CLI is the automation surface; UI is what users actually want. |
+
+### NEW REQUIREMENT: Arabic localization
+
+Ships localized to Arabic before release. Caught before any UI code was written,
+so it is designed in rather than retrofitted — see new **design section 6.2** and
+**AGENTS.md rule 5**.
+
+Key constraints now binding on every agent:
+
+- **No user-facing string is ever a literal in code.** `.rc` STRINGTABLE, one
+  `LANGUAGE` block per locale, all in the single exe (`LoadStringW` by thread
+  locale). No satellite DLLs — size goal intact.
+- **Six plural forms in Arabic vs two in English.** A `printf("%d sources")`
+  API is unfixable later; the string API is plural-aware from day one.
+- **No sentence concatenation.** Positional specifiers (`%1$s`) only, so a
+  translator can reorder.
+- **Signal flow direction is a layout parameter.** Left-to-right in English,
+  **right-to-left in Arabic** — sources right, actions left. `WS_EX_LAYOUTRTL`
+  mirrors standard controls for free but does **not** mirror anything we paint,
+  and the canvas nodes are custom-painted (6.1), so the canvas owns its own
+  mirroring.
+- **Logical order stays language-independent.** Accessibility tree and TreeView
+  keep source → bus → action regardless of visual direction. Screen reader
+  navigation must not flip; only painting does.
+- Digits: Western by default (Saudi UI practice) — confirm with the author.
+- Never size a control to its English string; Arabic needs more vertical room.
+- Translation process when strings are actually written: `ux-araby` skill for
+  فصحى مبسطة, then a Gemini review pass. Keep the author's domain overrides —
+  **«إمكانية الوصول»**, never «الإتاحة».
+
+### Wave 2 — in flight (4 agents, all against `include/capture.h` + `include/action.h`)
+
+| Agent | Scope |
+|---|---|
+| Capture | `com_shim` (graduated from spike), `capture_process`, `capture_device`, `capture_fake`, `wasapi_common`; punk-leak fix; process-death detector; EXCLUDE mode test |
+| Core | `graph`, `source`, `bus`, `mix`, `resample`, `registry`; the corrected asymmetric drift model |
+| WAV action | `action_wav.c` — reference implementation the other encoders get reviewed against |
+| M4A action | `action_m4a.c` via in-box Media Foundation AAC |
+
+Contracts `include/capture.h` and `include/action.h` were written first,
+deliberately, so four parallel agents cannot diverge on the interfaces.
+
+### Remaining waves
+
+3. CLI front-end wiring (needs core) — **the first usable milestone**
+4. Review + integration pass over waves 1-2
+5. UI: `.rc` string catalog and i18n plumbing FIRST, then `app`/`canvas`/
+   `node_window` sequential, then `theme`/`dpi`/`darkmode`/`tree_panel` parallel
+6. Session persistence, MP3/OGG encoders, polish
