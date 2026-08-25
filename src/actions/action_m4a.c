@@ -870,7 +870,21 @@ static void m4a_destroy(void *state)
      * a file that opens. Close it properly before letting the state go. */
     if (!s->finalized) {
         AprErr e = m4a_finalize(s);
-        if (apr_failed(&e)) APR_LOG_ERR(APR_LOG_WARN, &e);
+        if (apr_failed(&e)) {
+            APR_LOG_ERR(APR_LOG_WARN, &e);
+            /* finalize() timed out. It deliberately does NOT TerminateThread,
+             * so the encoder thread is still alive and still reading `s` --
+             * its ring, its scratch buffers, its path. Freeing here would be a
+             * use-after-free under a live thread, during shutdown of a real
+             * recording. Leak instead, exactly as m4a_create does on the same
+             * join timeout: a few hundred KB is recoverable, this is not. */
+            if (!s->finalized) {
+                APR_WARN(L"m4a: encoder thread for \"%s\" did not exit; "
+                         L"leaking its state rather than freeing it underneath it",
+                         s->path);
+                return;
+            }
+        }
     }
     m4a_free(s);
 }
