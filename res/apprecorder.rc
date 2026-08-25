@@ -1,0 +1,19 @@
+/*
+ * apprecorder.rc -- attaches res/apprecorder.manifest to whatever binary
+ * compiles this file.
+ *
+ * Numbers, not names, on purpose: winuser.h spells
+ * CREATEPROCESS_MANIFEST_RESOURCE_ID and RT_MANIFEST as MAKEINTRESOURCE(...)
+ * macros, which rc.exe cannot evaluate in a resource statement. 1 is the
+ * process manifest id (2 would be the isolation-aware DLL id) and 24 is
+ * RT_MANIFEST.
+ *
+ * WHY A RESOURCE AND NOT link.exe's /MANIFEST: the linker's manifest tool
+ * REPLACES resource #1 in the finished image. If both mechanisms are active the
+ * generated manifest wins and this file is silently discarded -- no warning, no
+ * error, just a process that is suddenly comctl32 v5 and system-DPI-aware. The
+ * CMake block that adds this file therefore also passes /MANIFEST:NO, and
+ * tests/test_ui_a11y.c asserts at runtime that the settings actually took
+ * effect, so the two can never quietly drift apart.
+ */
+1 24 "apprecorder.manifest"

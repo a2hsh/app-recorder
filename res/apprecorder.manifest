@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  apprecorder.manifest
+
+  NOTE FOR EDITORS: a double hyphen is illegal inside an XML comment, and an
+  invalid manifest does not warn. The process fails to START, with
+  "the side-by-side configuration is incorrect" and nothing else. Keep prose
+  here free of them.
+
+  Three of the four settings are load-bearing for accessibility, not for looks,
+  which is why they live in the foundation rather than in polish:
+
+  1. Common-Controls 6.0. Without this dependency the process gets comctl32
+     version 5: the pre-XP controls, unthemed, and (the part that matters) with
+     the older and thinner accessibility implementations. Every "NM_CUSTOMDRAW,
+     never LVS_OWNERDRAWFIXED" decision downstream assumes v6 is active,
+     because NM_CUSTOMDRAW's stage model is a v6 feature.
+
+  2. PerMonitorV2 DPI awareness. V2, not V1: V1 leaves non-client area,
+     dialogs, menus and common controls at the process's startup DPI, so a
+     window dragged to a second monitor renders its chrome at the wrong size.
+     For a screen-magnifier user that is not cosmetic. Declared here rather
+     than called at startup because SetProcessDpiAwarenessContext must run
+     before any window exists and a manifest cannot lose that race.
+
+  3. UTF-8 active code page. The catalog is UTF-16 and the UI is wide-char
+     throughout, but any ANSI CRT path (a file name through fopen, a
+     GetLastError text, a third-party library) would otherwise use the system
+     ANSI code page and mangle Arabic. Requires Windows 10 1903 or later, which
+     is already below the floor set by process loopback (2004).
+
+  4. longPathAware, because recordings land wherever the user keeps audio and
+     MAX_PATH is not a promise worth inheriting.
+
+  The supportedOS list is not decoration either: activeCodePage and PerMonitorV2
+  are both gated on the manifest declaring Windows 10 support. Omit the GUID and
+  the settings are silently ignored, which is the worst possible failure mode:
+  no error, just wrong behaviour on a machine you cannot reproduce.
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1"
+          xmlns:asmv3="urn:schemas-microsoft-com:asm.v3"
+          manifestVersion="1.0">
+
+  <assemblyIdentity type="win32"
+                    name="apprecorder.app"
+                    version="1.0.0.0"
+                    processorArchitecture="amd64"/>
+
+  <description>Records audio from applications and hardware inputs.</description>
+
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity type="win32"
+                        name="Microsoft.Windows.Common-Controls"
+                        version="6.0.0.0"
+                        processorArchitecture="*"
+                        publicKeyToken="6595b64144ccf1df"
+                        language="*"/>
+    </dependentAssembly>
+  </dependency>
+
+  <asmv3:application>
+    <asmv3:windowsSettings>
+      <!-- The 2005 element is the fallback for hosts that predate the 2016
+           one. Both are given; the 2016 element wins where understood. -->
+      <dpiAware     xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
+      <activeCodePage xmlns="http://schemas.microsoft.com/SMI/2019/WindowsSettings">UTF-8</activeCodePage>
+      <longPathAware  xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware>
+    </asmv3:windowsSettings>
+  </asmv3:application>
+
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <!-- Windows 10 and 11 -->
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>
+      <!-- Windows 8.1 -->
+      <supportedOS Id="{1f676c76-80e1-4239-95bb-83d0f6d0da78}"/>
+      <!-- Windows 8 -->
+      <supportedOS Id="{4a2f28e3-53b9-4441-ba9c-d69d4a4a6e38}"/>
+      <!-- Windows 7 -->
+      <supportedOS Id="{35138b9a-5d96-4fbd-8e2d-a2440225f93a}"/>
+    </application>
+  </compatibility>
+</assembly>

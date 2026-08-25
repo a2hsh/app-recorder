@@ -1848,3 +1848,476 @@ the vendor target. Do not remove that line.
 ### Status: all four encoders complete — WAV, MP3, OGG*, M4A
 
 *OGG/Opus not yet written; WAV, MP3, M4A are done.
+
+---
+
+## 2026-08-26 — UI foundation (wave 5, sequential head): manifest, DPI, theme, dark mode, frame
+
+`res/apprecorder.manifest`, `res/apprecorder.rc`, `src/ui/{dpi,theme,darkmode,app}.c`
+with headers `include/ui_{dpi,theme,darkmode,app}.h`, plus `tests/test_ui_theme.c`
+(31 cases) and `tests/test_ui_a11y.c` (11 cases).
+**20/20 suites green in Debug and Release, `/W4 /WX` clean.** Uncommitted.
+
+`apprecorder_ui` is a **static library with no entry point**. WinMain in a
+library collides with every test's `main()`, and which front end owns the
+process is not this layer's call — `apr_ui_app_run()` is what a future WinMain
+calls. Nothing produces a GUI exe yet; that is one integration step, deliberately
+deferred.
+
+### THE UIA TEST RUNS HERE, and it earned its keep immediately
+
+`tests/test_ui_a11y.c` is a real **UI Automation client** (`CUIAutomation`): it
+creates the frame on a worker thread with its own message loop, then walks the
+live tree from the test's MTA thread — two threads on purpose, because a UIA
+client querying a window on the STA that owns it can deadlock. It prints the
+tree on every run.
+
+It found two defects that no amount of reading would have:
+
+1. **The splitter was an unnamed, keyboard-focusable Pane** — something a screen
+   reader lands on and can say nothing about. Worse, resizing it was
+   **mouse-only**, which is an AGENTS.md rule 5 violation. Now named from the
+   catalog, `WS_TABSTOP`, and operable with Left/Right (Ctrl for a bigger step)
+   and Home/End.
+2. **`SetWindowTheme` sends `WM_THEMECHANGED`**, whose handler called
+   `apply_dark`, which called `SetWindowTheme`. Unbounded recursion, presenting
+   as `STATUS_FATAL_USER_CALLBACK_EXCEPTION` (0xC000041D) with no indication of
+   which callback. Fixed with a re-entrancy guard in `apply_dark`; the comment
+   there says why it belongs in the function and not in the message handler.
+
+Current tree: 18 elements, **0 unnamed**, 14 keyboard-focusable. F6 focus
+movement is verified for real (tree HWND to canvas HWND), not asserted from
+window styles.
+
+**One honest scoping note:** the OS's own non-client `TitleBar` element reports
+an empty Name in every Win32 app. The walk marks that subtree `[os]` and exempts
+it; everything we create is held to the rule.
+
+**One environment limit:** the test process is not foreground here, so UIA's
+`GetFocusedElement` returns nothing. The F6 test therefore checks the UI
+thread's focus window via `GetGUIThreadInfo`, which is per-thread and needs no
+foreground, and still tries UIA first. It reports which path it used rather than
+silently weakening.
+
+### THREE THINGS IN DESIGN SECTION 6 ARE WRONG. The spec should be corrected.
+
+1. **6.2: "Segoe UI Variable covers Arabic" is FALSE.** Measured on this machine
+   by asking the font for glyph indices (`GGI_MARK_NONEXISTING_GLYPHS`) for the
+   Arabic already in `res/strings.rc`: **5 code points with no glyph.** The
+   family is Latin/Greek/Cyrillic. This is not cosmetic — GDI font linking
+   substitutes a face so the text still *appears*, but with different ascent and
+   descent, so a layout measured against Segoe UI Variable's metrics clips the
+   Arabic actually drawn. That is exactly rule 6's "never size a control to fit
+   its English string", arriving through the font instead of through the string.
+   `theme.c` now picks the face per script and **verifies coverage at runtime**
+   (Latin to Segoe UI Variable Text, Arabic to Segoe UI); the test prints the
+   count every run, so a future Windows adding Arabic gets noticed rather than
+   inherited.
+
+2. **6.2 has `WS_EX_LAYOUTRTL` backwards.** It says the style "does not mirror
+   anything we paint ourselves". The opposite is true: it gives the window a
+   **mirrored device context**, so our own drawing is what it reflects, and it
+   is **inherited by children** unless the parent carries
+   `WS_EX_NOINHERITLAYOUT`. "Set it on the frame and forget it" would silently
+   mirror the canvas and every node window. The convention now is: the frame is
+   NOT LAYOUTRTL and DOES carry `WS_EX_NOINHERITLAYOUT` so nothing can acquire
+   it by accident; standard controls get it individually; custom-painted windows
+   never do and mirror their own geometry. Asserted on a live window.
+
+3. **6.3 understates, and slightly misplaces, the dark-mode risk.** "Isolate it
+   and make failure non-fatal" is right, but the ordinals resolved and worked
+   fine on build 26200 — the crash came from our own re-entrancy, not from
+   Microsoft. The useful rule is narrower: *no function in `darkmode.c` returns
+   an error*, so there is no failure a caller can mishandle, and `theme.c` reads
+   the user's dark preference from the documented registry value rather than
+   from `ShouldAppsUseDarkMode`, so our painting stays correct even with every
+   ordinal missing.
+
+### Conventions the canvas / node_window / tree_panel agents inherit
+
+- **Tokens, not constants.** `apr_theme_metrics()` returns DEVICE pixels already
+  scaled for the theme's current DPI, so call sites never multiply and therefore
+  cannot forget to. Do not cache them across `WM_DPICHANGED`. Colours are
+  semantic (`node_source`, `edge_active`, `surface_sel` vs `surface_sel_bg`). A
+  missing token gets added to `ui_theme.h`; it does not get hardcoded in a paint
+  handler.
+- **Direction has ONE source** (`apr_str_is_rtl()`, via `apr_ui_dir()`) and ONE
+  mirroring site (`apr_ui_mirror_rect` / `apr_ui_lead_x`). `apr_ui_layout()` is
+  a **pure function** taking direction as a parameter, which is what lets a test
+  run both directions in one process. Logical order never flips: child z-order,
+  tab order and the accessibility tree stay structure then canvas in both
+  languages. Only painting mirrors.
+- **Every window is named** through `apr_ui_set_accessible_name(hwnd, id)` — an
+  AprStrId, so names re-localize — backed by `IAccPropServices`, which is
+  **thread-local** because it is an STA object.
+  `apr_ui_set_accessible_description` carries the "what this is for, and how to
+  move around it" sentence.
+- **Focus is drawn by `apr_theme_draw_focus()`, one function for the product.**
+  The ring is **two colours**, and that is a correctness property, not styling:
+  no single colour clears 3:1 against a white surface AND a mid-blue accent AND
+  a selection fill. The test asserts the property (for every surface, at least
+  one of the two ring colours reaches 3:1), not the colours.
+- **Panes are real child HWNDs** with `WS_TABSTOP`, `DLGC_WANTARROWS` and no
+  `DLGC_WANTTAB` — arrows are yours, Tab must escape or the pane is a focus
+  trap. `canvas.c` / `tree_panel.c` implement `apr_canvas_create(parent, theme)`
+  / `apr_tree_panel_create(parent, theme)`; CMake defines `APR_HAVE_UI_CANVAS` /
+  `APR_HAVE_UI_TREE_PANEL` from file presence (the action-registry pattern), and
+  until then `app.c` supplies a named placeholder so the a11y test is real now.
+- **Every operation is on the menu, greyed rather than absent when
+  unimplemented.** Grey says "later" to someone who can see it; absent says
+  "never" to someone who cannot. Route new operations through
+  `apr_ui_app_set_command_handler` + `apr_ui_app_enable_command`.
+
+### Two build traps that cost real time
+
+- **A double hyphen is illegal inside an XML comment.** An invalid manifest does
+  not warn: the process fails to *start* with "the side-by-side configuration is
+  incorrect" and nothing else. The manifest now says so at the top.
+- **rc.exe dependency scanning follows `#include` only.** Editing
+  `apprecorder.manifest` did not rebuild the `.res`, so the OLD manifest stayed
+  embedded and the fix appeared not to work. `CMakeLists.txt` now states the
+  dependency with `OBJECT_DEPENDS`. Also `/MANIFEST:NO` on the UI target is
+  load-bearing: link.exe's manifest tool REPLACES resource #1, so with both
+  mechanisms active ours is silently discarded and the process quietly becomes
+  comctl32 v5 and system-DPI-aware. `test_ui_a11y.c` asserts both at runtime
+  (awareness == per-monitor v2, comctl32 >= 6) so this cannot drift unnoticed.
+
+### Catalog
+
+**32 new UI strings** at ids **1300 to 1352**, in their own `APR_STR_LIST_UI`
+group with its own English `STRINGTABLE` — a range deliberately clear of the CLI
+block (1060 to 1163) and of the plural bases (1200+), so three agents can grow
+without renumbering each other. `APR_STR_ID_MAX` raised 1280 to 1400. **No
+Arabic written**; all 32 are declared untranslated and now await the same
+ux-araby + Gemini pass as the rest.
+
+**Menu strings carry two things a translator must not drop:** the `&` mnemonic
+(it is the keyboard path to the item, not decoration) and the accelerator text
+after the tab. `test_ui_a11y.c` asserts every menu item has a mnemonic and that
+mnemonics are unique within their menu — a duplicate cycles instead of
+activating, which is a correctness failure.
+
+### Palette is contrast-checked, not eyeballed
+
+`test_ui_theme.c` computes WCAG relative luminance and asserts AA (4.5:1) for
+every text/surface pair including `text_dim` — the one that always regresses —
+and 3:1 for non-text UI. Two colours failed on the first run and were fixed
+(`border_strong` in both palettes; the single-colour focus ring became two).
+
+### Not done, deliberately
+
+- No `WinMain` and no GUI exe target (see above).
+- `apr_theme_high_contrast()` is honoured and the palette switches wholesale to
+  `GetSysColor`, but no machine here runs high contrast, so that path is
+  exercised only by inspection.
+- The splitter position is not persisted; that belongs with session save.
+
+
+---
+
+## 2026-08-26 - CLI landed: the first usable milestone. `apprecorder.exe` records.
+
+`src/cli/cli.c` + `src/cli/cli.h` + `src/cli/main.c`, `src/capture/discover.c` +
+`include/discover.h`, `tests/test_cli.c` (43 cases). **20/20 suites green in
+Debug and Release**, `/W4 /WX` clean in both. Release `apprecorder.exe` is
+**496 KB**. Nothing committed.
+
+### The flag surface
+
+`apprecorder [command] [options]`. Commands: `record` (the default),
+`list-apps`, `list-devices`, `help`, `version`.
+
+**The grammar is positional and that is the feature.** `--bus <name>` opens a
+bus; every source and every output written after it belongs to that bus, until
+the next `--bus`. With no `--bus` there is one implicit bus called Recording.
+Several buses in one invocation is therefore ordinary rather than special, which
+is the entire point of the project:
+
+```
+apprecorder --bus Mix   --exe teams.exe --device Chat --out mix.wav \
+            --bus Voice --device Chat                 --out voice.wav
+```
+
+| Group | Flags |
+|---|---|
+| Sources | `--pid <id>`, `--exe <name>`, `--device <id-or-name>`, `--fake <hz>[,<ppm>[,<amp>]]`, `--system-minus-tree <id>`, `--gain <dB>` |
+| Outputs | `--out <path>`, `--format <id>`, `--bitrate <kbps>`, `--quality <n>` |
+| Session | `--rate`, `--channels`, `--duration <seconds>`, `--dry-run`, `--json`, `--quiet`, `--all`, `--lang`, `--log-level`, `--log-file` |
+
+- `--gain` attaches to the source written immediately before it; with no source
+  yet it is a usage error rather than a silent no-op.
+- `--format`, `--bitrate` and `--quality` are one-shot and apply to the next
+  `--out` only, so two outputs of different formats need no flag cleared by hand.
+- The format otherwise comes from the file extension, matched against
+  `apr_action_at()`'s `extension` field. Nothing in the CLI knows the list of
+  encoders; adding OGG needs no edit here.
+- `--exe` is matched against the **audio engine's session list**, not the
+  process table: exact executable name wins, a partial name is tried only if
+  nothing matched exactly, and more than one match is an error that prints the
+  pids.
+
+### Exit codes (documented in `help`, and contract from now on)
+
+| | |
+|---|---|
+| 0 | finished; every file closed and playable. **Ctrl+C is a 0.** |
+| 1 | the command line could not be read (unknown flag/command, missing value, non-numeric or out-of-range value) |
+| 2 | read, but not a recording that can be made (bus with no source, bus with no output, unknown format, no extension, two outputs on one file) |
+| 3 | a named process, application or capture device is not there |
+| 4 | an output could not be created or could not be closed |
+| 5 | a source could not be opened or started |
+| 6 | recorded and playable, but something went wrong: a source died mid-recording, or an action stopped taking audio |
+| 7 | internal |
+
+`--dry-run` returns the code the real run would have returned for the same
+problem, so a script can validate before committing.
+
+### Finalize on Ctrl+C - how it is guaranteed, and VERIFIED
+
+Four things, of which the fourth is the one that matters:
+
+1. **Ctrl+C is a request, not a kill.** `SetConsoleCtrlHandler` sets a flag,
+   signals an event and returns TRUE, so Windows does not terminate the process;
+   the record loop notices and stops properly. A **second** Ctrl+C prints
+   "still finishing" and still refuses to abandon the encoders.
+2. **CTRL_CLOSE/LOGOFF/SHUTDOWN block inside the handler** until the files are
+   closed (4 s cap), because Windows terminates the process a few seconds after
+   that handler returns whatever it does.
+3. **One destroy site, and it is a `__finally`.** `apr_graph_destroy` stops every
+   bus - which finalizes every action - before freeing anything, and nothing in
+   `do_record` returns past that block. `apr_cli_main` wraps the whole run in
+   `__try/__except` so an access violation UNWINDS through the `__finally`
+   instead of skipping it.
+4. **Measured, not asserted.** A real `GenerateConsoleCtrlEvent(CTRL_C_EVENT)`
+   was sent to a real `apprecorder.exe` recording a WAV and an M4A from fake
+   sources: exit code 0, WAV valid RIFF/WAVE, and the **M4A contained its `moov`
+   atom** - which is the whole game, since an MP4 without one is unplayable and
+   unrepairable from a dead process. `tests/test_cli.c` drives the same path via
+   `apr_cli_request_stop()`, the exact entry point the handler calls, and
+   asserts the file is playable afterwards.
+
+The loop also sleeps `APR_BUS_LOOKBEHIND_MS` and ticks once more before
+stopping, so Ctrl+C does not throw away the last 50 ms the mixer had not yet
+rendered.
+
+### `--dry-run` opens no audio device, by construction
+
+`apr_cli_resolve` is entirely property queries: the process table, the audio
+engine's session list, the endpoint list, and a create-then-delete probe of each
+output path. No `IAudioClient` is activated anywhere in it. Tests assert that no
+file exists afterwards.
+
+### EXCLUDE mode: `--system-minus-tree <pid>`
+
+- A **process id only**, never a name. Deliberateness is the feature for a mode
+  that records the whole machine.
+- Never a default, never implied by anything else, and pinned by a test that a
+  `--pid` or `--exe` source is never this kind.
+- It prints four lines every time, none of them suppressible, and **none of them
+  worded as "everything except X"** (spec 4.1.1): what it records, that a whole
+  TREE is held back including programs started later, **who is in that tree right
+  now**, and the launcher warning. Verified live - pointing it at a pwsh pid
+  listed `pwsh.exe (29128), apprecorder.exe (36740)`, i.e. it caught apprecorder
+  itself, which is exactly the trap the spec describes.
+
+### New: `src/capture/discover.c` + `include/discover.h`
+
+Not in the design's section 7 module list; said out loud rather than smuggled in.
+The UI needs the same three queries the CLI does, so it is a real module, not a
+CLI helper.
+
+- `apr_enum_audio_apps` walks every ACTIVE render endpoint's **audio sessions**,
+  deduplicated by pid, carrying active/inactive, mute, session volume and image
+  path. **It never lists the process table** - a few hundred PIDs is a useless
+  list; a handful of audio sessions is the answer. Own pid and pid 0 (system
+  sounds) are excluded.
+- `apr_enum_capture_endpoints` - id, friendly name, default flag.
+- `apr_enum_process_tree` - Toolhelp snapshot plus transitive closure, which is
+  what makes the EXCLUDE warning honest.
+- Measured on this rig: 4 GoXLR capture endpoints, and `list-apps` reported one
+  active session (nvda.exe) out of ~9 sessions.
+
+### Mute and death, both wired through
+
+- **Muted at plan time**: `apr_cli_resolve` warns before recording starts, which
+  is the only moment the warning helps. Loopback is post-session-volume, so a
+  muted app records as pure silence and looks healthy.
+- **Died mid-recording**: `poll_sources` watches `apr_source_alive` each tick and
+  reports the transition once. It also sets exit code **6** - a dead app
+  otherwise produces hours of perfect silence that looks like a success.
+- Mute alone does NOT change the exit code (it is a state the user can see and
+  undo); death and action failure do.
+
+### Text is localized, JSON is not - and that is deliberate
+
+Every line a person reads is a catalog entry, including every line of the help
+screen and every exit-code line (AGENTS.md rule 6). **89 new ids** in
+`APR_STR_LIST`, English written, Arabic left PARTIAL as instructed - the count
+the test prints is now `ar-SA: 7 translated, 154 awaiting translation`.
+
+`--json` field names and numbers are fixed ASCII on purpose: they are a wire
+format a script matches on, and localizing them would break every script the
+moment the interface language changed. Numbers there go through `swprintf`;
+numbers a person reads go through `apr_str_number`, which stays the only digit
+shaping site.
+
+### THREE THINGS THAT BIT, AND WILL BITE THE NEXT AGENT
+
+1. **rc.exe dies on a large STRINGTABLE - `fatal error RC10056:` with NOTHING
+   after the colon.** Measured with a probe: ~60 entries of help-text length
+   compile, ~80 do not. The catalog therefore had to be cut into named groups
+   (`APR_STR_LIST_CORE` / `_CLI` / `_CLI_ERR` / `_CLI_MSG`, plus the UI agent's
+   `_UI`), each emitted into its **own STRINGTABLE block**, with `APR_STR_LIST`
+   as their sum. Nothing outside `res/strings.rc` knows the groups exist. The
+   reasoning is written into `strings.h` so nobody re-derives it.
+   **The Arabic section is still ONE table**, because rc.exe also rejects a
+   STRINGTABLE that expands to zero entries and every Arabic group but the first
+   is empty. Splitting it is the translation pass's job; the .rc says so.
+2. **`AprCliPlan` is a few hundred KB of fixed arrays and overflows a 1 MB
+   stack.** It lives in static storage; the header now says so in capitals. This
+   presented as a `0xC00000FD` in an unrelated test case.
+3. **`cl 14.42 /O1 /GL` ICE'd on the original `parse_fixed`** (separate whole and
+   fractional accumulators, scaled separately) - `fatal error C1001` at the
+   `*out =` line, Release only, Debug fine. Rewritten around one accumulator;
+   the comment in the source records why it is shaped that way.
+
+### Two extras worth knowing
+
+- **`apr_str_number_fixed(scaled, decimals, ...)` added to the string layer**
+  rather than a private decimal formatter in the CLI (rule 3). A gain of
+  -6.5 dB and a duration of 1.015 s both need it, and putting the decimal
+  separator anywhere but beside `apr_str_number` would have split the digit
+  shaping decision in two.
+- **Indentation is not in the catalog.** `say_indented()` prefixes the pad in LTR
+  and appends it in RTL via `apr_str_is_rtl()`. A catalog entry beginning with
+  two spaces would be inset from the wrong side in Arabic and a translator could
+  not fix it. `tests/test_strings.c`'s fragment guard catches this - it is a good
+  guard and it caught 12 real cases.
+
+### Nothing in the spec was contradicted
+
+Everything the CLI touches behaved as sections 3, 4.1, 4.1.1, 5 and 10 describe.
+Two documentation-level notes:
+
+- **Section 7's module list has no home for discovery.** `discover.c` is a real
+  new module under `capture/`, wanted by the UI as much as by the CLI. Worth
+  adding to the list.
+- **Section 6.2 says the CLI is "English by default"** and that is implemented
+  (`apr_cli_run` sets `LANG_ENGLISH` before doing anything, so a script's output
+  does not change because the machine's language did). It also says Arabic
+  console output "still renders poorly in some terminals" - untested, since there
+  is no Arabic copy to render yet.
+
+### Safety (AGENTS.md rule 1 disclosure)
+
+**Nothing was rendered to any output device at any point in this work.** Every
+recording test used `APR_SRC_FAKE`, which synthesises samples into a ring and
+never opens an endpoint in either direction. The device path was only ever
+enumerated and dry-run, never started. `--system-minus-tree` was only ever
+dry-run, so nothing the machine was playing was ever written anywhere.
+`spike_silentplayer.c` was not needed and was not run. Every file produced -
+three test recordings, the Ctrl+C pair, and a handful of dry-run probes - was
+deleted; the repo and `%TEMP%` were swept and hold no audio files.
+
+### Caveats
+
+- **A real process tap has never been recorded through the CLI**, only through
+  the capture layer's own tests. `--pid` and `--exe` are exercised to the point
+  of resolution and refusal, not to the point of audio.
+- Same for `--device`: enumerated, resolved, dry-run, never started - starting it
+  records the author's microphone. **This is still the highest-risk untested path
+  in the project** and still needs a manual pass with the author awake.
+- `--lang ar-SA` selects Arabic, and Arabic is 154 strings short, so the CLI is
+  English in practice whatever is asked for.
+- The MP3 and M4A outputs are written by their own actions and were only checked
+  structurally here (`moov`/`mdat` present, plausible size); their own suites own
+  the byte-level guarantees.
+
+---
+
+## 2026-08-26 — UI FOUNDATION complete. Three spec errors corrected.
+
+`res/apprecorder.manifest`, `res/apprecorder.rc`, `src/ui/{dpi,theme,darkmode,
+app}.c` + `include/ui_{dpi,theme,darkmode,app}.h`, `tests/test_ui_theme.c` (31
+cases), `tests/test_ui_a11y.c` (11 cases). **20/20 suites green, Debug and
+Release, `/W4 /WX` clean.**
+
+`apprecorder_ui` is a **static library with no entry point** — a `WinMain` in a
+library collides with every test's `main()`, and which front end owns the process
+is not this layer's call. `apr_ui_app_run()` is what a future `WinMain` calls.
+**No GUI exe target**, hence no collision with the CLI agent.
+
+### The UIA test runs here, and paid for itself on the first run
+
+Real `CUIAutomation` client: frame on a worker thread with its own loop, tree
+walked from the test's MTA thread — **two threads is required**, since a UIA
+client querying a window on the STA that owns it can deadlock. Prints the tree
+every run. Current: **18 elements, 0 unnamed, 14 keyboard-focusable.**
+
+It found two genuine defects:
+
+1. **The splitter was an unnamed focusable Pane and could only be resized with a
+   mouse** — a straight AGENTS.md rule 5 violation that visual review would not
+   have caught. Now named from the catalog, `WS_TABSTOP`, Left/Right (Ctrl =
+   larger step), Home/End.
+2. **`SetWindowTheme` sends `WM_THEMECHANGED`, whose handler called `apply_dark`,
+   which called `SetWindowTheme`.** Unbounded recursion surfacing as
+   `STATUS_FATAL_USER_CALLBACK_EXCEPTION` with no indication which callback.
+   Re-entrancy guard added.
+
+### THREE SPEC ERRORS — mine, now fixed
+
+1. **§6.2 said `WS_EX_LAYOUTRTL` "does not mirror anything we paint". Exactly
+   backwards.** It gives a **mirrored DC** and **is inherited by children**, so
+   "set it on the frame" would silently mirror the canvas and every node window,
+   text included. Following the old wording would have produced the very bug it
+   claimed to prevent. **Critical for the canvas agent.** Correct arrangement:
+   frame is *not* LAYOUTRTL and carries `WS_EX_NOINHERITLAYOUT`; standard
+   controls get it individually; painted windows never do and mirror through
+   layout logic.
+2. **§6.2 said Segoe UI Variable covers Arabic. Measured: it does not** — five
+   Arabic code points in the catalog have no glyph. Font-linking substitutes a
+   face so the text *appears*, but with **different ascent/descent**, so a layout
+   measured against Segoe UI Variable's metrics **clips the Arabic actually
+   drawn**. This is "never size to the English string" arriving through the font
+   rather than the string, which is why English-only review would miss it.
+   `theme.c` now picks per script and verifies coverage at runtime.
+3. **§6.3 misplaced the dark-mode risk.** The undocumented ordinals resolved fine
+   on 26200; the crash was our own recursion (above). Load-bearing rules are that
+   **no function in `darkmode.c` returns an error**, and `theme.c` reads the dark
+   preference from the **documented registry value**, never
+   `ShouldAppsUseDarkMode`.
+
+### Conventions the canvas/tree agents inherit
+
+- Metrics are **device pixels, already scaled** — call sites never multiply.
+- One direction source (`apr_ui_dir()`), one mirroring site. `apr_ui_layout()` is
+  **pure** with direction as a parameter, so both directions test in one process.
+- **Logical order never flips** — z-order, tab order and the a11y tree stay
+  structure → canvas in both languages. Only geometry mirrors.
+- Names via `apr_ui_set_accessible_name(hwnd, AprStrId)` (`IAccPropServices`,
+  thread-local because STA).
+- Focus ring is **two-colour as a correctness property**: no single colour clears
+  3:1 against surface *and* accent *and* selection.
+- `canvas.c` / `tree_panel.c` implement `apr_canvas_create` /
+  `apr_tree_panel_create`, discovered by CMake from file presence; a named
+  placeholder stands in until they exist.
+
+### Build traps now documented in-file — do not rediscover
+
+- **`--` is illegal inside an XML comment.** An invalid manifest means the
+  process **will not start**.
+- **rc.exe only scans `#include`**, so `OBJECT_DEPENDS` on the manifest is
+  required or edits are silently ignored.
+- **`/MANIFEST:NO` matters**: link.exe's manifest tool *replaces* resource #1
+  silently.
+
+### Notes
+
+- 32 new UI strings at 1300–1352, own group and `STRINGTABLE`, deliberately clear
+  of the CLI block and plural bases. `APR_STR_ID_MAX` 1280→1400. **No Arabic
+  written** — all 32 join the pending `ux-araby` + Gemini pass.
+- The palette is **contrast-asserted, not eyeballed**; two colours failed on
+  first run and were fixed.
+- `strings.h`/`strings.rc` were merged around the live CLI agent's restructure
+  twice. **Worth a reviewer glance at those two files.**

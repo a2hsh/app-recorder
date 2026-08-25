@@ -462,9 +462,31 @@ Western-versus-Arabic-Indic digit decision in exactly one function.
 That convention is what lets a translator write a zero form that never mentions
 the number beside an other form that does.
 
-**RTL layout.** `WS_EX_LAYOUTRTL` mirrors standard child-control positioning for
-free. **It does not mirror anything we paint ourselves** — and our canvas nodes
-are custom-painted HWNDs (6.1), so the canvas owns its mirroring explicitly.
+**RTL layout — an earlier draft had this exactly backwards and it matters.**
+
+That draft said `WS_EX_LAYOUTRTL` "does not mirror anything we paint ourselves."
+**The opposite is true.** The style gives the window a **mirrored DC**, and it is
+**inherited by child windows**. So "just set it on the frame" would silently
+mirror the canvas and every node window — including their text, which would be
+drawn backwards. Following the old wording would have produced exactly the bug it
+claimed to prevent.
+
+The working arrangement, verified in `src/ui/`:
+
+- The **frame is not `LAYOUTRTL`** and carries **`WS_EX_NOINHERITLAYOUT`**, so
+  nothing inherits a mirrored DC by accident.
+- **Standard controls get `LAYOUTRTL` individually**, where the free mirroring is
+  what we actually want.
+- **Painted windows never get it.** They mirror through layout logic, not
+  through the DC.
+- Direction has exactly one source (`apr_ui_dir()`, over `apr_str_is_rtl()`) and
+  exactly one mirroring site. `apr_ui_layout()` is **pure**, with direction as a
+  parameter, so both directions can be tested in one process.
+
+**Metrics are device pixels, already DPI-scaled.** Call sites never multiply.
+
+**Logical order never flips.** Z-order, tab order and the accessibility tree stay
+structure → canvas in both languages. Only geometry mirrors.
 
 **Signal-flow direction is a layout parameter, not a constant.** The graph reads
 left-to-right in English and must read **right-to-left in Arabic**: sources on
@@ -479,9 +501,22 @@ reader navigation order must not flip with the layout; only the painting does.
 UI practice. Confirm with the author before shipping — he is an accessibility
 expert at DGA and this is his domain.
 
-**Fonts.** Segoe UI Variable covers Arabic. Verify rendering at the target sizes
-rather than assuming; Arabic needs more vertical room than Latin at the same
-point size, so **never** size a control to fit its English string.
+**Fonts — an earlier draft claimed Segoe UI Variable covers Arabic. Measured: it
+does not.** Five Arabic code points in the current catalog have **no glyph** in
+that face.
+
+This is not cosmetic. Windows font-linking silently substitutes another face, so
+the text *appears* — but with **different ascent and descent**. A layout measured
+against Segoe UI Variable's metrics then clips the Arabic that actually gets
+drawn. It is the "never size to the English string" rule arriving through the
+font instead of through the string length, which is why it would have survived
+visual review in English.
+
+`theme.c` therefore **selects the face per script and verifies glyph coverage at
+runtime** rather than trusting any font to cover a language.
+
+Arabic also needs more vertical room than Latin at the same point size, so
+**never** size a control to fit its English string.
 
 **Translation process** (when the strings are actually written, not now): draft
 through the `ux-araby` skill for فصحى مبسطة, then a Gemini review pass. Keep the
@@ -498,12 +533,49 @@ is an automation surface, so this is low priority.
 and preserves the accessibility tree; full owner-draw replaces the control's
 semantics and leaves a screen reader nothing to read. This is a hard rule.
 
-Supporting: comctl32 v6 manifest, Segoe UI Variable, per-monitor DPI v2, generous
-spacing. Dark mode is undocumented uxtheme (`SetPreferredAppMode`) and breaks
-between Windows builds — implement it, isolate it entirely in `ui/darkmode.c`,
-and make its failure non-fatal.
+Supporting: comctl32 v6 manifest, per-monitor DPI v2, generous spacing, and a
+per-script font with verified coverage (see 6.2).
 
-Every operation must be reachable by keyboard. No mouse-only paths.
+**Dark mode — the risk is slightly different from what an earlier draft assumed.**
+The undocumented uxtheme ordinals resolved and worked fine on build 26200; the
+crash we actually hit was **our own recursion**: `SetWindowTheme` sends
+`WM_THEMECHANGED`, whose handler called back into `SetWindowTheme`. Unbounded
+recursion, surfacing as `STATUS_FATAL_USER_CALLBACK_EXCEPTION` with no indication
+of which callback. Fixed with a re-entrancy guard.
+
+So the load-bearing rules are: **no function in `darkmode.c` returns an error**
+(failure is always non-fatal), and `theme.c` reads the dark preference from the
+**documented registry value**, never `ShouldAppsUseDarkMode`.
+
+**Every operation must be reachable by keyboard. No mouse-only paths.** The UIA
+test caught a real violation of this immediately: the splitter was an unnamed
+focusable pane that could only be resized with a mouse. It is now named from the
+catalog, `WS_TABSTOP`, and driven by Left/Right (Ctrl for a larger step) plus
+Home/End.
+
+**Focus rings are two-colour, and that is a correctness property, not decoration.**
+No single colour clears 3:1 contrast against surface *and* accent *and*
+selection simultaneously.
+
+### 6.4 The accessibility tree is tested, not assumed
+
+`tests/test_ui_a11y.c` is a real `CUIAutomation` client: it raises the frame on a
+worker thread with its own message loop and walks the tree from the test's MTA
+thread. **Two threads is required** — a UIA client querying a window on the STA
+that owns it can deadlock.
+
+It asserts every element has a non-empty Name and a correct ControlType, and
+prints the whole tree every run. Current: **18 elements, 0 unnamed, 14
+keyboard-focusable.** A screen reader sees exactly what UIA exposes, so this
+tests the property directly rather than by proxy — and it earned its keep on the
+first run by finding the splitter defect above.
+
+Two honest limits, both documented in the test: the OS's own `TitleBar` element
+has an empty Name in every Win32 application, so that subtree is marked `[os]`
+and exempted; and when the test process is not foreground, UIA's
+`GetFocusedElement` returns nothing, so the focus check falls back to
+`GetGUIThreadInfo` (per-thread, no foreground required) and reports which path it
+used.
 
 ---
 

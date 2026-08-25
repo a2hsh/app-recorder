@@ -68,12 +68,12 @@
 #define APR_EN_APP_NAME                  "apprecorder"
 #define APR_EN_APP_TAGLINE               "Records audio from applications and hardware inputs."
 
-#define APR_EN_CLI_USAGE_HEADER          "Usage: apprecorder [options]"
-#define APR_EN_CLI_OPT_PID               "--pid <id>        Capture the application with this process id. May be repeated."
-#define APR_EN_CLI_OPT_DEVICE            "--device <name>   Capture this hardware input, for example the GoXLR Chat Mic."
-#define APR_EN_CLI_OPT_OUT               "--out <path>      Write the recording to this file."
-#define APR_EN_CLI_OPT_FORMAT            "--format <name>   Container to write: wav or m4a."
-#define APR_EN_CLI_OPT_LANG              "--lang <tag>      Interface language, for example en-US or ar-SA."
+#define APR_EN_CLI_USAGE_HEADER          "Usage: apprecorder [command] [options]"
+#define APR_EN_CLI_OPT_PID               "--pid <id>             Capture the application with this process id. May be repeated."
+#define APR_EN_CLI_OPT_DEVICE            "--device <name>        Capture this hardware input, for example the GoXLR Chat Mic."
+#define APR_EN_CLI_OPT_OUT               "--out <path>           Write this bus to this file. May be repeated."
+#define APR_EN_CLI_OPT_FORMAT            "--format <id>          Write the next --out in this format instead of the one its file extension names."
+#define APR_EN_CLI_OPT_LANG              "--lang <tag>           Interface language, for example en-US or ar-SA."
 
 #define APR_EN_STATUS_RECORDING_TO       "Recording to %1!s!."
 #define APR_EN_STATUS_STOPPED            "Recording stopped."
@@ -97,6 +97,112 @@
 #define APR_EN_NODE_KIND_ACTION          "Action"
 #define APR_EN_UIA_SOURCE_FEEDS          "%1!s!, source, feeding %2!s!."
 #define APR_EN_UIA_BUS_FEEDS             "%1!s!, bus, feeding %2!s!."
+
+/* ---------------------------------------------------------------------------
+ * CLI surface. Every line the command-line front end prints is one entry here,
+ * including each line of the usage text and each exit-code line -- a help
+ * screen assembled from fragments in C is exactly what strings.h forbids, and
+ * a translator has to be able to rewrite a whole line rather than a column of
+ * it.
+ *
+ * NOT here, deliberately: the field names inside --json output. Those are a
+ * wire format that scripts match on, not prose a person reads, and localizing
+ * them would break every script the moment the interface language changed.
+ * Everything a person reads goes through this catalog; everything a program
+ * parses is fixed ASCII.
+ * ------------------------------------------------------------------------- */
+
+#define APR_EN_CLI_COMMANDS_HEADER              "Commands"
+#define APR_EN_CLI_CMD_RECORD                   "record                 Record. This is what apprecorder does when no command is given."
+#define APR_EN_CLI_CMD_LIST_APPS                "list-apps              List the applications that are playing audio right now."
+#define APR_EN_CLI_CMD_LIST_DEVICES             "list-devices           List the audio capture devices this computer has."
+#define APR_EN_CLI_CMD_HELP                     "help                   Show this help."
+#define APR_EN_CLI_CMD_VERSION                  "version                Show which build this is."
+#define APR_EN_CLI_SOURCES_HEADER               "Sources. Each one joins the bus opened most recently."
+#define APR_EN_CLI_OPT_BUS                      "--bus <name>           Open a bus. The sources and outputs that follow belong to it."
+#define APR_EN_CLI_OPT_EXE                      "--exe <name>           Capture the application whose program file is <name>, for example chrome.exe."
+#define APR_EN_CLI_OPT_FAKE                     "--fake <hz>[,<ppm>[,<amp>]]   Add a source apprecorder generates itself. Reads no audio hardware and plays nothing."
+#define APR_EN_CLI_OPT_GAIN                     "--gain <dB>            Gain for the source named just before it. 0 dB leaves it alone."
+#define APR_EN_CLI_OPT_SYSTEM_MINUS_TREE        "--system-minus-tree <id>   Record all system audio and hold back one process tree, named by its process id. Read what it prints before you use it."
+#define APR_EN_CLI_OUTPUTS_HEADER               "Outputs. Each one joins the bus opened most recently."
+#define APR_EN_CLI_OPT_BITRATE                  "--bitrate <kbps>       Bitrate for the next --out, where the format has one. 0 leaves it to the encoder."
+#define APR_EN_CLI_OPT_QUALITY                  "--quality <n>          Quality for the next --out, where the format has one. 0 leaves it to the encoder."
+#define APR_EN_CLI_SESSION_HEADER               "The session as a whole."
+#define APR_EN_CLI_OPT_RATE                     "--rate <hz>            Sample rate every source and every file uses. 48000 by default."
+#define APR_EN_CLI_OPT_CHANNELS                 "--channels <n>         Channel count every source and every file uses. 2 by default."
+#define APR_EN_CLI_OPT_DURATION                 "--duration <seconds>   Stop on its own after this long. Without it, recording runs until Ctrl+C."
+#define APR_EN_CLI_OPT_DRY_RUN                  "--dry-run              Check the whole command line and print what would happen. Opens no audio device and writes no file."
+#define APR_EN_CLI_OPT_JSON                     "--json                 Print JSON for a script to read instead of text for a person."
+#define APR_EN_CLI_OPT_QUIET                    "--quiet                Print warnings and errors only."
+#define APR_EN_CLI_OPT_ALL                      "--all                  In list-apps, include applications that hold an audio session but are silent at this moment."
+#define APR_EN_CLI_OPT_LOG_LEVEL                "--log-level <level>    How much apprecorder logs: trace, debug, info, warn, error or off. warn by default."
+#define APR_EN_CLI_OPT_LOG_FILE                 "--log-file <path>      Write the log to this file as well."
+#define APR_EN_CLI_EXIT_HEADER                  "Exit codes, for scripts."
+#define APR_EN_CLI_EXIT_OK                      "0   Finished. Every file was closed and every file plays."
+#define APR_EN_CLI_EXIT_USAGE                   "1   The command line could not be read."
+#define APR_EN_CLI_EXIT_CONFIG                  "2   The command line was read, but it does not describe a recording that can be made."
+#define APR_EN_CLI_EXIT_NOT_FOUND               "3   A process, application or capture device named on the command line is not there."
+#define APR_EN_CLI_EXIT_OUTPUT                  "4   A file could not be created, or could not be closed properly."
+#define APR_EN_CLI_EXIT_CAPTURE                 "5   A source could not be opened or could not be started."
+#define APR_EN_CLI_EXIT_INCOMPLETE              "6   Recording finished and every file plays, but something went wrong while it ran."
+#define APR_EN_CLI_EXIT_INTERNAL                "7   apprecorder failed and has no better description for it than that."
+#define APR_EN_CLI_EXAMPLES_HEADER              "Examples"
+#define APR_EN_CLI_EXAMPLE_ONE                  "apprecorder --pid 4321 --out teams.m4a"
+#define APR_EN_CLI_EXAMPLE_TWO                  "apprecorder --bus Mix --exe teams.exe --device Chat --out mix.wav --bus Voice --device Chat --out voice.wav"
+#define APR_EN_CLI_STOP_HINT                    "Press Ctrl+C to stop. Every file is closed and made playable before apprecorder exits."
+#define APR_EN_CLI_VERSION_LINE                 "apprecorder %1!s!"
+#define APR_EN_ERR_UNKNOWN_COMMAND              "%1!s! is not a command apprecorder has. Run apprecorder help to see the ones it does."
+#define APR_EN_ERR_UNKNOWN_OPTION               "%1!s! is not an option apprecorder has. Run apprecorder help to see the ones it does."
+#define APR_EN_ERR_OPTION_NEEDS_VALUE           "%1!s! needs a value written after it."
+#define APR_EN_ERR_BAD_NUMBER                   "%1!s! needs a number, and it was given %2!s!."
+#define APR_EN_ERR_OUT_OF_RANGE                 "%1!s! accepts %2!s! up to %3!s!, and it was given %4!s!."
+#define APR_EN_ERR_GAIN_WITHOUT_SOURCE          "--gain sets the gain of the source written before it, so a source has to come first."
+#define APR_EN_ERR_BUS_HAS_NO_SOURCE            "The bus %1!s! has nothing to record. Give it a source with --pid, --exe, --device or --fake."
+#define APR_EN_ERR_BUS_HAS_NO_OUTPUT            "The bus %1!s! has nowhere to go. Give it a file with --out."
+#define APR_EN_ERR_PID_NOT_RUNNING              "No process on this computer has the id %1!s!."
+#define APR_EN_ERR_EXE_NOT_PLAYING              "Nothing called %1!s! is playing audio right now. Run apprecorder list-apps to see what is."
+#define APR_EN_ERR_EXE_AMBIGUOUS                "Several things called %1!s! are playing audio at once: %2!s!. Name the one you want with --pid."
+#define APR_EN_ERR_DEVICE_NOT_FOUND             "This computer has no capture device called %1!s!. Run apprecorder list-devices to see the ones it has."
+#define APR_EN_ERR_DEVICE_AMBIGUOUS             "More than one capture device matches %1!s!: %2!s!. Write the whole name, or the device id."
+#define APR_EN_ERR_NO_EXTENSION                 "%1!s! has no file extension, so apprecorder cannot tell what to write into it. Add one, or say --format."
+#define APR_EN_ERR_OUTPUT_NOT_WRITABLE          "%1!s! cannot be written: %2!s!"
+#define APR_EN_ERR_TOO_MANY_BUSES               "This build records %1!s! buses at once and the command line asks for more."
+#define APR_EN_ERR_TOO_MANY_SOURCES             "The bus %1!s! takes %2!s! sources and the command line gives it more."
+#define APR_EN_ERR_TOO_MANY_OUTPUTS             "The bus %1!s! takes %2!s! outputs and the command line gives it more."
+#define APR_EN_ERR_CAPTURE_START                "%1!s! could not be captured: %2!s!"
+#define APR_EN_ERR_DUPLICATE_OUTPUT             "%1!s! is named as an output twice, and two recordings cannot share one file."
+#define APR_EN_ERR_OPTION_NOT_FOR_COMMAND       "%1!s! means nothing to the command %2!s!."
+#define APR_EN_WARN_SYSTEM_CAPTURE_SCOPE        "--system-minus-tree records every sound this computer plays, from every application, and writes all of it into your file."
+#define APR_EN_WARN_SYSTEM_CAPTURE_TREE         "Held back from the recording: %1!s!, every program it has started, every program those started, and any program it starts later."
+#define APR_EN_WARN_SYSTEM_CAPTURE_MEMBERS      "In that tree at this moment: %1!s!."
+#define APR_EN_WARN_SYSTEM_CAPTURE_LAUNCHER     "If %1!s! is a terminal, a shell or a launcher, then everything you have run from it is held back too, including programs you would not think of as belonging to it."
+#define APR_EN_WARN_STILL_FINISHING             "Still finishing. apprecorder does not abandon a recording part-written, so the files are being closed now."
+#define APR_EN_WARN_ACTION_FAILED               "%1!s! stopped taking audio: %2!s! It is still being closed, and what it holds still plays."
+#define APR_EN_STATUS_DRY_RUN_HEADER            "Dry run. This is what apprecorder would do, and it is doing none of it."
+#define APR_EN_STATUS_DRY_RUN_OK                "The command line describes a recording apprecorder can make. No audio device was opened and no file was written."
+#define APR_EN_STATUS_PLAN_SESSION              "Session format: %1!s! Hz, %2!s! channels."
+#define APR_EN_STATUS_PLAN_BUS                  "Bus %1!s!"
+#define APR_EN_STATUS_PLAN_SOURCE               "source: %1!s! (%2!s!), gain %3!s! dB"
+#define APR_EN_STATUS_PLAN_OUTPUT               "output: %1!s! as %2!s!"
+#define APR_EN_STATUS_WROTE                     "Wrote %1!s!, %2!s! seconds."
+#define APR_EN_STATUS_ELAPSED                   "Recorded %1!s! seconds."
+#define APR_EN_LIST_APPS_HEADER                 "Applications playing audio right now."
+#define APR_EN_LIST_APPS_EMPTY                  "Nothing is playing audio on this computer right now."
+#define APR_EN_LIST_APPS_ROW                    "%1!s!  %2!s!"
+#define APR_EN_LIST_APPS_ROW_MUTED              "%1!s!  %2!s!  - muted in the Windows volume mixer, so it would record as silence"
+#define APR_EN_LIST_APPS_ROW_IDLE               "%1!s!  %2!s!  - holds an audio session but is silent at this moment"
+#define APR_EN_LIST_DEVICES_HEADER              "Audio capture devices on this computer."
+#define APR_EN_LIST_DEVICES_EMPTY               "This computer has no audio capture device switched on."
+#define APR_EN_LIST_DEVICES_ROW                 "%1!s!"
+#define APR_EN_LIST_DEVICES_ROW_DEFAULT         "%1!s!  - the one Windows records from by default"
+#define APR_EN_LIST_DEVICES_ID_LINE             "device id: %1!s!"
+#define APR_EN_SOURCE_KIND_PROCESS              "application"
+#define APR_EN_SOURCE_KIND_SYSTEM_MINUS_TREE    "all system audio minus one process tree"
+#define APR_EN_SOURCE_KIND_DEVICE               "capture device"
+#define APR_EN_SOURCE_KIND_FAKE                 "generated by apprecorder"
+/* The bus a recording gets when the command line never says --bus. It is a
+ * name a person sees, so it is here rather than a literal in cli.c. */
+#define APR_EN_CLI_DEFAULT_BUS_NAME             "Recording"
 
 /* Plurals. %1 is always the count. English reaches only ONE and OTHER; the
  * other four slots carry the OTHER text so that no slot is ever empty and so
@@ -123,6 +229,61 @@
 #define APR_EN_N_FRAMES_LOST_MANY        "%1!s! frames lost"
 #define APR_EN_N_FRAMES_LOST_OTHER       "%1!s! frames lost"
 
+/* ---------------------------------------------------------------------------
+ * UI shell (src/ui). Rules that bind a translator here specifically:
+ *
+ *   - THE AMPERSAND IS THE KEYBOARD PATH, not decoration. Every menu string
+ *     keeps exactly one "&", on a letter that is unique inside its own menu.
+ *     Dropping it removes the only way a keyboard user reaches that item, and
+ *     AGENTS.md rule 5 makes that a correctness failure, not a cosmetic one.
+ *   - The text after "\t" is the accelerator as Windows renders it. It stays
+ *     in the same catalog entry so label and shortcut cannot drift apart, and
+ *     it is deliberately NOT localized letter-by-letter -- the key the user
+ *     actually presses does not change with the interface language.
+ *   - PANE and DESC entries are read aloud by a screen reader and never drawn.
+ *     They are the accessible name and description of a pane, so they must
+ *     read as speech, not as a caption.
+ * ------------------------------------------------------------------------- */
+
+#define APR_EN_UI_TITLE_UNTITLED         "Untitled session - apprecorder"
+#define APR_EN_UI_TITLE_SESSION          "%1!s! - apprecorder"
+
+#define APR_EN_UI_PANE_CANVAS            "Signal flow"
+#define APR_EN_UI_PANE_TREE              "Structure"
+#define APR_EN_UI_PANE_STATUS            "Status"
+#define APR_EN_UI_DESC_CANVAS            "The recording graph, drawn as nodes. Press Tab to move between nodes, and F6 to leave this pane."
+#define APR_EN_UI_DESC_TREE              "The same recording graph as a tree: every bus, the sources feeding it, and the files it writes."
+#define APR_EN_UI_STATUS_READY           "Ready."
+#define APR_EN_UI_PANE_SPLITTER          "Panel divider"
+#define APR_EN_UI_DESC_SPLITTER          "Sets how much room the structure panel takes. Press the left and right arrow keys to move it, or Home and End for its narrowest and widest."
+
+#define APR_EN_UI_MENU_FILE              "&File"
+#define APR_EN_UI_MENU_FILE_NEW          "&New Session\tCtrl+N"
+#define APR_EN_UI_MENU_FILE_OPEN         "&Open Session...\tCtrl+O"
+#define APR_EN_UI_MENU_FILE_SAVE         "&Save Session\tCtrl+S"
+#define APR_EN_UI_MENU_FILE_SAVE_AS      "Save Session &As...\tCtrl+Shift+S"
+#define APR_EN_UI_MENU_FILE_EXIT         "E&xit\tAlt+F4"
+
+#define APR_EN_UI_MENU_EDIT              "&Edit"
+#define APR_EN_UI_MENU_ADD_SOURCE        "Add &Source...\tCtrl+1"
+#define APR_EN_UI_MENU_ADD_BUS           "Add &Bus...\tCtrl+2"
+#define APR_EN_UI_MENU_ADD_ACTION        "Add &Output...\tCtrl+3"
+#define APR_EN_UI_MENU_CONNECT           "&Connect...\tCtrl+E"
+#define APR_EN_UI_MENU_REMOVE            "&Remove\tDelete"
+
+#define APR_EN_UI_MENU_RECORDING         "&Recording"
+#define APR_EN_UI_MENU_RECORD_START      "&Start Recording\tCtrl+R"
+#define APR_EN_UI_MENU_RECORD_STOP       "S&top Recording\tCtrl+."
+
+#define APR_EN_UI_MENU_VIEW              "&View"
+#define APR_EN_UI_MENU_VIEW_TREE         "&Structure Panel\tCtrl+T"
+#define APR_EN_UI_MENU_VIEW_DARK         "&Dark Appearance\tCtrl+D"
+#define APR_EN_UI_MENU_VIEW_NEXT_PANE    "&Next Pane\tF6"
+
+#define APR_EN_UI_MENU_HELP              "&Help"
+#define APR_EN_UI_MENU_HELP_KEYS         "&Keyboard Shortcuts\tF1"
+#define APR_EN_UI_MENU_HELP_ABOUT        "&About apprecorder"
+
 #define APR_EN_ENTRY(name, id)      id      APR_EN_##name
 #define APR_EN_PENTRY(name, base)                                              \
     base+0  APR_EN_##name##_ZERO                                               \
@@ -132,10 +293,41 @@
     base+4  APR_EN_##name##_MANY                                               \
     base+5  APR_EN_##name##_OTHER
 
+/* One STRINGTABLE per declared group, not one for the whole catalog.
+ * rc.exe fails with a bare "fatal error RC10056:" once a single macro
+ * invocation expands to enough text, which one table holding every string
+ * comfortably does. strings.h explains the measurement. A new group added
+ * there needs a block here, in both languages. */
+
 LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
+
 STRINGTABLE
 BEGIN
-    APR_STR_LIST(APR_EN_ENTRY)
+    APR_STR_LIST_CORE(APR_EN_ENTRY)
+END
+
+STRINGTABLE
+BEGIN
+    APR_STR_LIST_CLI(APR_EN_ENTRY)
+END
+
+STRINGTABLE
+BEGIN
+    APR_STR_LIST_CLI_ERR(APR_EN_ENTRY)
+END
+
+STRINGTABLE
+BEGIN
+    APR_STR_LIST_CLI_MSG(APR_EN_ENTRY)
+END
+
+STRINGTABLE
+BEGIN
+    APR_STR_LIST_UI(APR_EN_ENTRY)
+END
+
+STRINGTABLE
+BEGIN
     APR_STR_PLURAL_LIST(APR_EN_PENTRY)
 END
 
@@ -188,6 +380,95 @@ END
 #define APR_AR_NODE_KIND_ACTION(id)          /* not translated yet */
 #define APR_AR_UIA_SOURCE_FEEDS(id)          /* not translated yet */
 #define APR_AR_UIA_BUS_FEEDS(id)             /* not translated yet */
+#define APR_AR_CLI_COMMANDS_HEADER(id)          /* not translated yet */
+#define APR_AR_CLI_CMD_RECORD(id)               /* not translated yet */
+#define APR_AR_CLI_CMD_LIST_APPS(id)            /* not translated yet */
+#define APR_AR_CLI_CMD_LIST_DEVICES(id)         /* not translated yet */
+#define APR_AR_CLI_CMD_HELP(id)                 /* not translated yet */
+#define APR_AR_CLI_CMD_VERSION(id)              /* not translated yet */
+#define APR_AR_CLI_SOURCES_HEADER(id)           /* not translated yet */
+#define APR_AR_CLI_OPT_BUS(id)                  /* not translated yet */
+#define APR_AR_CLI_OPT_EXE(id)                  /* not translated yet */
+#define APR_AR_CLI_OPT_FAKE(id)                 /* not translated yet */
+#define APR_AR_CLI_OPT_GAIN(id)                 /* not translated yet */
+#define APR_AR_CLI_OPT_SYSTEM_MINUS_TREE(id)    /* not translated yet */
+#define APR_AR_CLI_OUTPUTS_HEADER(id)           /* not translated yet */
+#define APR_AR_CLI_OPT_BITRATE(id)              /* not translated yet */
+#define APR_AR_CLI_OPT_QUALITY(id)              /* not translated yet */
+#define APR_AR_CLI_SESSION_HEADER(id)           /* not translated yet */
+#define APR_AR_CLI_OPT_RATE(id)                 /* not translated yet */
+#define APR_AR_CLI_OPT_CHANNELS(id)             /* not translated yet */
+#define APR_AR_CLI_OPT_DURATION(id)             /* not translated yet */
+#define APR_AR_CLI_OPT_DRY_RUN(id)              /* not translated yet */
+#define APR_AR_CLI_OPT_JSON(id)                 /* not translated yet */
+#define APR_AR_CLI_OPT_QUIET(id)                /* not translated yet */
+#define APR_AR_CLI_OPT_ALL(id)                  /* not translated yet */
+#define APR_AR_CLI_OPT_LOG_LEVEL(id)            /* not translated yet */
+#define APR_AR_CLI_OPT_LOG_FILE(id)             /* not translated yet */
+#define APR_AR_CLI_EXIT_HEADER(id)              /* not translated yet */
+#define APR_AR_CLI_EXIT_OK(id)                  /* not translated yet */
+#define APR_AR_CLI_EXIT_USAGE(id)               /* not translated yet */
+#define APR_AR_CLI_EXIT_CONFIG(id)              /* not translated yet */
+#define APR_AR_CLI_EXIT_NOT_FOUND(id)           /* not translated yet */
+#define APR_AR_CLI_EXIT_OUTPUT(id)              /* not translated yet */
+#define APR_AR_CLI_EXIT_CAPTURE(id)             /* not translated yet */
+#define APR_AR_CLI_EXIT_INCOMPLETE(id)          /* not translated yet */
+#define APR_AR_CLI_EXIT_INTERNAL(id)            /* not translated yet */
+#define APR_AR_CLI_EXAMPLES_HEADER(id)          /* not translated yet */
+#define APR_AR_CLI_EXAMPLE_ONE(id)              /* not translated yet */
+#define APR_AR_CLI_EXAMPLE_TWO(id)              /* not translated yet */
+#define APR_AR_CLI_STOP_HINT(id)                /* not translated yet */
+#define APR_AR_CLI_VERSION_LINE(id)             /* not translated yet */
+#define APR_AR_ERR_UNKNOWN_COMMAND(id)          /* not translated yet */
+#define APR_AR_ERR_UNKNOWN_OPTION(id)           /* not translated yet */
+#define APR_AR_ERR_OPTION_NEEDS_VALUE(id)       /* not translated yet */
+#define APR_AR_ERR_BAD_NUMBER(id)               /* not translated yet */
+#define APR_AR_ERR_OUT_OF_RANGE(id)             /* not translated yet */
+#define APR_AR_ERR_GAIN_WITHOUT_SOURCE(id)      /* not translated yet */
+#define APR_AR_ERR_BUS_HAS_NO_SOURCE(id)        /* not translated yet */
+#define APR_AR_ERR_BUS_HAS_NO_OUTPUT(id)        /* not translated yet */
+#define APR_AR_ERR_PID_NOT_RUNNING(id)          /* not translated yet */
+#define APR_AR_ERR_EXE_NOT_PLAYING(id)          /* not translated yet */
+#define APR_AR_ERR_EXE_AMBIGUOUS(id)            /* not translated yet */
+#define APR_AR_ERR_DEVICE_NOT_FOUND(id)         /* not translated yet */
+#define APR_AR_ERR_DEVICE_AMBIGUOUS(id)         /* not translated yet */
+#define APR_AR_ERR_NO_EXTENSION(id)             /* not translated yet */
+#define APR_AR_ERR_OUTPUT_NOT_WRITABLE(id)      /* not translated yet */
+#define APR_AR_ERR_TOO_MANY_BUSES(id)           /* not translated yet */
+#define APR_AR_ERR_TOO_MANY_SOURCES(id)         /* not translated yet */
+#define APR_AR_ERR_TOO_MANY_OUTPUTS(id)         /* not translated yet */
+#define APR_AR_ERR_CAPTURE_START(id)            /* not translated yet */
+#define APR_AR_ERR_DUPLICATE_OUTPUT(id)         /* not translated yet */
+#define APR_AR_ERR_OPTION_NOT_FOR_COMMAND(id)   /* not translated yet */
+#define APR_AR_WARN_SYSTEM_CAPTURE_SCOPE(id)    /* not translated yet */
+#define APR_AR_WARN_SYSTEM_CAPTURE_TREE(id)     /* not translated yet */
+#define APR_AR_WARN_SYSTEM_CAPTURE_MEMBERS(id)  /* not translated yet */
+#define APR_AR_WARN_SYSTEM_CAPTURE_LAUNCHER(id) /* not translated yet */
+#define APR_AR_WARN_STILL_FINISHING(id)         /* not translated yet */
+#define APR_AR_WARN_ACTION_FAILED(id)           /* not translated yet */
+#define APR_AR_STATUS_DRY_RUN_HEADER(id)        /* not translated yet */
+#define APR_AR_STATUS_DRY_RUN_OK(id)            /* not translated yet */
+#define APR_AR_STATUS_PLAN_SESSION(id)          /* not translated yet */
+#define APR_AR_STATUS_PLAN_BUS(id)              /* not translated yet */
+#define APR_AR_STATUS_PLAN_SOURCE(id)           /* not translated yet */
+#define APR_AR_STATUS_PLAN_OUTPUT(id)           /* not translated yet */
+#define APR_AR_STATUS_WROTE(id)                 /* not translated yet */
+#define APR_AR_STATUS_ELAPSED(id)               /* not translated yet */
+#define APR_AR_LIST_APPS_HEADER(id)             /* not translated yet */
+#define APR_AR_LIST_APPS_EMPTY(id)              /* not translated yet */
+#define APR_AR_LIST_APPS_ROW(id)                /* not translated yet */
+#define APR_AR_LIST_APPS_ROW_MUTED(id)          /* not translated yet */
+#define APR_AR_LIST_APPS_ROW_IDLE(id)           /* not translated yet */
+#define APR_AR_LIST_DEVICES_HEADER(id)          /* not translated yet */
+#define APR_AR_LIST_DEVICES_EMPTY(id)           /* not translated yet */
+#define APR_AR_LIST_DEVICES_ROW(id)             /* not translated yet */
+#define APR_AR_LIST_DEVICES_ROW_DEFAULT(id)     /* not translated yet */
+#define APR_AR_LIST_DEVICES_ID_LINE(id)         /* not translated yet */
+#define APR_AR_SOURCE_KIND_PROCESS(id)          /* not translated yet */
+#define APR_AR_SOURCE_KIND_SYSTEM_MINUS_TREE(id) /* not translated yet */
+#define APR_AR_SOURCE_KIND_DEVICE(id)           /* not translated yet */
+#define APR_AR_SOURCE_KIND_FAKE(id)             /* not translated yet */
+#define APR_AR_CLI_DEFAULT_BUS_NAME(id)         /* not translated yet */
 
 #define APR_AR_P_N_SOURCES(base)                                               \
     base+0  "AR-PLACEHOLDER zero %1!s!"                                        \
@@ -199,10 +480,58 @@ END
 #define APR_AR_P_N_BUSES(base)               /* not translated yet */
 #define APR_AR_P_N_FRAMES_LOST(base)         /* not translated yet */
 
+/* UI shell -- untranslated. Menu mnemonics ("&") and the accelerator text
+ * after the tab must both survive the ux-araby + Gemini pass; see the English
+ * block above for why. */
+#define APR_AR_UI_TITLE_UNTITLED(id)      /* not translated yet */
+#define APR_AR_UI_TITLE_SESSION(id)       /* not translated yet */
+#define APR_AR_UI_PANE_CANVAS(id)         /* not translated yet */
+#define APR_AR_UI_PANE_TREE(id)           /* not translated yet */
+#define APR_AR_UI_PANE_STATUS(id)         /* not translated yet */
+#define APR_AR_UI_DESC_CANVAS(id)         /* not translated yet */
+#define APR_AR_UI_DESC_TREE(id)           /* not translated yet */
+#define APR_AR_UI_STATUS_READY(id)        /* not translated yet */
+#define APR_AR_UI_PANE_SPLITTER(id)       /* not translated yet */
+#define APR_AR_UI_DESC_SPLITTER(id)       /* not translated yet */
+#define APR_AR_UI_MENU_FILE(id)           /* not translated yet */
+#define APR_AR_UI_MENU_FILE_NEW(id)       /* not translated yet */
+#define APR_AR_UI_MENU_FILE_OPEN(id)      /* not translated yet */
+#define APR_AR_UI_MENU_FILE_SAVE(id)      /* not translated yet */
+#define APR_AR_UI_MENU_FILE_SAVE_AS(id)   /* not translated yet */
+#define APR_AR_UI_MENU_FILE_EXIT(id)      /* not translated yet */
+#define APR_AR_UI_MENU_EDIT(id)           /* not translated yet */
+#define APR_AR_UI_MENU_ADD_SOURCE(id)     /* not translated yet */
+#define APR_AR_UI_MENU_ADD_BUS(id)        /* not translated yet */
+#define APR_AR_UI_MENU_ADD_ACTION(id)     /* not translated yet */
+#define APR_AR_UI_MENU_CONNECT(id)        /* not translated yet */
+#define APR_AR_UI_MENU_REMOVE(id)         /* not translated yet */
+#define APR_AR_UI_MENU_RECORDING(id)      /* not translated yet */
+#define APR_AR_UI_MENU_RECORD_START(id)   /* not translated yet */
+#define APR_AR_UI_MENU_RECORD_STOP(id)    /* not translated yet */
+#define APR_AR_UI_MENU_VIEW(id)           /* not translated yet */
+#define APR_AR_UI_MENU_VIEW_TREE(id)      /* not translated yet */
+#define APR_AR_UI_MENU_VIEW_DARK(id)      /* not translated yet */
+#define APR_AR_UI_MENU_VIEW_NEXT_PANE(id) /* not translated yet */
+#define APR_AR_UI_MENU_HELP(id)           /* not translated yet */
+#define APR_AR_UI_MENU_HELP_KEYS(id)      /* not translated yet */
+#define APR_AR_UI_MENU_HELP_ABOUT(id)     /* not translated yet */
+
 #define APR_AR_ENTRY(name, id)      APR_AR_##name(id)
 #define APR_AR_PENTRY(name, base)   APR_AR_P_##name(base)
 
 LANGUAGE LANG_ARABIC, SUBLANG_ARABIC_SAUDI_ARABIA
+
+/* ONE table, unlike English above, and the reason is mechanical rather than a
+ * matter of taste: rc.exe rejects a STRINGTABLE that expands to no entries at
+ * all, and every Arabic group except the first is entirely untranslated today,
+ * so a per-group split produces four empty tables and a build failure.
+ *
+ * The English split exists because a single table holding every English string
+ * is too large for rc.exe (see strings.h). Arabic will reach that same size the
+ * moment it is actually translated, and the fix then is to split this section
+ * exactly the way the English one is split -- by which point every group has
+ * text in it and no table is empty. Until then this stays one table. */
+
 STRINGTABLE
 BEGIN
     APR_STR_LIST(APR_AR_ENTRY)
