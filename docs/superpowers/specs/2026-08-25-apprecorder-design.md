@@ -433,8 +433,34 @@ unfixable later, so the string API is plural-aware from day one:
 `apr_str_plural(id, n)`. English simply uses two of the six slots.
 
 **Never concatenate sentences.** Arabic word order differs, so fragments joined
-in code cannot be reordered by a translator. Use positional format specifiers
-(`%1$s`, `%2$d`) exclusively — the translator must be able to move the arguments.
+in code cannot be reordered by a translator. Use positional inserts exclusively —
+the translator must be able to move the arguments.
+
+**The spelling is `%1!s!`, not `%1$s`.** An earlier draft of this section said
+`%1$s`; that is POSIX and is implemented by neither Win32 nor the MSVC CRT. A
+translator following it would produce insert 1 followed by a literal `$s`.
+`FormatMessageW` with `FORMAT_MESSAGE_FROM_STRING` is the mechanism.
+
+Measured behaviour of `FormatMessageW`, so nobody re-derives it:
+
+- Inserts are **random access by number**, not a consuming stream: `%2!s! %1!s!`
+  genuinely reorders. This is the property Arabic needs.
+- An insert may be **repeated** — `%1!s!` three times expands three times and
+  consumes nothing.
+- An **unreferenced** argument is silently ignored (harmless).
+- A **referenced insert with no argument is not safe.** With
+  `FORMAT_MESSAGE_ARGUMENT_ARRAY` the array is indexed directly and the API
+  carries no count, so `%3!s!` against a two-element array reads past the end.
+  `FormatMessageW` cannot detect this. The string layer counts inserts itself and
+  refuses, with the internal array over-allocated and zero-filled as a backstop.
+
+**Every insert is `!s!`.** Numbers go through `apr_str_number()` first, which
+eliminates the argument-width hazard in the argument array and puts the
+Western-versus-Arabic-Indic digit decision in exactly one function.
+
+**In a plural string, `%1` is always the count**; caller arguments start at `%2`.
+That convention is what lets a translator write a zero form that never mentions
+the number beside an other form that does.
 
 **RTL layout.** `WS_EX_LAYOUTRTL` mirrors standard child-control positioning for
 free. **It does not mirror anything we paint ourselves** — and our canvas nodes

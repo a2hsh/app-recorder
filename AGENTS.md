@@ -124,8 +124,13 @@ from the start — see design section 6.2.
   Not in a `wchar_t*` in your source. This includes error messages, CLI output,
   UIA names and descriptions, and anything a screen reader will read.
 - **Never concatenate sentences from fragments.** Arabic word order differs and a
-  translator cannot reorder pieces joined in code. Use positional specifiers
-  (`%1$s`, `%2$d`) so arguments can move.
+  translator cannot reorder pieces joined in code. Use positional inserts so
+  arguments can move: **`%1!s!`, `%2!s!`** — the Win32 `FormatMessageW` spelling.
+  **Not `%1$s`**, which is POSIX and works on neither Win32 nor the MSVC CRT.
+- **Every insert is `!s!`.** Run numbers through `apr_str_number()` first.
+- **`apr_str()` locks and may allocate — it is NOT safe on an audio callback.**
+  Resolve strings on the UI or a worker thread, never in `on_audio` or a capture
+  pump.
 - **Never use `printf("%d items")` shaped plurals.** Arabic has six plural forms
   to English's two. Go through the plural-aware API.
 - **Never hardcode a layout direction.** Signal flow is left-to-right in English

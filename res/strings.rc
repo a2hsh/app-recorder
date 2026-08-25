@@ -1,0 +1,210 @@
+/*
+ * strings.rc -- apprecorder's string catalog.
+ *
+ * ONE FILE, ONE EXE. Every locale is a LANGUAGE block here and every block is
+ * linked into apprecorder.exe. No satellite DLLs: the binary grows only by the
+ * string bytes, which is what keeps design section 2's size goal reachable.
+ *
+ * ---------------------------------------------------------------------------
+ * DO NOT ADD AN ENTRY BY HAND.
+ *
+ * The entries below are GENERATED, per language, from APR_STR_LIST and
+ * APR_STR_PLURAL_LIST in include/strings.h. To add a string:
+ *
+ *   1. add its name and id to one of those two lists in strings.h;
+ *   2. add APR_EN_<NAME> here with the English text;
+ *   3. add APR_AR_<NAME>(id) here -- either with a translation, or empty with
+ *      a comment saying it is not translated yet.
+ *
+ * Step 2 is not optional: a name with no APR_EN_ macro leaves a bare
+ * identifier where rc.exe expects a string literal, and the build fails. That
+ * is deliberate. An untranslated PRIMARY-language string must never be able to
+ * reach a user as an empty label.
+ *
+ * Step 3 is also not optional, for the same mechanical reason, and that is the
+ * point: a new id cannot be added without every declared language explicitly
+ * saying what happens to it.
+ *
+ * ---------------------------------------------------------------------------
+ * WRITING THE TEXT
+ *
+ *   - Inserts are FormatMessageW syntax:  %1!s!  %2!s!  ...  Never POSIX
+ *     %1$s. Every insert in this catalog is !s!; numbers arrive already
+ *     rendered by apr_str_number(), so digit shaping stays in one place.
+ *   - Inserts may be reordered, repeated, or left out entirely by a
+ *     translator. All three are supported (see tests/test_strings.c).
+ *   - One entry is one complete sentence or one complete label. Never a
+ *     fragment intended to be glued to another in code.
+ *   - Plurals occupy six consecutive ids in CLDR order:
+ *     zero, one, two, few, many, other. English selects only one/other, but
+ *     all six must be non-empty -- an unreachable slot is filled with the
+ *     other form, never left blank.
+ *
+ * ---------------------------------------------------------------------------
+ * ENCODING
+ *
+ *   This file is UTF-8 with NO byte-order mark, and #pragma code_page(65001)
+ *   is what makes rc.exe read it that way. Verified, not assumed: without the
+ *   pragma rc.exe reads the bytes in the system ANSI code page and every
+ *   non-Latin character silently becomes mojibake at resource-compile time,
+ *   where nothing downstream can detect it. Keep the pragma above the first
+ *   non-ASCII text. If an editor ever adds a BOM that is fine too -- rc.exe
+ *   sniffs it -- but do not rely on one being there.
+ *
+ *   test_strings.c asserts the Arabic marker's exact UTF-16 code points for
+ *   precisely this reason: a test comparing wide literals from a .c file that
+ *   was itself mis-decoded would agree with the bug.
+ */
+
+#include <windows.h>
+#include "strings.h"
+
+#pragma code_page(65001)
+
+/* ===========================================================================
+ * ENGLISH -- the primary language, and the only one declared complete.
+ * ========================================================================= */
+
+#define APR_EN_APP_NAME                  "apprecorder"
+#define APR_EN_APP_TAGLINE               "Records audio from applications and hardware inputs."
+
+#define APR_EN_CLI_USAGE_HEADER          "Usage: apprecorder [options]"
+#define APR_EN_CLI_OPT_PID               "--pid <id>        Capture the application with this process id. May be repeated."
+#define APR_EN_CLI_OPT_DEVICE            "--device <name>   Capture this hardware input, for example the GoXLR Chat Mic."
+#define APR_EN_CLI_OPT_OUT               "--out <path>      Write the recording to this file."
+#define APR_EN_CLI_OPT_FORMAT            "--format <name>   Container to write: wav or m4a."
+#define APR_EN_CLI_OPT_LANG              "--lang <tag>      Interface language, for example en-US or ar-SA."
+
+#define APR_EN_STATUS_RECORDING_TO       "Recording to %1!s!."
+#define APR_EN_STATUS_STOPPED            "Recording stopped."
+#define APR_EN_STATUS_FINISHING          "Finishing %1!s!."
+
+/* Both warnings are facts the capture spike established, not speculation:
+ * loopback sits after the session volume, and WASAPI never reports the death
+ * of the process being captured. See SESSION-HANDOFF.md. */
+#define APR_EN_WARN_SOURCE_MUTED         "%1!s! is muted in the Windows volume mixer, so it will record as silence."
+#define APR_EN_WARN_SOURCE_EXITED        "%1!s! has exited, so its recording ends here."
+
+#define APR_EN_ERR_FILE_OPEN             "Could not open %1!s! for writing: %2!s!"
+#define APR_EN_ERR_UNKNOWN_FORMAT        "%1!s! is not a format this build can write."
+#define APR_EN_ERR_NO_SOURCES            "Nothing to record: add at least one source first."
+/* Repeats %2. Kept because it is natural English, and because a repeated
+ * insert is a case a translator will reach for and the code must survive. */
+#define APR_EN_ERR_SOURCE_ALREADY_ON_BUS "%1!s! is already on %2!s!. Remove it from %2!s! before adding it again."
+
+#define APR_EN_NODE_KIND_SOURCE          "Source"
+#define APR_EN_NODE_KIND_BUS             "Bus"
+#define APR_EN_NODE_KIND_ACTION          "Action"
+#define APR_EN_UIA_SOURCE_FEEDS          "%1!s!, source, feeding %2!s!."
+#define APR_EN_UIA_BUS_FEEDS             "%1!s!, bus, feeding %2!s!."
+
+/* Plurals. %1 is always the count. English reaches only ONE and OTHER; the
+ * other four slots carry the OTHER text so that no slot is ever empty and so
+ * that a wrong category selection degrades into correct English rather than
+ * into a blank label. */
+#define APR_EN_N_SOURCES_ZERO            "%1!s! sources"
+#define APR_EN_N_SOURCES_ONE             "%1!s! source"
+#define APR_EN_N_SOURCES_TWO             "%1!s! sources"
+#define APR_EN_N_SOURCES_FEW             "%1!s! sources"
+#define APR_EN_N_SOURCES_MANY            "%1!s! sources"
+#define APR_EN_N_SOURCES_OTHER           "%1!s! sources"
+
+#define APR_EN_N_BUSES_ZERO              "%1!s! buses"
+#define APR_EN_N_BUSES_ONE               "%1!s! bus"
+#define APR_EN_N_BUSES_TWO               "%1!s! buses"
+#define APR_EN_N_BUSES_FEW               "%1!s! buses"
+#define APR_EN_N_BUSES_MANY              "%1!s! buses"
+#define APR_EN_N_BUSES_OTHER             "%1!s! buses"
+
+#define APR_EN_N_FRAMES_LOST_ZERO        "%1!s! frames lost"
+#define APR_EN_N_FRAMES_LOST_ONE         "%1!s! frame lost"
+#define APR_EN_N_FRAMES_LOST_TWO         "%1!s! frames lost"
+#define APR_EN_N_FRAMES_LOST_FEW         "%1!s! frames lost"
+#define APR_EN_N_FRAMES_LOST_MANY        "%1!s! frames lost"
+#define APR_EN_N_FRAMES_LOST_OTHER       "%1!s! frames lost"
+
+#define APR_EN_ENTRY(name, id)      id      APR_EN_##name
+#define APR_EN_PENTRY(name, base)                                              \
+    base+0  APR_EN_##name##_ZERO                                               \
+    base+1  APR_EN_##name##_ONE                                                \
+    base+2  APR_EN_##name##_TWO                                                \
+    base+3  APR_EN_##name##_FEW                                                \
+    base+4  APR_EN_##name##_MANY                                               \
+    base+5  APR_EN_##name##_OTHER
+
+LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
+STRINGTABLE
+BEGIN
+    APR_STR_LIST(APR_EN_ENTRY)
+    APR_STR_PLURAL_LIST(APR_EN_PENTRY)
+END
+
+/* ===========================================================================
+ * ARABIC (ar-SA) -- PARTIAL, ON PURPOSE.
+ *
+ * There is NO Arabic copy in this file and there must not be any until the
+ * translation pass runs: draft through the ux-araby skill in فصحى مبسطة, then a
+ * Gemini review pass, keeping the author's domain-term overrides (notably
+ * «إمكانية الوصول», never «الإتاحة»). Machine-drafted Arabic UI text shipping
+ * to a Saudi accessibility expert is not a saving.
+ *
+ * What IS here is two entries whose only job is to prove the mechanism end to
+ * end before any UI exists:
+ *
+ *   APP_NAME   -- proves a per-language block is selected, and carries a short
+ *                 Arabic marker word so that the UTF-8 -> UTF-16 path through
+ *                 rc.exe is verified by exact code points in the tests rather
+ *                 than assumed.
+ *   N_SOURCES  -- all six CLDR forms, each distinguishable, so that Arabic
+ *                 plural selection is proven against real resources instead of
+ *                 against the rule function alone.
+ *
+ * Every other name maps to an empty macro: declared untranslated, falls back
+ * to English at runtime, and counted by tests/test_strings.c. When the
+ * translation lands, fill these in and flip ar-SA to APR_STR_COMPLETE in
+ * src/i18n/strings.c -- at which point the completeness test starts enforcing
+ * it and an omission fails the build.
+ * ========================================================================= */
+
+#define APR_AR_APP_NAME(id)                  id  "AR-PLACEHOLDER تجربة"
+#define APR_AR_APP_TAGLINE(id)               /* not translated yet */
+#define APR_AR_CLI_USAGE_HEADER(id)          /* not translated yet */
+#define APR_AR_CLI_OPT_PID(id)               /* not translated yet */
+#define APR_AR_CLI_OPT_DEVICE(id)            /* not translated yet */
+#define APR_AR_CLI_OPT_OUT(id)               /* not translated yet */
+#define APR_AR_CLI_OPT_FORMAT(id)            /* not translated yet */
+#define APR_AR_CLI_OPT_LANG(id)              /* not translated yet */
+#define APR_AR_STATUS_RECORDING_TO(id)       /* not translated yet */
+#define APR_AR_STATUS_STOPPED(id)            /* not translated yet */
+#define APR_AR_STATUS_FINISHING(id)          /* not translated yet */
+#define APR_AR_WARN_SOURCE_MUTED(id)         /* not translated yet */
+#define APR_AR_WARN_SOURCE_EXITED(id)        /* not translated yet */
+#define APR_AR_ERR_FILE_OPEN(id)             /* not translated yet */
+#define APR_AR_ERR_UNKNOWN_FORMAT(id)        /* not translated yet */
+#define APR_AR_ERR_NO_SOURCES(id)            /* not translated yet */
+#define APR_AR_ERR_SOURCE_ALREADY_ON_BUS(id) /* not translated yet */
+#define APR_AR_NODE_KIND_SOURCE(id)          /* not translated yet */
+#define APR_AR_NODE_KIND_BUS(id)             /* not translated yet */
+#define APR_AR_NODE_KIND_ACTION(id)          /* not translated yet */
+#define APR_AR_UIA_SOURCE_FEEDS(id)          /* not translated yet */
+#define APR_AR_UIA_BUS_FEEDS(id)             /* not translated yet */
+
+#define APR_AR_P_N_SOURCES(base)                                               \
+    base+0  "AR-PLACEHOLDER zero %1!s!"                                        \
+    base+1  "AR-PLACEHOLDER one %1!s!"                                         \
+    base+2  "AR-PLACEHOLDER two %1!s!"                                         \
+    base+3  "AR-PLACEHOLDER few %1!s!"                                         \
+    base+4  "AR-PLACEHOLDER many %1!s!"                                        \
+    base+5  "AR-PLACEHOLDER other %1!s!"
+#define APR_AR_P_N_BUSES(base)               /* not translated yet */
+#define APR_AR_P_N_FRAMES_LOST(base)         /* not translated yet */
+
+#define APR_AR_ENTRY(name, id)      APR_AR_##name(id)
+#define APR_AR_PENTRY(name, base)   APR_AR_P_##name(base)
+
+LANGUAGE LANG_ARABIC, SUBLANG_ARABIC_SAUDI_ARABIA
+STRINGTABLE
+BEGIN
+    APR_STR_LIST(APR_AR_ENTRY)
+    APR_STR_PLURAL_LIST(APR_AR_PENTRY)
+END

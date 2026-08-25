@@ -61,6 +61,16 @@ if(CORE_SRC)
 endif()
 
 # ---------------------------------------------------------------------------
+# MP3: vendored libmp3lame, built static so there is no DLL to ship.
+# LGPL-2.0-or-later; see vendor/lame/PROVENANCE.md. Warnings are relaxed inside
+# that target only -- /W4 /WX above still governs everything we write.
+# ---------------------------------------------------------------------------
+add_subdirectory(${CMAKE_SOURCE_DIR}/vendor/lame)
+if(TARGET apprecorder_core)
+  target_link_libraries(apprecorder_core PUBLIC lame)
+endif()
+
+# ---------------------------------------------------------------------------
 # Tests: one executable per test file, so a hang in one does not hide others.
 # ---------------------------------------------------------------------------
 enable_testing()
@@ -86,4 +96,33 @@ if(BUILD_SPIKES)
     add_executable(${spike_name} ${spike_file})
     target_link_libraries(${spike_name} PRIVATE ole32 oleaut32 uuid avrt mmdevapi)
   endforeach()
+endif()
+
+# ---------------------------------------------------------------------------
+# i18n string catalog (localization layer).
+#
+# Two things this block has to get right:
+#
+# 1. src/i18n/*.c is not covered by the CORE_SRC glob above, so it is added
+#    here rather than by editing that list while other agents are in it.
+#
+# 2. res/strings.rc is attached as an INTERFACE source, so every executable
+#    that links apprecorder_core compiles the catalog into ITSELF. Resources
+#    do not reliably survive a static library: link.exe pulls objects from a
+#    .lib to resolve symbols, and a .res defines none, so the catalog can be
+#    dropped from the final image with no diagnostic. An INTERFACE source
+#    sidesteps the question entirely.
+#
+# Note for anyone touching the compile options above: CMake does NOT pass the
+# directory-wide /W4 /WX /permissive- to rc.exe with this generator (verified
+# from the actual command line -- rc.exe receives only -D/-I and /fo). If that
+# ever changes, rc.exe rejects those switches outright and the fix is to guard
+# them with $<COMPILE_LANGUAGE:C>, not to drop this block.
+# ---------------------------------------------------------------------------
+enable_language(RC)
+
+if(TARGET apprecorder_core)
+  file(GLOB I18N_SRC ${CMAKE_SOURCE_DIR}/src/i18n/*.c)
+  target_sources(apprecorder_core PRIVATE ${I18N_SRC})
+  target_sources(apprecorder_core INTERFACE ${CMAKE_SOURCE_DIR}/res/strings.rc)
 endif()

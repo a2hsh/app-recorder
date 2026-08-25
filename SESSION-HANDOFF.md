@@ -1397,3 +1397,222 @@ special-cases one encoder. MP3 already matched.
 A full-suite verification raced the still-running MP3 agent
 (`LNK1168: cannot open test_action_mp3.exe for writing` — it held its own test
 binary). Not a real failure. **Re-verify once MP3 lands.**
+
+---
+
+## 2026-08-26 — i18n layer built BEFORE any UI exists (AGENTS.md rule 5)
+
+`include/strings.h`, `src/i18n/strings.c`, `res/strings.rc`,
+`tests/test_strings.c`. **31/31 cases, Debug and Release, `/W4 /WX` clean;
+full suite 17/17 in both configs.** Nothing committed.
+
+### The API the UI and CLI will use
+
+```c
+const wchar_t *apr_str(id);                    /* never NULL, never empty     */
+const wchar_t *apr_str_plural(base_id, n);     /* six CLDR forms             */
+size_t apr_str_format(id, buf, cch, args, nargs);        /* %1!s! .. %8!s!   */
+size_t apr_str_plural_format(base_id, n, buf, cch, args, nargs);
+size_t apr_str_format_string(fmt, buf, cch, args, nargs);
+size_t apr_str_number(n, buf, cch);            /* the only digit-shaping site */
+AprErr apr_str_set_language(LANGID);  LANGID apr_str_language();
+int    apr_str_is_rtl(void);                   /* the ONLY direction source   */
+AprPluralCategory apr_plural_category(LANGID, n);
+```
+
+Arguments are `const wchar_t *const *` — **every insert in the catalog is
+`!s!`**. Numbers go through `apr_str_number()` first. That kills the
+argument-width hazard in FormatMessage's argument array *and* puts the
+Western/Arabic-Indic digit decision in one function (design 6.2 leaves that
+question open with the author).
+
+### IDs are declared once and the .rc is GENERATED from them
+
+`APR_STR_LIST(X)` / `APR_STR_PLURAL_LIST(X)` in `strings.h` are X-macros, kept
+preprocessor-only so **rc.exe reads the same header**. The C enum and every
+`LANGUAGE` block expand from those lists. Consequences worth keeping:
+
+- **A missing English string is a hard rc.exe error**, not an empty label:
+  `error RC2104 : undefined keyword or key name: APR_EN_NODE_KIND_BUS`.
+  Verified by mutation.
+- **A new id cannot be added without every declared language saying what
+  happens to it** — Arabic needs an `APR_AR_<NAME>(id)` macro even when it
+  expands to nothing.
+- rc.exe was confirmed to handle function-like macros, `##` pasting, and
+  `base+1` id arithmetic inside `STRINGTABLE BEGIN/END`. That was the load
+  bearing unknown and it works.
+
+### The completeness check, and why it is not LoadStringW
+
+`apr_str_probe(lang, id, ...)` reads the resource directly and matches the
+language **exactly** — `EnumResourceLanguagesW` to confirm the block really
+carries that language, then a manual walk of the 16-entry block.
+
+**This is the whole point.** `LoadStringW` (and the loader's own language
+search) falls back, so a check built on it returns the *English* string for a
+missing Arabic one and passes on an untranslated build. Pinned by
+`probing_a_language_never_falls_back_to_another`.
+
+`every_id_resolves_in_every_complete_language` walks the catalog × languages
+declared `APR_STR_COMPLETE` under ctest, so `build.cmd Debug test` fails on a
+gap. Mutation-tested three ways: empty English text → 1 missing, named;
+deleted English macro → rc.exe error; Arabic flipped to COMPLETE → 33 missing,
+each named.
+
+### Arabic is DECLARED PARTIAL — deliberately
+
+`res/strings.rc` has an `ar-SA` block with **exactly two entries**, both
+obvious placeholders (`AR-PLACEHOLDER …`). **No Arabic copy was written** —
+that is the `ux-araby` + Gemini pass with the author's domain overrides
+(«إمكانية الوصول», never «الإتاحة»), and machine-drafted Arabic shipping to a
+DGA accessibility expert is not a saving. What the two entries buy:
+
+- `APP_NAME` proves per-language block selection, and carries a short Arabic
+  marker word so the **UTF-8 → UTF-16 path through rc.exe is verified by exact
+  code points** rather than assumed. `#pragma code_page(65001)` is what makes
+  that work; there is no BOM. Without the pragma rc.exe reads the file in the
+  system ANSI code page and mojibake is baked in where nothing downstream can
+  see it.
+- `N_SOURCES` carries **all six** CLDR forms, each distinguishable, so Arabic
+  plural selection is proven against real resources, not just the rule
+  function.
+
+Flipping `ar-SA` to `APR_STR_COMPLETE` in `src/i18n/strings.c` is the one-line
+gate the translation pass has to clear. **33 strings currently await
+translation** — the test prints that number every run.
+
+### What FormatMessageW actually does (measured, not assumed)
+
+- Inserts are **random access by number**, not a consuming stream. `%2!s! %1!s!`
+  reorders. `%3!s! %1!s! %2!s!` works.
+- **An insert may be repeated**: `%1!s! %1!s! %1!s!` expands three times and
+  consumes nothing. A shipping string relies on it.
+- **An unreferenced argument is silently ignored** — which is what lets a zero
+  plural form that never mentions the count still be passed the count.
+- **A referenced insert with no argument is NOT safe.** With
+  `FORMAT_MESSAGE_ARGUMENT_ARRAY` the array is indexed directly and the API
+  carries no argument count, so `%3!s!` against a two-element array reads past
+  the end and dereferences whatever it finds. FormatMessageW cannot detect it.
+  `strings.c` therefore **counts inserts itself and refuses**, and the internal
+  argument array is over-allocated and zero-filled as a second line.
+
+### Corrections to design 6.2
+
+1. **`%1$s` is wrong.** That is POSIX; Win32 does not implement it and neither
+   does the MSVC CRT. The Win32 spelling is `%1!s!`. Followed literally, a
+   translator's `%1$s` reaches FormatMessageW as insert 1 followed by a literal
+   `$s`. The intent (positional, reorderable) is met exactly; only the spelling
+   in the doc is wrong. **6.2 should be amended** before a translator reads it.
+2. **"a build check fails if an ID exists without a string in every declared
+   language"** cannot be satisfied literally while Arabic is being written —
+   it would forbid a partial locale. Implemented as per-language coverage:
+   COMPLETE is enforced, PARTIAL is enforced only for what it declares and
+   *reported*. Same guarantee at ship time, and it does not block work now.
+3. `LoadStringW` "selects by thread locale" is true but not usable for the
+   check — see above.
+
+Everything else in 6.2 stands. RTL/`WS_EX_LAYOUTRTL`, canvas owning its own
+mirroring, logical order not flipping, Western digits by default, never sizing
+a control to its English string: all still binding on the UI agents.
+
+### Cost
+
+The whole catalog — both languages, 47 resource strings — is **3,084 bytes**
+of `.res`. The single-exe, no-satellite-DLL decision holds comfortably.
+
+### Notes for whoever is next
+
+- `apr_str()` takes a lock and can malloc on a cache miss: **not safe on an
+  audio callback.** Report through `err.h`/`log.h` and localize at display.
+- `res/strings.rc` is attached to `apprecorder_core` as an **INTERFACE**
+  source, so every exe that links the core compiles the catalog into itself.
+  Resources do not reliably survive a static library — link.exe pulls objects
+  to resolve symbols and a `.res` defines none.
+- `apr_str_number` renders into local storage first on purpose: `_i64tow_s`
+  given a too-small buffer invokes the CRT invalid-parameter handler, which in
+  a Debug build is a **modal dialog, i.e. a hang** on whatever thread formatted
+  a number. That cost an hour; do not "simplify" it back.
+- CMake edit was one appended block: `enable_language(RC)`, `src/i18n/*.c`
+  added to `apprecorder_core`, and the `.rc` as an INTERFACE source. Nothing
+  existing was touched.
+- Gotcha that bit me and will bite the next agent: **restoring a file with
+  `Move-Item` restores its old mtime, so ninja keeps the stale object.** A test
+  "failure" after a revert is probably that.
+
+
+---
+
+## 2026-08-26 — i18n layer COMPLETE (before any UI exists, as intended)
+
+`include/strings.h`, `src/i18n/strings.c`, `res/strings.rc`,
+`tests/test_strings.c`. 31 cases green Debug + Release; full suite 17/17.
+**Whole catalog, both languages, 47 strings = 3,084 bytes of `.res`** — the
+single-exe decision holds comfortably.
+
+### API
+
+```c
+const wchar_t *apr_str(id);                 /* never NULL, never empty */
+const wchar_t *apr_str_plural(base_id, n);  /* six CLDR forms */
+size_t apr_str_format(id, buf, cch, args, nargs);        /* %1!s! .. %8!s! */
+size_t apr_str_plural_format(base_id, n, buf, cch, args, nargs);
+size_t apr_str_number(n, buf, cch);         /* the ONLY digit-shaping site */
+AprErr apr_str_set_language(LANGID);  LANGID apr_str_language(void);
+int    apr_str_is_rtl(void);                /* the ONLY direction source */
+```
+
+**Every insert is `!s!`**; numbers go through `apr_str_number()` first. That
+removes the argument-width hazard in FormatMessage's argument array entirely and
+puts the Western/Arabic-Indic digit question — which §6.2 leaves open with the
+author — in exactly one function. **In a plural string `%1` is always the
+count**, caller args start at `%2`; that convention is what lets a translator
+write a zero form that never mentions the number beside an other form that does.
+
+### IDs are X-macros so rc.exe reads the same header
+
+The C enum and every `LANGUAGE` block are generated from two preprocessor-only
+X-macros. A missing English string is a hard `RC2104` build error, not an empty
+label, and a new id cannot be added without every language stating what happens
+to it. rc.exe coping with function-like macros, `##`, and `base+1` id arithmetic
+inside `STRINGTABLE` was the load-bearing unknown — it works.
+
+### The completeness check deliberately does NOT use LoadStringW
+
+`LoadStringW` and the loader's own search **fall back**, so a check built on them
+returns the *English* string for a missing Arabic one and passes on an
+untranslated build. `apr_str_probe()` reads the resource directly and matches the
+language **exactly** (`EnumResourceLanguagesW` + a manual walk of the 16-entry
+block). Pinned by a test, and mutation-tested three ways.
+
+### Arabic status
+
+Declared **PARTIAL**, exactly two `AR-PLACEHOLDER` entries, **no Arabic copy
+written** — that is the author's call and a skilled pass, not an agent's.
+**33 strings await the `ux-araby` + Gemini review pass.** The test prints that
+count every run; flipping one enum value to COMPLETE is the ship gate.
+
+### Spec corrected — my error
+
+**§6.2 said `%1$s`. That is POSIX and works on neither Win32 nor the MSVC CRT.**
+A translator following it would emit insert 1 followed by a literal `$s`. Correct
+spelling is **`%1!s!`**. Fixed in §6.2 and AGENTS.md rule 6, with the measured
+`FormatMessageW` behaviour recorded so nobody re-derives it: inserts are random
+access (so reordering genuinely works), may be repeated, unreferenced args are
+ignored — but **a referenced insert with no argument reads past the end of the
+array and FormatMessageW cannot detect it**, so `strings.c` counts inserts itself
+and refuses.
+
+Also amended: §6.2's "build fails if an ID lacks a string in **every** language"
+cannot hold literally while Arabic is being written — it forbids a partial
+locale. Implemented as per-language coverage: COMPLETE enforced, PARTIAL enforced
+for what it declares and reported. Same guarantee at ship time, doesn't block
+work now.
+
+### Two gotchas for whoever is next
+
+- **`apr_str()` locks and may allocate — NOT safe on an audio callback.** Now in
+  AGENTS.md rule 6.
+- `apr_str_number` renders into local storage first because `_i64tow_s` with a
+  too-small buffer trips the CRT invalid-parameter handler, which in Debug is a
+  **modal dialog — i.e. a hang** on whatever thread formatted a number. Cost the
+  agent real time; do not undo it.
