@@ -2925,3 +2925,362 @@ Agent reports **24/24 Debug**; Release 23/24 with the single failure in
 `test_session` — the session agent still in flight. `test_ui_tree`,
 `test_ui_a11y`, `test_ui_canvas` and `test_strings` pass in both, tree suite run
 3× per config with no flakes. **Full re-verify once session lands.**
+
+---
+
+## 2026-08-26 — OGG/Opus action (`src/actions/action_ogg.c`) — DONE, 19/19 green
+
+The fourth and last encoder. One source file, one test file, two vendored
+libraries, three additive lines in the root `CMakeLists.txt`. Nothing else in
+the tree was touched.
+
+### Vendoring — libogg 1.3.6 + libopus 1.5.2, both BSD-3-Clause
+
+Both verified across channels that do not share a distribution path, to the bar
+`vendor/lame/PROVENANCE.md` set:
+
+| | libogg 1.3.6 (`.tar.xz`) | libopus 1.5.2 (`.tar.gz`) |
+|---|---|---|
+| SHA-256 | `5c825342…fa1061` | `65c1d2f7…9a7ce1` |
+| Xiph upstream | fetched | fetched |
+| Debian archive | **byte-identical by `cmp`** | **byte-identical by `cmp`** |
+| Gentoo `Manifest` | SHA-512 + size match | SHA-512 + size match |
+| nixpkgs | SRI hash decodes to the same SHA-256 | version only (pins a git tag, so its hash is a NAR hash — noted as a dead end) |
+
+**Every vendored file diffs clean against the tarball** — verified by `cmp`,
+205 opus files and 9 ogg files, zero differences. The single exception is
+`vendor/opus/config.h`, which is ours and says so.
+
+**opus 1.5.2 not 1.6.1 on purpose**: the 1.6 line pulls the neural-network
+features into the default build shape (35 MB tarball for 1.6.0, 10 MB for
+1.6.1). 1.5.2 is what Debian stable ships and the encoder API is identical.
+
+Not vendored: `dnn/` (18 MB of 22 — every reference to it is inside
+`ENABLE_DEEP_PLC` / `ENABLE_DRED` / `ENABLE_OSCE`, all decoder-side),
+`silk/fixed/` (this is a float build), and the `x86/` and `arm/` trees (no
+runtime CPU dispatch — same trade `vendor/lame/config.h` makes on NASM).
+
+### Decisions worth not re-deriving
+
+- **Everything is encoded at 48 kHz.** `opus_encoder_create` takes only
+  8/12/16/24/48 kHz, and Ogg Opus counts granule positions in 48 kHz units
+  regardless. 44.1 kHz — the commonest rate there is — cannot be encoded at
+  its own rate at all, so the choice is "resample or lose the bus".
+  `core/resample.c` does it, on the writer thread. Even the rates Opus accepts
+  natively are resampled, so there is ONE granule arithmetic instead of five.
+  The original rate survives in `OpusHead.input_sample_rate`.
+- **20 ms frames (960 samples).** Opus's own default; smaller pays per-packet
+  overhead, larger buys nothing for music and grows the tail a kill loses.
+- **Pre-skip is asked for (`OPUS_GET_LOOKAHEAD`), never assumed.** It is 312 in
+  practice; a wrong one is a permanent 6.5 ms offset against every other bus.
+  ffprobe reports `start: 0.006500` on our files, which is 312/48000 exactly.
+- **VBR by default, and unlike MP3 that costs nothing.** Granule positions make
+  duration exact, so there is no Xing-tag equivalent to write and nothing to
+  patch in finalize. MP3 had to default to CBR precisely because a VBR file
+  whose tag never got written lies about its length; Ogg has no such failure.
+- **Extension is `.opus`, id stays `ogg`.** RFC 7845 §9. `--format ogg` still
+  forces it onto a `.ogg` path (verified). A `.ogg` file containing Opus is
+  what breaks in Vorbis-only players.
+- Default bitrate 96 kbps stereo / 64 mono. `quality` 1..11 → Opus complexity
+  0..10; 0 means complexity 10.
+
+### A kill mid-recording leaves a playable file — verified with ffprobe, not just us
+
+`apprecorder.exe --fake 440 --out killed.opus --duration 60`, hard
+`Stop-Process -Force` at 12 s:
+
+```
+Input #0, ogg, from 'killed.opus':
+  Duration: 00:00:11.91, start: 0.006500, bitrate: 97 kb/s
+  Stream #0:0: Audio: opus, 48000 Hz, stereo, fltp
+      Metadata: ENCODER : apprecorder
+```
+
+`ffmpeg -v warning -i killed.opus -f null -` decodes the whole thing with zero
+warnings. Truncating a finished 4.04 s file at 37 % gives 1.37 s, also clean.
+Loss on a kill is bounded by libogg's ~4 KB page accumulation (~350 ms) plus
+whatever is still in the four-second ring. **There is deliberately no periodic
+`ogg_stream_flush`**: an early page wastes a 27-byte header forever to buy back
+a third of a second in an event that also loses four seconds to the ring.
+
+### NaN/Inf: measured, not scrubbed
+
+Rule 4 says `core/mix.c` owns non-finite input, and it does — for the *integer*
+formats. Opus takes float directly, so this action adds no guard, and the test
+measures what libopus actually does: **a decoded peak of exactly 0.00000000**.
+libopus turns NaNs and infinities into silence by itself, so unlike
+`action_mp3.c` (which had to clamp before LAME's psychoacoustic model turned one
+NaN into a frame of full-scale hash) nothing is duplicated here. The test asserts
+`< 0.05` so that a future libopus changing this fails loudly rather than
+quietly putting noise in a blind user's headphones.
+
+### Binary cost — 220.5 KB, and there is no way to shave it
+
+Release `apprecorder.exe`: **784,896 bytes with the action, 559,104 without**.
+Against MP3's 58 KB that is a lot, and it is unavoidable: LAME's decoder is a
+separate library half that provably stays out of the image, whereas Opus's
+decoder shares the range coder, the MDCT, the FFT and the mode tables with its
+encoder. An attempt to measure the decoder's marginal cost by forcing a
+reachable `opus_decoder_create` in came back at +2 KB — and so did the same
+probe with `opus_multistream_encoder_create`, which is certainly not otherwise
+linked, so **the experiment does not discriminate and no claim is made from
+it**. `vendor/opus/PROVENANCE.md` records both the number and the dead end.
+
+The image is still under 1 MB. If it ever needs to come down, the lever is
+`FIXED_POINT` (drops `silk/float/`, `analysis.c`, `mlp_data.c`), not the
+decoder.
+
+### Structure — action_mp3.c's, unchanged, plus one thing
+
+`on_audio` is `rb_write` + `SetEvent` and nothing else. The writer thread does
+resample → 20 ms framing → `opus_encode_float` → `ogg_stream_packetin` →
+`WriteFile`. The **resampler** is the third thing kept off the mixer thread that
+MP3 did not have to think about. Ring is `core/ringbuf.c`, four seconds; an
+overrun emits exactly the frame count `rb_read` reports as silence, so the file
+stays the length of the audio. Test seams `apr_ogg_test_write_gate` /
+`apr_ogg_test_fail_after_bytes` are `action_wav.c`'s technique verbatim.
+
+Worst single `on_audio` call with the disk held shut for a full second of
+audio: **0.004 ms**.
+
+### Test output
+
+`tests/test_action_ogg.c` — 19 cases, 19 pass, 3.2 s Debug. Demuxes with the
+vendored libogg, decodes with the vendored libopus, and hands the same files to
+**ffprobe** as a second opinion (skipped loudly, never silently, if ffprobe is
+not on PATH). Full suite at the time of writing: `100% tests passed, 0 tests
+failed out of 24`.
+
+### Left undone / flagged
+
+- The CLI maps extensions to actions, so `--out x.ogg` needs an explicit
+  `--format ogg`. That is a CLI decision, not this action's, and was left alone.
+- More than two channels is refused at create, same line `action_mp3.c` draws.
+  Opus mapping family 1 could carry 5.1, but the channel order is a session
+  decision.
+- Session rates outside [6000, 384000] are refused — that is where
+  `APR_RESAMPLE_MAX_RATIO` (8) runs out in each direction. Nothing in this
+  project produces one.
+
+---
+
+## 2026-08-26 — Session persistence (design section 9). Uncommitted.
+
+`include/session.h`, `src/session/session_save.c`, `src/session/session_load.c`,
+`tests/test_session.c` (**47 cases**), plus `--session` / `save-session` /
+`--allow-system-capture` / `--allow-missing` in `src/cli/`. `build.cmd Debug test`
+and `build.cmd Release test`: **24/24 suites, 0 failures**, `/W4 /WX` clean in
+both.
+
+### Format
+
+JSON. Hand-rolled writer (`session_save.c`), **jsmn** for reading — vendored at
+`vendor/jsmn/` with a checksum in its `PROVENANCE.md`, MIT, unmodified.
+Configured `JSMN_STATIC` + `JSMN_STRICT` from `session_load.c`, the only
+translation unit that includes it.
+
+Sources are a **top-level list keyed by name**; buses reference them by key and
+carry **per-edge gain**. A format that nested sources inside buses could not
+express "Chat Mic on the full mix at 0 dB and on its own file at +3.5", which is
+the graph shape the product exists for (design 3.2).
+
+### The identity problem — how each mode is handled
+
+Resolution is a **search**, not a lookup, and it returns
+`AprSessionResolveReport`: per-source status, what the file asked for, what was
+substituted, and the full candidate list with pids. Not a boolean, because the
+UI needs the same structure for design 9's "fall back to prompting".
+
+| Failure mode | What happens |
+|---|---|
+| App not running | `NOT_RUNNING`. **The source stays in the model** and the run stops at exit 3. `--allow-missing` drops it, warns by name, and finishes **exit 6**. |
+| Several instances | pid hint first (only among candidates that already matched on image), then **window class**, then refuse `AMBIGUOUS` and print every rival pid so the user can pin one with `--pid`. `pick_when_ambiguous` (API only, off in the CLI) takes the lowest pid as `FIRST_OF_MANY`. |
+| Executable moved | Path match fails, exe-name match succeeds → `MOVED`, reported with **both** paths in one sentence. |
+| Device absent | `DEVICE_ABSENT`, and the message names the **friendly name**, never the GUID — which is why both halves are stored. A changed endpoint id with a matching friendly name resolves as `DEVICE_BY_NAME`. |
+| Running but silent | Not in the audio-session list, so a last resort matches **pid + image name together** (two facts agreeing). A bare pid is never trusted. |
+
+### EXCLUDE (design 4.1.1)
+
+**Consent is checked before the lookup**, so the answer does not depend on
+whether the excluded app happens to be playing. Without `--allow-system-capture`
+the load stops at **exit 2** naming the flag; the source is never resolved.
+
+**`--allow-missing` can never drop an EXCLUDE source.** Dropping an ordinary
+source records less than was asked for; dropping the target of an exclusion
+records *more* — the whole machine with nothing held back. Pinned by a test.
+
+A loaded EXCLUDE source stays `APR_CLI_SRC_SYSTEM_MINUS_TREE` in the plan rather
+than collapsing to a pid, so `apr_cli_resolve` prints the whole process-tree
+warning on **every** run. A session must not make system-wide capture quieter
+than typing it does.
+
+### Versioning
+
+Two numbers. `version` = what wrote it, `minReader` = the oldest reader that can
+be trusted with it. `minReader > ours` → refuse (exit 2, naming both numbers);
+`version > ours` with `minReader <= ours` → load and warn `from_newer_writer`;
+`version < APR_SESSION_MIN_VERSION` → refuse. **Unknown keys are ignored,
+counted and named** — that is the whole forward-compatibility lane. A known key
+of the **wrong type** is fatal: `"gainDb": "loud"` is a broken file, not a
+setting from the future, and defaulting it would change the recording silently.
+
+### Exit codes — extended, not replaced
+
+2 CONFIG (malformed / truncated / not ours / too new / consent refused),
+3 NOT_FOUND (no such file; or a named process or device is absent),
+4 OUTPUT (`save-session` could not write), 6 INCOMPLETE (`--allow-missing` and
+something really was missing).
+
+### Findings worth not rediscovering
+
+1. **jsmn is a tokenizer, not a validator.** `{ , , }` and `{"a": }` tokenize
+   without complaint. It reliably catches only a character that cannot begin a
+   value (`INVAL`) and input that stops mid-token (`PART`). The key/value
+   structure check therefore lives in `session_load.c`, and the tests are split
+   so each mechanism is tested against the inputs it actually owns.
+2. **A hand-edited Windows path is the likeliest way a session file fails to
+   parse** — `C:\Users\me` is invalid JSON. `APR_S_ERR_SESSION_NOT_JSON` says so
+   and suggests forward slashes. Files apprecorder writes are always correct.
+3. **No float is formatted anywhere in the writer.** Gain is tenths of a dB,
+   amplitude is millionths, both printed as integers with a decimal point
+   inserted — so the round trip is exact and no locale's decimal comma can get
+   into a file a script parses. Same rule `apr_str_number_fixed` follows.
+4. **Saving is atomic** (sibling temp + `MoveFileExW` + `FlushFileBuffers`). A
+   session file is a configuration the author will have spent time on; an
+   interrupted save must not leave half a file where a whole one was.
+5. Mutation-tested. Five deliberate breaks — consent gate open, `allow_missing`
+   reaching EXCLUDE, ambiguity picking silently, absent device named by GUID,
+   bare pid trusted — and the fifth **was not caught** at first, because
+   `chosen_pid` was copied from what we searched for rather than from what we
+   found. Fixed in both the code and the test.
+
+### Where the window-class lookup lives
+
+A private static in `session_load.c` (`EnumWindows` + `GetClassNameW`, top-level
+visible windows only), linked with a `#pragma comment(lib, "user32.lib")` the
+way `action_m4a.c` links Media Foundation. `discover.h` is about what can be
+*recorded*, and there is one caller — the project's own rule for `str.c`/`fs.c`.
+**Move it to `discover.c` the moment the UI needs it.**
+
+### Strings
+
+31 new catalog entries in a new `APR_STR_LIST_SESSION` group (ids 1520-1551),
+English written, Arabic declared untranslated. Two need care in the Arabic pass:
+`ERR_SESSION_NEEDS_CONSENT` must not flatten "everything except X" into a single
+item (design 4.1.1 — a whole growing *tree* is held back), and
+`WARN_SESSION_MOVED` carries two paths in one sentence whose inserts must stay
+distinguishable. Noted in `res/strings.rc` beside the placeholders.
+
+### Verified by hand, not only by the suite
+
+`save-session --exe nvda.exe` captured `pid`, `exe`, full image path and window
+class `NVDAHighlighter` from the live machine, and reloading resolved it back.
+`--allow-missing` produced exit 6 and a playable WAV. The EXCLUDE gate refused
+at exit 2 without the flag and, with it, printed the full tree warning listing
+`nvda.exe (36728)` and `nvdaHelperRemoteLoader.exe (34988)`.
+**No EXCLUDE capture was ever started — `--dry-run` only.** Nothing was rendered
+to any output device (AGENTS.md rule 1); every recording test uses `--fake`.
+
+### Left undone / flagged
+
+- `pick_when_ambiguous` is API-only. The CLI leaves it off; a UI that can prompt
+  wants the candidate list instead.
+- An EXCLUDE target that holds no audio session **and** whose saved pid is gone
+  cannot be found — there is no whole-process-table enumeration in `discover.h`.
+  Failing there is the safe direction, so it was left.
+- `include/strings.h` and `CMakeLists.txt` edits from this work were swept into
+  commit `e57a84d` by the UI agent's `git add` while this was in flight. Same
+  lesson as before: **stage explicit paths while agents are running.** Nothing
+  else here is committed.
+
+---
+
+## 2026-08-26 — OGG/OPUS complete. **All four encoders done.**
+
+`src/actions/action_ogg.c`, `tests/test_action_ogg.c` (19 cases),
+`vendor/ogg/`, `vendor/opus/`.
+
+### Provenance — libogg 1.3.6 + libopus 1.5.2, both BSD-3-Clause
+
+A nicer licence position than LAME (§8.1): **no relinking obligation.**
+
+| | libogg | libopus |
+|---|---|---|
+| Xiph upstream | fetched | fetched |
+| Debian archive | **byte-identical by `cmp`** | **byte-identical by `cmp`** |
+| Gentoo Manifest | SHA-512 + byte count match | SHA-512 + byte count match |
+| nixpkgs | SRI decodes to same SHA-256 | pins a git tag → NAR hash, **not comparable** (recorded as a dead end) |
+
+Every vendored file re-verified with `cmp` afterwards: **205 opus files, 9 ogg
+files, zero differences.** Only `vendor/opus/config.h` is ours; libogg needed
+none (MSVC takes the `<stdint.h>` branch in upstream `os_types.h`).
+
+**1.5.2 not 1.6.1 deliberately** — the 1.6 line pulls DNN features into the
+default build shape (35 MB tarball). Excluded: `dnn/` (18 MB of 22, all behind
+`ENABLE_DEEP_PLC`/`ENABLE_DRED`/`ENABLE_OSCE`), `silk/fixed/` (float build), and
+`x86/`+`arm/` (no runtime dispatch — same trade `vendor/lame/config.h` makes).
+
+### Everything encodes at 48 kHz, and it is forced
+
+`opus_encoder_create` accepts only 8/12/16/24/48 kHz, and **Ogg counts granulepos
+in 48 kHz units regardless**, so 44.1 kHz cannot be encoded at its own rate at
+all — the choice is resample or lose the bus. `core/resample.c` does it, on the
+writer thread. Even natively-accepted rates are resampled so there is **one**
+granule arithmetic rather than five. Original rate survives in
+`OpusHead.input_sample_rate`. **20 ms frames** (Opus's own default).
+
+**Pre-skip is asked for (`OPUS_GET_LOOKAHEAD`), never assumed** — ffprobe reports
+`start: 0.006500` = 312/48000 exactly. Granulepos = `pre_skip + real 48 kHz
+frames`, which makes duration **exact even though the stream is VBR** — the
+structural reason MP3 needed CBR and this does not.
+
+Extension `.opus`, id stays `ogg` (RFC 7845 §9).
+
+### Kill mid-recording — clean
+
+Real binary, hard `Stop-Process -Force` at 12 s of a 60 s run: ffprobe reads
+`Duration 00:00:11.91, start 0.006500`, and `ffmpeg -v warning ... -f null -`
+decodes the whole thing with **zero warnings**. Loss bounded by libogg's ~4 KB
+page accumulation (~350 ms) plus the ring. **So WAV, MP3 and OGG all survive a
+kill; only M4A does not.**
+
+### NaN/Inf — measured, not guarded
+
+Rule 4 gives non-finite handling to `core/mix.c`, and Opus takes float, so no
+guard was added. The test **measures** instead: decoded peak exactly
+`0.00000000` — libopus turns NaN/Inf into silence itself. The assertion is
+`< 0.05`, so a future libopus that changes this **fails loudly** rather than
+silently emitting full scale.
+
+### Intellectual honesty worth preserving
+
+The agent tried to measure the Opus decoder's marginal binary cost: forcing a
+reachable `opus_decoder_create` added +2 KB. But the same probe with
+`opus_multistream_encoder_create` — certainly not otherwise linked — **also gave
++2 KB**, so the experiment does not discriminate. It made no claim from it, and
+**went back and removed the "the linker drops the decoder" wording it had already
+written** into the CMake comments and test header. The number and the dead end
+are recorded in `vendor/opus/PROVENANCE.md`. Do not resurrect that claim without
+a better experiment.
+
+### Size
+
+Release `apprecorder.exe`: **784,896 bytes with the action, 559,104 without —
+220.5 KB for Opus.** Still under the 1 MB goal, but the margin is now thin.
+Unavoidable: LAME's decoder is a separate library half, whereas Opus's decoder
+shares the range coder, MDCT, FFT and mode tables with its encoder.
+
+### Tests
+
+19/19, 3.2 s Debug. Demuxes with vendored libogg, decodes with vendored libopus,
+**and hands the same files to ffprobe as a second opinion** (skipped loudly,
+never silently, if absent). Worst `on_audio` with the disk held shut for a full
+second of audio: **0.004 ms**.
+
+### Notes
+
+- Commit `e57a84d` swept up this agent's root-`CMakeLists.txt` edit; its source
+  files were still untracked at report time.
+- **The CLI maps extensions to actions, so `--out x.ogg` needs an explicit
+  `--format ogg`.** A CLI decision, deliberately left alone. Worth revisiting —
+  `.opus` works without the flag, `.ogg` does not, which will surprise people.
