@@ -890,3 +890,75 @@ have landed too. Wave 2 agents still finishing.
 Note: MF link directives are `#pragma comment(lib, ...)` inside the m4a files
 rather than `CMakeLists.txt` edits, deliberately, since several agents were
 landing in that file this wave.
+
+---
+
+## 2026-08-26 — WAV action complete (the reference encoder)
+
+`src/actions/action_wav.c`, exports `apr_action_wav_vtable` (id `"wav"`).
+`tests/test_action_wav.c`, 18 golden-file cases, 5 consecutive runs no flakes.
+Float32 in, float32 WAV out — **no conversion, clamp, dither or gain**. This is
+the archival/DAW path and must stay verbatim.
+
+### The >4 GiB decision: RF64, promoted in place
+
+4 GiB is only **3.1 hours** of 48 kHz stereo float32 (47 min at 8 channels), so
+"it won't happen" was not available. Refusing loses the tail of an unrepeatable
+session; rolling to part-2 hands the user a manual splice across every bus and
+reintroduces the exact seam the drift work exists to remove.
+
+Mechanism: a 36-byte `JUNK` chunk is reserved after `WAVE` from byte one. Under
+4 GiB the file is ordinary RIFF/WAVE with a chunk every reader ignores; when the
+data would overflow, the next header rewrite emits `RF64`/`ds64` plus
+`0xFFFFFFFF` sentinels. **Nothing moves, no audio is rewritten, and there is no
+size at which this action refuses to record.** Externally verified: a 5 GiB file
+reads through ffprobe as `pcm_f32le`, 48000 Hz, stereo, 13981.01 s.
+
+### Non-blocking is proven, not asserted — and the technique generalises
+
+One writer thread. `on_audio` is `rb_write` + `SetEvent`, both lock-free and
+allocation-free; nothing it calls can touch a filesystem. Write-behind is 4 s
+(1.5 MB at 48 k stereo, capped at 16 MB) — upstream rings absorb *mixer jitter*
+at 250 ms, disk stalls are absorbed *here*, per design 3.1.
+
+**The proof seam is reusable.** `apr_wav_test_write_gate` (read on the writer
+thread only) holds the disk path shut while a feeder thread pushes a second of
+audio through `on_audio`; the call must still finish inside a bounded wait, a
+second handle confirms the file is still only its 116-byte header, and worst
+per-call latency is asserted under 50 ms. An implementation writing from
+`on_audio` would still be inside its first call. **This also makes overrun tests
+deterministic with no sleeps** — which retires the m4a agent's note that forcing
+an overrun would be flaky. Any action owning a writer thread should copy it.
+
+### Playable at every instant
+
+A complete header is written before any audio, then rewritten in place ~once per
+second on the writer thread. A kill at any instant leaves a playable file missing
+at most the last second — tested by reading the header back *while* recording.
+Injected ENOSPC covered both ways: first-write failure leaves a valid empty WAV;
+mid-stream failure leaves a bit-exact prefix with a matching header.
+
+### Cross-cutting: the NaN fix must NOT touch the F32 path
+
+WAV has no integer domain, so it has no full-scale-click hazard, and its tests
+deliberately push a NaN end to end and assert it survives. `APR_PCM_F32` stays a
+verbatim `memcpy`; only `S16`/`S24`/`S32` get non-finite handling. Relayed to
+the core agent.
+
+---
+
+## 2026-08-26 — Wave state
+
+**Landed:** foundation (harness/err/log/ringbuf/clock), capture spike, WAV, M4A.
+13/13 suites green as of the last check.
+
+**In flight (4 agents):** capture layer, core (graph/source/bus/mix/resample/
+drift), i18n string catalog, MP3 via vendored libmp3lame.
+
+`src/capture/`, `src/core/{mix,resample,drift}.c`, `include/{mix,resample,drift,
+source}.h` and their tests are **uncommitted, owned by live agents** — do not
+stage them mid-flight. (Earlier lesson: `git add -A` during a wave attributes
+one agent's work to another's commit.)
+
+**Next:** CLI wiring — the author's chosen first usable milestone — then a review
+and integration pass, then the UI starting with the `.rc` catalog.
