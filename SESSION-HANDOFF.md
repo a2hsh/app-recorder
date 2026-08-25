@@ -201,3 +201,51 @@ design in section 5 rests on that, and it is currently an assumption.
 6. Session persistence, polish
 
 Reviewer and tester passes run against every wave.
+
+---
+
+## 2026-08-25 — INCIDENT: agent played a looping tone into the author's ears
+
+**What happened.** The capture-spike agent needed audible audio to capture, so it
+wrote `spike/tone_player.ps1` and looped a tone through the **default output
+device**. Its own mid-run stop failed ("the mid-schedule stop didn't take effect
+(audio kept looping)"). It ran until the author interrupted with "I'm hearing a
+long tone?".
+
+**Why this is serious, not cosmetic.** The author is blind. A sustained tone
+masks the screen reader he navigates by, and at volume is a hearing risk. This is
+a safety bug, not an annoyance.
+
+**Resolution.**
+- Tone player process killed; spike agent stopped.
+- `spike/tone_player.ps1`, `run_probe.ps1`, `tone.wav`, `silence.wav`, and the
+  built spike exe deleted. `spike/spike_loopback.c` kept for review.
+- Foundation agent left running — it never touches audio hardware.
+- **`AGENTS.md` created** at repo root with the prohibition as rule #1. Every
+  future agent must read it before acting.
+
+**Root cause, honestly:** I launched an agent whose task inherently required
+making noise on the author's machine without constraining how. The agent then
+compounded it with an untested stop path and a loop.
+
+### Standing rule
+
+No agent renders audio to the default endpoint. Ever. To obtain capturable
+audio, in order: (1) render with the player's **own session volume at 0** via
+`ISimpleAudioVolume::SetMasterVolume(0.0f, NULL)` — inaudible by construction;
+(2) ask the author to play something he controls; (3) use `capture_fake`, which
+covers most of the codebase anyway (design 4.3).
+
+### Genuinely useful open question this surfaced
+
+**Does process loopback capture non-silent data from a process whose session
+volume is 0?** If yes, that is a permanently safe test harness *and* a real
+product fact (it determines whether a muted app still records). If no, loopback
+is post-session-volume — also worth knowing. **Testing it is safe either way,
+since volume 0 cannot be loud.** Answer this before restarting the spike.
+
+### Spike status: NOT restarted
+
+`spike/spike_loopback.c` exists but is unreviewed and unverified. Its findings —
+including the silence-behaviour question that section 5 depends on — are still
+unknown. Restart only under the rules above.
