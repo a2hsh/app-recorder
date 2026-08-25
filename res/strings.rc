@@ -284,6 +284,135 @@
 #define APR_EN_UI_MENU_HELP_KEYS         "&Keyboard Shortcuts\tF1"
 #define APR_EN_UI_MENU_HELP_ABOUT        "&About apprecorder"
 
+/* ---------------------------------------------------------------------------
+ * The canvas (src/ui/canvas.c, src/ui/node_window.c).
+ *
+ * WHAT A TRANSLATOR HAS TO KNOW HERE, BECAUSE IT IS NOT OBVIOUS FROM THE TEXT:
+ *
+ *   - NONE OF THESE ARE DRAWN. Every one of them is spoken -- they are the
+ *     accessible name and description of a node window, and the sentences a
+ *     screen reader says when the graph changes. Write them as speech.
+ *   - The UI_NODE_* entries carry BOTH the node's own name and its kind,
+ *     because kind is otherwise carried only by colour, and colour is never
+ *     allowed to be the only carrier of a fact.
+ *   - The UI_NODE_DESC_* entries carry the node's EDGES. An edge is painted on
+ *     the canvas and has no element of its own to land on, so if the edge is
+ *     not in this sentence it does not exist for a screen reader user.
+ *   - The key names ("Control and Down Arrow") are spelled out rather than
+ *     abbreviated because they are read aloud, and they name the key that is
+ *     actually pressed -- which does not change with the interface language.
+ *   - UI_LIST_PAIR and UI_LIST_MORE are the ONLY sanctioned way to join user
+ *     data (bus names, file names) into a list in this product. Fold PAIR over
+ *     the last two and MORE over the rest. They are catalog entries so that the
+ *     separator and the conjunction are yours, not a comma frozen into C.
+ * ------------------------------------------------------------------------- */
+
+#define APR_EN_UI_NODE_SOURCE                   "%1!s!, source"
+#define APR_EN_UI_NODE_SOURCE_GAIN              "%1!s!, source, %2!s! decibels"
+#define APR_EN_UI_NODE_BUS                      "%1!s!, bus"
+#define APR_EN_UI_NODE_ACTION                   "%1!s!, output"
+#define APR_EN_UI_NODE_LABEL_SOURCE             "Source"
+#define APR_EN_UI_NODE_LABEL_BUS                "Bus"
+#define APR_EN_UI_NODE_LABEL_ACTION             "Output"
+#define APR_EN_UI_NODE_LABEL_SOURCE_GAIN        "Source, %1!s! decibels"
+#define APR_EN_UI_NODE_DESC_SOURCE_FEEDING      "Feeds %1!s!. Press Control and Down Arrow to move to what it feeds, or Control and E to feed another bus."
+#define APR_EN_UI_NODE_DESC_SOURCE_ALONE        "This source feeds nothing yet. Press Control and E, move to a bus, then press Control and E again."
+#define APR_EN_UI_NODE_DESC_BUS_FULL            "Mixes %1!s! and writes %2!s!. Press Control and Up Arrow to move to a source feeding it, or Control and Down Arrow to move to a file it writes."
+#define APR_EN_UI_NODE_DESC_BUS_NO_SOURCES      "Writes %1!s!, but nothing feeds this bus yet. Move to a source, press Control and E, come back here and press Control and E again."
+#define APR_EN_UI_NODE_DESC_BUS_NO_OUTPUTS      "Mixes %1!s!, but this bus writes no file yet. Press Control and 3 to add one."
+#define APR_EN_UI_NODE_DESC_BUS_EMPTY           "Nothing feeds this bus and it writes no file yet."
+#define APR_EN_UI_NODE_DESC_ACTION              "Written from %1!s!. Press Control and Up Arrow to move to that bus."
+#define APR_EN_UI_LIST_PAIR                     "%1!s! and %2!s!"
+#define APR_EN_UI_LIST_MORE                     "%1!s!, %2!s!"
+#define APR_EN_UI_ANN_CONNECT_START             "Connecting from %1!s!. Move to a bus and press Control and E again, or press Escape to cancel."
+#define APR_EN_UI_ANN_CONNECT_DONE              "%1!s! now feeds %2!s!."
+#define APR_EN_UI_ANN_CONNECT_ALREADY           "%1!s! already feeds %2!s!."
+#define APR_EN_UI_ANN_CONNECT_REFUSED           "A source can only be connected to a bus, and %1!s! is not a bus."
+#define APR_EN_UI_ANN_DISCONNECT_START          "Disconnecting %1!s!. Move to the bus it should stop feeding and press Control and Shift and E again, or press Escape to cancel."
+#define APR_EN_UI_ANN_DISCONNECT_DONE           "%1!s! no longer feeds %2!s!."
+#define APR_EN_UI_ANN_DISCONNECT_NONE           "%1!s! was not feeding %2!s!."
+#define APR_EN_UI_ANN_CANCELLED                 "Cancelled."
+#define APR_EN_UI_ANN_REMOVED                   "%1!s! removed."
+#define APR_EN_UI_ANN_REMOVE_REFUSED            "A file is removed together with the bus that writes it, not on its own."
+#define APR_EN_UI_ANN_GAIN                      "%1!s!, %2!s! decibels."
+#define APR_EN_UI_ANN_GAIN_NO_EDGE              "%1!s! feeds no bus yet, so there is no level to set."
+#define APR_EN_UI_ANN_NO_EDGE_DOWN              "%1!s! feeds nothing yet."
+#define APR_EN_UI_ANN_NO_EDGE_UP                "Nothing feeds %1!s! yet."
+#define APR_EN_UI_ANN_CANVAS_EMPTY              "The signal flow is empty. Press Control and 1 to add a source."
+#define APR_EN_UI_ANN_NOT_YET                   "That is not available yet."
+#define APR_EN_UI_ANN_CONNECT_NOT_SOURCE        "A connection starts at a source, and %1!s! is not one."
+#define APR_EN_UI_ANN_GAIN_NOT_SOURCE           "Only a source has a level, and %1!s! is not one."
+
+/* One line per canvas operation, for Help > Keyboard Shortcuts. The binding
+ * table in include/ui_canvas.h is both what dispatches the key and what that
+ * screen renders, so a shortcut cannot be documented as one key and
+ * implemented as another. */
+
+#define APR_EN_UI_KEY_NEXT_NODE                 "Move to the next node"
+#define APR_EN_UI_KEY_PREV_NODE                 "Move to the previous node"
+#define APR_EN_UI_KEY_NEXT_IN_COLUMN            "Move to the next node in this column"
+#define APR_EN_UI_KEY_PREV_IN_COLUMN            "Move to the previous node in this column"
+#define APR_EN_UI_KEY_DOWNSTREAM                "Go to what this node feeds"
+#define APR_EN_UI_KEY_UPSTREAM                  "Go to what feeds this node"
+#define APR_EN_UI_KEY_FIRST                     "Move to the first node"
+#define APR_EN_UI_KEY_LAST                      "Move to the last node"
+#define APR_EN_UI_KEY_CONNECT                   "Connect this node to another"
+#define APR_EN_UI_KEY_DISCONNECT                "Disconnect this node from another"
+#define APR_EN_UI_KEY_REMOVE                    "Remove this node"
+#define APR_EN_UI_KEY_ADD_SOURCE                "Add a source"
+#define APR_EN_UI_KEY_ADD_BUS                   "Add a bus"
+#define APR_EN_UI_KEY_ADD_ACTION                "Add an output"
+#define APR_EN_UI_KEY_GAIN_UP                   "Make this source louder"
+#define APR_EN_UI_KEY_GAIN_DOWN                 "Make this source quieter"
+#define APR_EN_UI_KEY_CANCEL                    "Cancel what is half done"
+#define APR_EN_UI_KEY_DESCRIBE                  "Say this node and its connections again"
+
+/* ---- the structure panel (src/ui/tree_panel.c).
+ *
+ * A TREEVIEW ITEM'S TEXT IS ITS ACCESSIBLE NAME. There is no second string a
+ * screen reader reads instead, so each row below is a whole sentence: what
+ * the node is, what kind it is, what it is wired to, and any state that
+ * changes what the file will actually contain. "Teams" is a label; "Teams,
+ * application, muted in Windows so it records silence, feeding Main Mix" is
+ * the row that saves a three-hour recording.
+ *
+ * The bus row counts arrive as already-pluralised phrases (N_SOURCES,
+ * N_OUTPUTS) in their own inserts, so a translator controls agreement; the
+ * state clauses arrive the same way, in one insert each, so a translator can
+ * move a state clause to wherever Arabic wants it rather than finding it
+ * welded to the end by C. */
+
+#define APR_EN_UI_TREE_NAME                     "Recording graph"
+#define APR_EN_UI_TREE_DESC                     "Every bus in this session, the sources feeding it and the files it writes. Up Arrow and Down Arrow move through the graph, Left Arrow and Right Arrow collapse and expand a bus, and typing the first letters of a name jumps to it."
+#define APR_EN_UI_TREE_EMPTY                    "This session has no buses yet. Use Add Bus on the Edit menu to make one."
+#define APR_EN_UI_TREE_UNASSIGNED_GROUP         "Sources not connected to any bus"
+#define APR_EN_UI_TREE_BUS                      "%1!s!, bus, mixing %2!s! to %3!s!"
+#define APR_EN_UI_TREE_BUS_RECORDING            "%1!s!, bus, recording now, mixing %2!s! to %3!s!"
+#define APR_EN_UI_TREE_SOURCE                   "%1!s!, %2!s!, feeding %3!s!"
+#define APR_EN_UI_TREE_SOURCE_SHARED            "%1!s!, %2!s!, feeding %3!s! and %4!s!"
+#define APR_EN_UI_TREE_SOURCE_STATE             "%1!s!, %2!s!, %3!s!, feeding %4!s!"
+#define APR_EN_UI_TREE_SOURCE_STATE_SHARED      "%1!s!, %2!s!, %3!s!, feeding %4!s! and %5!s!"
+#define APR_EN_UI_TREE_SOURCE_UNUSED            "%1!s!, %2!s!, connected to no bus, so nothing records it"
+#define APR_EN_UI_TREE_SOURCE_UNUSED_STATE      "%1!s!, %2!s!, %3!s!, and connected to no bus, so nothing records it"
+#define APR_EN_UI_TREE_STATE_MUTED              "muted in Windows, so it records silence"
+#define APR_EN_UI_TREE_STATE_EXITED             "closed, so it records silence from here on"
+#define APR_EN_UI_TREE_ACTION                   "%1!s!, written from %2!s!"
+#define APR_EN_UI_TREE_ACTION_FAILED            "%1!s!, written from %2!s!, stopped after an error"
+
+#define APR_EN_N_OTHER_BUSES_ZERO               "%1!s! other buses"
+#define APR_EN_N_OTHER_BUSES_ONE                "%1!s! other bus"
+#define APR_EN_N_OTHER_BUSES_TWO                "%1!s! other buses"
+#define APR_EN_N_OTHER_BUSES_FEW                "%1!s! other buses"
+#define APR_EN_N_OTHER_BUSES_MANY               "%1!s! other buses"
+#define APR_EN_N_OTHER_BUSES_OTHER              "%1!s! other buses"
+
+#define APR_EN_N_OUTPUTS_ZERO                   "%1!s! outputs"
+#define APR_EN_N_OUTPUTS_ONE                    "%1!s! output"
+#define APR_EN_N_OUTPUTS_TWO                    "%1!s! outputs"
+#define APR_EN_N_OUTPUTS_FEW                    "%1!s! outputs"
+#define APR_EN_N_OUTPUTS_MANY                   "%1!s! outputs"
+#define APR_EN_N_OUTPUTS_OTHER                  "%1!s! outputs"
+
 #define APR_EN_ENTRY(name, id)      id      APR_EN_##name
 #define APR_EN_PENTRY(name, base)                                              \
     base+0  APR_EN_##name##_ZERO                                               \
@@ -324,6 +453,21 @@ END
 STRINGTABLE
 BEGIN
     APR_STR_LIST_UI(APR_EN_ENTRY)
+END
+
+STRINGTABLE
+BEGIN
+    APR_STR_LIST_UI_NODE(APR_EN_ENTRY)
+END
+
+STRINGTABLE
+BEGIN
+    APR_STR_LIST_UI_KEYS(APR_EN_ENTRY)
+END
+
+STRINGTABLE
+BEGIN
+    APR_STR_LIST_UI_TREE(APR_EN_ENTRY)
 END
 
 STRINGTABLE
@@ -515,6 +659,83 @@ END
 #define APR_AR_UI_MENU_HELP(id)           /* not translated yet */
 #define APR_AR_UI_MENU_HELP_KEYS(id)      /* not translated yet */
 #define APR_AR_UI_MENU_HELP_ABOUT(id)     /* not translated yet */
+
+/* Canvas -- untranslated. These are SPOKEN sentences, so the ux-araby pass has
+ * to hear them read aloud rather than translate them word by word. */
+#define APR_AR_UI_NODE_SOURCE(id)               /* not translated yet */
+#define APR_AR_UI_NODE_SOURCE_GAIN(id)          /* not translated yet */
+#define APR_AR_UI_NODE_BUS(id)                  /* not translated yet */
+#define APR_AR_UI_NODE_ACTION(id)               /* not translated yet */
+#define APR_AR_UI_NODE_LABEL_SOURCE(id)         /* not translated yet */
+#define APR_AR_UI_NODE_LABEL_BUS(id)            /* not translated yet */
+#define APR_AR_UI_NODE_LABEL_ACTION(id)         /* not translated yet */
+#define APR_AR_UI_NODE_LABEL_SOURCE_GAIN(id)    /* not translated yet */
+#define APR_AR_UI_NODE_DESC_SOURCE_FEEDING(id)  /* not translated yet */
+#define APR_AR_UI_NODE_DESC_SOURCE_ALONE(id)    /* not translated yet */
+#define APR_AR_UI_NODE_DESC_BUS_FULL(id)        /* not translated yet */
+#define APR_AR_UI_NODE_DESC_BUS_NO_SOURCES(id)  /* not translated yet */
+#define APR_AR_UI_NODE_DESC_BUS_NO_OUTPUTS(id)  /* not translated yet */
+#define APR_AR_UI_NODE_DESC_BUS_EMPTY(id)       /* not translated yet */
+#define APR_AR_UI_NODE_DESC_ACTION(id)          /* not translated yet */
+#define APR_AR_UI_LIST_PAIR(id)                 /* not translated yet */
+#define APR_AR_UI_LIST_MORE(id)                 /* not translated yet */
+#define APR_AR_UI_ANN_CONNECT_START(id)         /* not translated yet */
+#define APR_AR_UI_ANN_CONNECT_DONE(id)          /* not translated yet */
+#define APR_AR_UI_ANN_CONNECT_ALREADY(id)       /* not translated yet */
+#define APR_AR_UI_ANN_CONNECT_REFUSED(id)       /* not translated yet */
+#define APR_AR_UI_ANN_DISCONNECT_START(id)      /* not translated yet */
+#define APR_AR_UI_ANN_DISCONNECT_DONE(id)       /* not translated yet */
+#define APR_AR_UI_ANN_DISCONNECT_NONE(id)       /* not translated yet */
+#define APR_AR_UI_ANN_CANCELLED(id)             /* not translated yet */
+#define APR_AR_UI_ANN_REMOVED(id)               /* not translated yet */
+#define APR_AR_UI_ANN_REMOVE_REFUSED(id)        /* not translated yet */
+#define APR_AR_UI_ANN_GAIN(id)                  /* not translated yet */
+#define APR_AR_UI_ANN_GAIN_NO_EDGE(id)          /* not translated yet */
+#define APR_AR_UI_ANN_NO_EDGE_DOWN(id)          /* not translated yet */
+#define APR_AR_UI_ANN_NO_EDGE_UP(id)            /* not translated yet */
+#define APR_AR_UI_ANN_CANVAS_EMPTY(id)          /* not translated yet */
+#define APR_AR_UI_ANN_NOT_YET(id)               /* not translated yet */
+#define APR_AR_UI_ANN_CONNECT_NOT_SOURCE(id)    /* not translated yet */
+#define APR_AR_UI_ANN_GAIN_NOT_SOURCE(id)       /* not translated yet */
+#define APR_AR_UI_KEY_NEXT_NODE(id)             /* not translated yet */
+#define APR_AR_UI_KEY_PREV_NODE(id)             /* not translated yet */
+#define APR_AR_UI_KEY_NEXT_IN_COLUMN(id)        /* not translated yet */
+#define APR_AR_UI_KEY_PREV_IN_COLUMN(id)        /* not translated yet */
+#define APR_AR_UI_KEY_DOWNSTREAM(id)            /* not translated yet */
+#define APR_AR_UI_KEY_UPSTREAM(id)              /* not translated yet */
+#define APR_AR_UI_KEY_FIRST(id)                 /* not translated yet */
+#define APR_AR_UI_KEY_LAST(id)                  /* not translated yet */
+#define APR_AR_UI_KEY_CONNECT(id)               /* not translated yet */
+#define APR_AR_UI_KEY_DISCONNECT(id)            /* not translated yet */
+#define APR_AR_UI_KEY_REMOVE(id)                /* not translated yet */
+#define APR_AR_UI_KEY_ADD_SOURCE(id)            /* not translated yet */
+#define APR_AR_UI_KEY_ADD_BUS(id)               /* not translated yet */
+#define APR_AR_UI_KEY_ADD_ACTION(id)            /* not translated yet */
+#define APR_AR_UI_KEY_GAIN_UP(id)               /* not translated yet */
+#define APR_AR_UI_KEY_GAIN_DOWN(id)             /* not translated yet */
+#define APR_AR_UI_KEY_CANCEL(id)                /* not translated yet */
+#define APR_AR_UI_KEY_DESCRIBE(id)              /* not translated yet */
+
+
+#define APR_AR_UI_TREE_NAME(id)                            /* not translated yet */
+#define APR_AR_UI_TREE_DESC(id)                            /* not translated yet */
+#define APR_AR_UI_TREE_EMPTY(id)                           /* not translated yet */
+#define APR_AR_UI_TREE_UNASSIGNED_GROUP(id)                /* not translated yet */
+#define APR_AR_UI_TREE_BUS(id)                             /* not translated yet */
+#define APR_AR_UI_TREE_BUS_RECORDING(id)                   /* not translated yet */
+#define APR_AR_UI_TREE_SOURCE(id)                          /* not translated yet */
+#define APR_AR_UI_TREE_SOURCE_SHARED(id)                   /* not translated yet */
+#define APR_AR_UI_TREE_SOURCE_STATE(id)                    /* not translated yet */
+#define APR_AR_UI_TREE_SOURCE_STATE_SHARED(id)             /* not translated yet */
+#define APR_AR_UI_TREE_SOURCE_UNUSED(id)                   /* not translated yet */
+#define APR_AR_UI_TREE_SOURCE_UNUSED_STATE(id)             /* not translated yet */
+#define APR_AR_UI_TREE_STATE_MUTED(id)                     /* not translated yet */
+#define APR_AR_UI_TREE_STATE_EXITED(id)                    /* not translated yet */
+#define APR_AR_UI_TREE_ACTION(id)                          /* not translated yet */
+#define APR_AR_UI_TREE_ACTION_FAILED(id)                   /* not translated yet */
+
+#define APR_AR_P_N_OTHER_BUSES(base)         /* not translated yet */
+#define APR_AR_P_N_OUTPUTS(base)             /* not translated yet */
 
 #define APR_AR_ENTRY(name, id)      APR_AR_##name(id)
 #define APR_AR_PENTRY(name, base)   APR_AR_P_##name(base)

@@ -170,6 +170,25 @@ void apr_ui_set_accessible_description(HWND hwnd, AprStrId id);
  * strings.h; this is not a licence to concatenate. */
 void apr_ui_set_accessible_name_text(HWND hwnd, const wchar_t *text);
 
+/* The DESCRIPTION, for a sentence that already contains user data -- a canvas
+ * node's edges, say. Same contract as the name form: the caller formatted it
+ * from the catalog, this is not a licence to concatenate.
+ *
+ * It lives here rather than in canvas.c because IAccPropServices is created
+ * once per UI thread and released with the app on that same thread. A second
+ * copy of that lifetime in another file is the rule-3 failure this avoids. */
+void apr_ui_set_accessible_description_text(HWND hwnd, const wchar_t *text);
+
+/* Override the MSAA role a window reports -- ROLE_SYSTEM_GROUPING for a canvas
+ * node, say. Without this a custom-class window is a nameless "pane" whatever
+ * it actually is, and the UIA control type a screen reader announces is wrong
+ * in a way no visual review can see.
+ *
+ * `msaa_role` is a ROLE_SYSTEM_* value from oleacc.h. The UIA bridge maps it to
+ * a ControlType; tests/test_ui_canvas.c asserts the mapped result rather than
+ * the input, because the mapping is the OS's, not ours. */
+void apr_ui_set_accessible_role(HWND hwnd, long msaa_role);
+
 /* ---------------------------------------------------------------------------
  * Command ids
  *

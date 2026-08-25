@@ -73,10 +73,16 @@
  *
  *   apr_str_is_rtl() is the ONE place layout direction comes from. Signal flow
  *   is left-to-right in English and right-to-left in Arabic (sources on the
- *   right, actions on the left). WS_EX_LAYOUTRTL mirrors standard child
- *   controls for free but does NOT mirror anything we paint ourselves, and the
- *   canvas nodes are custom-painted, so the canvas must ask this and mirror
- *   its own drawing. Hardcoding a flow direction anywhere is a review failure.
+ *   right, actions on the left).
+ *
+ *   AN EARLIER VERSION OF THIS PARAGRAPH SAID WS_EX_LAYOUTRTL "does NOT mirror
+ *   anything we paint ourselves". THAT IS BACKWARDS and it was corrected in
+ *   ui_app.h and in design 6.2; the sentence is left here only long enough to
+ *   say so. The style gives the window a MIRRORED DEVICE CONTEXT -- our own
+ *   drawing is exactly what it reflects -- and it is INHERITED by children.
+ *   So a painted window never carries it, and the canvas and its node windows
+ *   mirror through layout arithmetic instead (apr_ui_mirror_rect).
+ *   Hardcoding a flow direction anywhere is a review failure.
  *
  *   Logical order (source -> bus -> action) is language-independent. The
  *   accessibility tree and the TreeView never flip. Only painting does.
@@ -104,13 +110,14 @@
  *
  * Numbering: singular ids from 1001; plural bases from 1200 spaced by 8 (each
  * plural occupies base+0 .. base+5, one per CLDR category); the UI shell's own
- * ids sit at 1300+ so that the CLI block, the plural bases and the UI block can
- * each grow without three agents renumbering each other. Keep every id inside
+ * ids sit at 1300+ and the canvas's own at 1400+, so that the CLI block, the
+ * plural bases, the UI shell and the canvas can each grow without four agents
+ * renumbering each other. Keep every id inside
  * [APR_STR_ID_MIN, APR_STR_ID_MAX).
  * ------------------------------------------------------------------------- */
 
 #define APR_STR_ID_MIN 1000
-#define APR_STR_ID_MAX 1400
+#define APR_STR_ID_MAX 1600
 
 /* X(NAME, id) -- a plain string. Referenced in C as APR_S_NAME. */
 
@@ -294,6 +301,119 @@
     X(UI_MENU_HELP_KEYS,           1351)                                      \
     X(UI_MENU_HELP_ABOUT,          1352)
 
+/* ---- the canvas: what a screen reader says when it lands on a node, and
+ * what it says when the graph changes under the user's hands.
+ *
+ * THESE ARE SENTENCES, NOT LABELS, and that is deliberate. A node on the
+ * canvas is not read by looking at it; it is read by being focused, so the
+ * name has to carry the node's identity AND its kind, and the description has
+ * to carry its EDGES -- what it feeds, what feeds it -- because an edge is
+ * drawn on the parent window and has no element of its own to land on.
+ *
+ * The list inserts (%1!s! in UI_NODE_DESC_*) are built by folding the two
+ * UI_LIST_* patterns below over the names. That is the only sanctioned way to
+ * join user data in this product: the separator and the "and" are catalog
+ * entries, so a translator controls both, rather than a comma frozen into C.
+ * ---- */
+#define APR_STR_LIST_UI_NODE(X)                                               \
+    X(UI_NODE_SOURCE,              1400)                                      \
+    X(UI_NODE_SOURCE_GAIN,         1401)                                      \
+    X(UI_NODE_BUS,                 1402)                                      \
+    X(UI_NODE_ACTION,              1403)                                      \
+    X(UI_NODE_LABEL_SOURCE,        1404)                                      \
+    X(UI_NODE_LABEL_BUS,           1405)                                      \
+    X(UI_NODE_LABEL_ACTION,        1406)                                      \
+    X(UI_NODE_LABEL_SOURCE_GAIN,   1407)                                      \
+    X(UI_NODE_DESC_SOURCE_FEEDING, 1410)                                      \
+    X(UI_NODE_DESC_SOURCE_ALONE,   1411)                                      \
+    X(UI_NODE_DESC_BUS_FULL,       1412)                                      \
+    X(UI_NODE_DESC_BUS_NO_SOURCES, 1413)                                      \
+    X(UI_NODE_DESC_BUS_NO_OUTPUTS, 1414)                                      \
+    X(UI_NODE_DESC_BUS_EMPTY,      1415)                                      \
+    X(UI_NODE_DESC_ACTION,         1416)                                      \
+    X(UI_LIST_PAIR,                1420)                                      \
+    X(UI_LIST_MORE,                1421)                                      \
+    X(UI_ANN_CONNECT_START,        1430)                                      \
+    X(UI_ANN_CONNECT_DONE,         1431)                                      \
+    X(UI_ANN_CONNECT_ALREADY,      1432)                                      \
+    X(UI_ANN_CONNECT_REFUSED,      1433)                                      \
+    X(UI_ANN_DISCONNECT_START,     1434)                                      \
+    X(UI_ANN_DISCONNECT_DONE,      1435)                                      \
+    X(UI_ANN_DISCONNECT_NONE,      1436)                                      \
+    X(UI_ANN_CANCELLED,            1437)                                      \
+    X(UI_ANN_REMOVED,              1438)                                      \
+    X(UI_ANN_REMOVE_REFUSED,       1439)                                      \
+    X(UI_ANN_GAIN,                 1440)                                      \
+    X(UI_ANN_GAIN_NO_EDGE,         1441)                                      \
+    X(UI_ANN_NO_EDGE_DOWN,         1442)                                      \
+    X(UI_ANN_NO_EDGE_UP,           1443)                                      \
+    X(UI_ANN_CANVAS_EMPTY,         1444)                                      \
+    X(UI_ANN_NOT_YET,              1445)                                      \
+    X(UI_ANN_CONNECT_NOT_SOURCE,   1446)                                      \
+    X(UI_ANN_GAIN_NOT_SOURCE,      1447)
+
+/* ---- one line per canvas operation, for Help > Keyboard Shortcuts.
+ *
+ * There is exactly one binding table (ui_canvas.h) and it is the thing that
+ * dispatches keys AND the thing this screen renders, so a shortcut cannot be
+ * documented as one key and implemented as another. Every operation the canvas
+ * can perform has an entry here, and tests/test_ui_canvas.c fails if one does
+ * not -- which is how "no mouse-only paths" stops being a promise. ---- */
+#define APR_STR_LIST_UI_KEYS(X)                                               \
+    X(UI_KEY_NEXT_NODE,            1460)                                      \
+    X(UI_KEY_PREV_NODE,            1461)                                      \
+    X(UI_KEY_NEXT_IN_COLUMN,       1462)                                      \
+    X(UI_KEY_PREV_IN_COLUMN,       1463)                                      \
+    X(UI_KEY_DOWNSTREAM,           1464)                                      \
+    X(UI_KEY_UPSTREAM,             1465)                                      \
+    X(UI_KEY_FIRST,                1466)                                      \
+    X(UI_KEY_LAST,                 1467)                                      \
+    X(UI_KEY_CONNECT,              1468)                                      \
+    X(UI_KEY_DISCONNECT,           1469)                                      \
+    X(UI_KEY_REMOVE,               1470)                                      \
+    X(UI_KEY_ADD_SOURCE,           1471)                                      \
+    X(UI_KEY_ADD_BUS,              1472)                                      \
+    X(UI_KEY_ADD_ACTION,           1473)                                      \
+    X(UI_KEY_GAIN_UP,              1474)                                      \
+    X(UI_KEY_GAIN_DOWN,            1475)                                      \
+    X(UI_KEY_CANCEL,               1476)                                      \
+    X(UI_KEY_DESCRIBE,             1477)
+
+/* ---- the structure panel: what the TreeView says out loud.
+ *
+ * A TreeView item's TEXT IS ITS ACCESSIBLE NAME -- there is no second string a
+ * screen reader reads instead. So each entry here is the whole row: what the
+ * node is, what kind it is, what it is connected to, and any state that
+ * changes what the recording will contain. A row that reads "Teams" tells a
+ * screen reader user nothing they did not already know; a row that reads
+ * "Teams, application, muted in Windows so it records silence, feeding Main
+ * Mix" tells them the thing they cannot see.
+ *
+ * THE STATE PHRASES (UI_TREE_STATE_*) ARE INSERTS, NOT SUFFIXES GLUED IN C.
+ * They are complete phrases occupying one positional insert, so a translator
+ * can move them anywhere in the sentence -- which Arabic needs, because an
+ * adjectival phrase follows its noun there and a state clause does not sit
+ * where English puts it. The rule this respects is "a translator must be able
+ * to reorder", not "one row is one catalog entry regardless of cost": four
+ * whole-sentence variants beat sixteen. ---- */
+#define APR_STR_LIST_UI_TREE(X)                                               \
+    X(UI_TREE_NAME,                1500)                                      \
+    X(UI_TREE_DESC,                1501)                                      \
+    X(UI_TREE_EMPTY,               1502)                                      \
+    X(UI_TREE_UNASSIGNED_GROUP,    1503)                                      \
+    X(UI_TREE_BUS,                 1504)                                      \
+    X(UI_TREE_BUS_RECORDING,       1505)                                      \
+    X(UI_TREE_SOURCE,              1506)                                      \
+    X(UI_TREE_SOURCE_SHARED,       1507)                                      \
+    X(UI_TREE_SOURCE_STATE,        1508)                                      \
+    X(UI_TREE_SOURCE_STATE_SHARED, 1509)                                      \
+    X(UI_TREE_SOURCE_UNUSED,       1510)                                      \
+    X(UI_TREE_SOURCE_UNUSED_STATE, 1511)                                      \
+    X(UI_TREE_STATE_MUTED,         1512)                                      \
+    X(UI_TREE_STATE_EXITED,        1513)                                      \
+    X(UI_TREE_ACTION,              1514)                                      \
+    X(UI_TREE_ACTION_FAILED,       1515)
+
 /* Every plain string, in declaration order. This is what C, the generated
  * enum and tests/test_strings.c walk; the groups above exist only so that
  * res/strings.rc can emit them in rc.exe-sized pieces. */
@@ -302,7 +422,10 @@
     APR_STR_LIST_CLI(X)                                                        \
     APR_STR_LIST_CLI_ERR(X)                                                    \
     APR_STR_LIST_CLI_MSG(X)                                                   \
-    APR_STR_LIST_UI(X)
+    APR_STR_LIST_UI(X)                                                         \
+    APR_STR_LIST_UI_NODE(X)                                                    \
+    APR_STR_LIST_UI_KEYS(X)                                    \
+    APR_STR_LIST_UI_TREE(X)
 
 
 /* X(NAME, base) -- a plural string. Referenced in C as APR_S_NAME, which is
@@ -312,7 +435,9 @@
 #define APR_STR_PLURAL_LIST(X)                                                 \
     X(N_SOURCES,                 1200)                                         \
     X(N_BUSES,                   1208)                                         \
-    X(N_FRAMES_LOST,             1216)
+    X(N_FRAMES_LOST,             1216)                                         \
+    X(N_OTHER_BUSES,             1224)                                         \
+    X(N_OUTPUTS,                 1232)
 
 #ifndef RC_INVOKED
 

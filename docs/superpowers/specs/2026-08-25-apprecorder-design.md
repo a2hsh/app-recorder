@@ -414,6 +414,25 @@ A **docked TreeView over the same model** ships alongside the canvas — not a
 substitute but a second real view: fast keyboard jumping, and a layers-panel
 overview for sighted users on a large graph.
 
+**Three things "real windows get it free" does NOT include.** Measured while
+building `src/ui/canvas.c`; each one is silent, and each one would have shipped:
+
+- **A custom window class is reported by UIA as a nameless `Pane`.** The role has
+  to be annotated (`ROLE_SYSTEM_GROUPING` via `IAccPropServices`, which the UIA
+  bridge turns into a `Group`) or a screen reader lands on a node and says
+  "pane".
+- **UIA enumerates children in Z-ORDER, and `CreateWindowEx` stacks each new
+  child on top.** Creating nodes in logical order therefore produces a REVERSED
+  accessibility tree — outputs first, sources last. The canvas restacks
+  explicitly after building. "Tab order and the a11y tree never flip" is true,
+  but it is not free.
+- **`IsDialogMessage` eats Escape, Enter and Tab** before any node sees them:
+  Escape becomes `WM_COMMAND(IDCANCEL)` at the frame, which strands a user
+  inside a half-made connection. Canvas nodes therefore claim `DLGC_WANTALLKEYS`
+  and the canvas implements Tab itself, *including* handing focus out of the
+  pane at either end — which is the part that keeps that choice from being a
+  focus trap.
+
 ### 6.2 Localization — Arabic ships after v1, but is designed in now
 
 The app will be localized to Arabic before release. Retrofitting that into a

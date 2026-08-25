@@ -280,6 +280,29 @@ void apr_ui_set_accessible_description(HWND hwnd, AprStrId id)
     acc_set(hwnd, &PROPID_ACC_DESCRIPTION, apr_str(id));
 }
 
+void apr_ui_set_accessible_description_text(HWND hwnd, const wchar_t *text)
+{
+    acc_set(hwnd, &PROPID_ACC_DESCRIPTION, text);
+}
+
+void apr_ui_set_accessible_role(HWND hwnd, long msaa_role)
+{
+    IAccPropServices *p;
+    VARIANT v;
+
+    if (!hwnd || !IsWindow(hwnd)) return;
+    p = acc_props();
+    if (!p) return;
+
+    /* PROPID_ACC_ROLE is a VT_I4, not a string, so this cannot go through
+     * acc_set. Everything else about it is the same annotation mechanism. */
+    VariantInit(&v);
+    v.vt = VT_I4;
+    v.lVal = msaa_role;
+    (void)IAccPropServices_SetHwndProp(p, hwnd, (DWORD)OBJID_CLIENT,
+                                       (DWORD)CHILDID_SELF, PROPID_ACC_ROLE, v);
+}
+
 /* --------------------------------------------------------------------------
  * The app
  * ----------------------------------------------------------------------- */
