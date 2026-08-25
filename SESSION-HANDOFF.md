@@ -647,3 +647,246 @@ deliberately, so four parallel agents cannot diverge on the interfaces.
 5. UI: `.rc` string catalog and i18n plumbing FIRST, then `app`/`canvas`/
    `node_window` sequential, then `theme`/`dpi`/`darkmode`/`tree_panel` parallel
 6. Session persistence, MP3/OGG encoders, polish
+
+---
+
+## 2026-08-26 — `actions/action_m4a.c` (M4A/AAC via Media Foundation) COMPLETE
+
+`src/actions/action_m4a.c` + `tests/test_action_m4a.c`. **15/15 pass**, Debug and
+Release, `/W4 /WX` clean. The vtable symbol `registry.c` should reference is
+`const AprActionVTable apr_action_m4a` (id `"m4a"`, extension `"m4a"`).
+
+### Shape
+
+- **All MF/COM calls live on one thread this file creates.** `on_audio` never
+  touches COM, so it does not matter which apartment the mixer thread is in.
+  `create()` still reports MF failures *synchronously* by blocking on a
+  one-shot handshake (`ev_ready`) until the encoder thread has built the sink
+  writer or failed.
+- **Write-behind is `core/ringbuf.c`**, not a private FIFO: 2 s of int16
+  interleaved frames (384 KB at 48 kHz stereo). `on_audio` converts, `rb_write`s
+  and `SetEvent`s. Worst measured `on_audio` call: **0.012 ms** (Debug).
+- Ring overruns are **refilled with silence** from `rb_read`'s `out_lost`, so a
+  stall shortens nothing and desyncs nothing.
+- Sample timestamps are absolute, from `apr_frames_to_hns(total_frames, rate)` —
+  `clock.c`'s exact arithmetic, never a `+= duration` accumulator.
+- Container is chosen by `MF_TRANSCODE_CONTAINERTYPE = MPEG4`, **not** by the
+  file extension, so a codec pack cannot change what we write.
+
+### What this machine's AAC encoder actually offers (enumerated, not assumed)
+
+`MFTEnumEx(MFT_CATEGORY_AUDIO_ENCODER, …, MFAudioFormat_AAC)` →
+`IMFTransform::GetOutputAvailableType`, **142 distinct triples** on Win11 26200:
+
+- **Rates:** 11025, 16000, 22050, 24000, 32000, 44100, 48000, 96000 Hz
+- **Channels:** 1, 2, 6, 8
+- **Bitrates:** 8–1152 kbps depending on rate/channels (48 k stereo: 16, 24, 32,
+  48, 64, 96, 128, 160, 192, 256, 320 kbps)
+
+Far wider than the documented "44100/48000, 1–2 ch, 96–192 kbps" — because the
+list is the **union of the AAC-LC and HE-AAC encoder MFTs**. Several MFTs report
+the same triples, so `m4a_collect_formats` deduplicates; without that the
+duplicates filled the array cap and real formats fell off the end.
+`apr_m4a_enum_formats()` exposes the list (flat arrays, no shared struct).
+
+An unsupported format is refused at `create()` with `APR_E_UNSUPPORTED` naming
+the rate/channels **and listing what is available**.
+
+### If the process dies mid-recording — say it plainly
+
+**The file is not playable.** MP4 keeps its index in `moov`, which the sink
+writer only emits at `Finalize()`; a killed process leaves `ftyp` + a big `mdat`
+and nothing mapping bytes to samples. `ffmpeg`/`untrunc` can rebuild it from a
+reference file; we cannot, from a process that is no longer running.
+
+Every *ordinary* exit path is covered and tested: `finalize()` is idempotent,
+`destroy()` finalizes for a caller that forgot, and `finalize()` still runs
+`IMFSinkWriter::Finalize` after a mid-stream write error so a truncated
+recording is still openable.
+
+Three ways to fix the kill case, none free, none taken (also recorded at the
+bottom of `action_m4a.c`): fragmented MP4 (`MFCreateFMPEG4MediaSink`) — costs
+compatibility with older players; ADTS `.aac` — not an `.m4a`, needs its own
+action id; periodic segment rotation — many files instead of one.
+
+### Two findings worth not losing
+
+1. **`IMFSinkWriter::Finalize` on a stream that got zero samples fails** with
+   `MF_E_SINK_NO_SAMPLES_PROCESSED` (0xC00D4A44) and leaves an unopenable file.
+   A bus that is armed and never fed (muted app, source that failed to start) is
+   a normal outcome, so the action now writes **one AAC frame of silence**
+   (1024 frames, ~21 ms) before finalizing. Pinned by a test.
+2. **`core/mix.c`'s `apr_pcm_from_float` is not safe against non-finite input.**
+   It reaches the integer domain via a C cast, and NaN/±Inf through `cvttsd2si`
+   is `INT64_MIN`, which its clamp pins to **−32768 — full-scale negative**. A
+   NaN in the mix becomes maximum loudness, and a `+Inf` becomes maximum
+   loudness of the *wrong sign*. Given AGENTS.md rule 1 this is not academic.
+   `action_m4a.c` scrubs non-finite values (`m4a_scrub_non_finite`) *before*
+   calling `apr_pcm_from_float` and says in a comment that the guard should be
+   **deleted the moment mix.c handles it itself**. **mix.c's owner should fix it
+   there** — every encoder has the same exposure.
+
+### Not covered
+
+- The ring-overrun path is correct by inspection but not driven by a test: the
+  encoder thread always keeps up on this machine, and forcing an overrun would
+  be a timing-dependent, flaky test.
+- A genuine mid-stream `WriteSample` failure cannot be induced from outside the
+  action, so the sticky-error path is exercised only by the surrounding cases
+  (finalize-after-close, destroy-without-finalize).
+
+
+---
+
+## 2026-08-26 (wave 4) - `actions/action_wav.c` + `tests/test_action_wav.c`
+
+**Status: done, TDD, 18/18 green, full suite 13/13 green** via
+`build.cmd Debug test`. Nothing committed.
+
+### What it is
+
+`const AprActionVTable apr_action_wav_vtable` (`src/actions/action_wav.c`).
+`core/registry.c` should list it with
+`extern const AprActionVTable apr_action_wav_vtable;` - no registration call
+lives in the action. id `"wav"`, extension `L"wav"`.
+
+Interleaved float32 in, float32 WAV out: `WAVE_FORMAT_EXTENSIBLE` +
+`KSDATAFORMAT_SUBTYPE_IEEE_FLOAT`, no conversion, no clamp, no dither, no gain.
+The tests feed `-0.0`, a denormal, a NaN, `FLT_MAX` and values outside
+`[-1,+1]` and compare the file bit-for-bit, so "verbatim" is pinned, not
+claimed. Header is a fixed 116 bytes:
+`RIFF | JUNK(28) | fmt (40) | fact | data`.
+
+### Three decisions worth carrying forward
+
+1. **Write-behind is `core/ringbuf.c`, not a private buffer.** One writer
+   thread per action; `on_audio` is `rb_write` + `SetEvent` and nothing else.
+   Ring is **4 s of audio** (1.5 MB at 48k stereo, capped at 16 MB) - rings
+   upstream absorb mixer jitter at 250 ms, disk stalls are absorbed here, as
+   3.1 says. **Overrun is written as silence**, exactly the count `rb_read`
+   reports, so a stalled disk costs a hole rather than a permanent desync
+   against every other bus.
+2. **The header is rewritten in place about once per second of audio**, on the
+   writer thread. RIFF sizes live at the front, so the naive encoder only
+   writes them in `finalize` and a killed process leaves a file claiming zero
+   audio. With the periodic patch, a `kill -9` at any instant leaves a playable
+   file missing at most the last second. `finalize` writes the exact sizes and
+   `SetEndOfFile`s to them; `destroy` runs the same shutdown if `finalize`
+   never came.
+3. **Past 4 GiB: RF64 in place. Never refuses, never rolls to part-2.** A
+   36-byte `JUNK` chunk is reserved after `WAVE` from byte one; when the data
+   would overflow 32 bits the next header rewrite emits `RF64`/`ds64` and
+   `0xFFFFFFFF` sentinels. Nothing moves, no audio is rewritten. 4 GiB is only
+   3.1 h of 48k stereo (47 min of 8ch), so this is reachable in a normal
+   session. **Verified externally:** a 5 GiB file carrying the real header
+   bytes is read by ffprobe as `pcm_f32le`, 48000, stereo, 13981.01 s.
+
+### Test seams (deliberately not in any header)
+
+`action_wav.c` exports three symbols only `tests/test_action_wav.c` declares:
+`apr_wav_header_build` (pure header builder - lets RF64 be tested at sizes no
+test could write), `apr_wav_test_write_gate` (a handle the **writer thread**
+waits on before each payload write) and `apr_wav_test_fail_after_bytes`
+(simulated ENOSPC). Both flags are read on the writer thread only, so the
+mixer path costs nothing.
+
+The gate is what turns "on_audio does not block" from an assertion into a
+proof: with the disk held shut, a feeder thread must still push a second of
+audio through `on_audio` inside a 5 s wait while a second handle confirms the
+file is still only its 116-byte header. An implementation that wrote from
+`on_audio` would still be inside its first call.
+
+### For the other encoder agents / mix.c owner
+
+- **The m4a note that an overrun cannot be tested without flakiness is not
+  true any more.** The write-gate seam drives a real, deterministic overrun
+  (`an_overrun_becomes_silence_so_the_timeline_survives`) with no sleeps and
+  no timing assumptions. Same trick works for any action that owns a writer
+  thread.
+- The `apr_pcm_from_float` NaN finding does not touch WAV: float32 out means
+  there is no integer domain to reach. The WAV tests deliberately push a NaN
+  end to end, so if a scrub is ever added to `mix.c` it must not be applied on
+  this path - the archival format has to stay verbatim.
+
+### Not covered
+
+- Real 4 GiB+ *recording* (as opposed to the header) is untested by CI for
+  obvious reasons; the promotion is unit-tested byte-exactly and confirmed
+  against ffprobe on a synthetic 5 GiB file.
+- `finalize` joins the writer with `INFINITE`. A genuinely hung disk therefore
+  hangs the exit - chosen deliberately over abandoning a thread inside
+  `WriteFile` on a handle we then seek and close, which trades a slow exit for
+  a corrupt file.
+
+---
+
+## 2026-08-26 — M4A action complete + a SAFETY bug it found elsewhere
+
+### SAFETY: `apr_pcm_from_float` turns non-finite input into full-scale audio
+
+Found by the M4A agent, **confirmed by me by reading `src/core/mix.c`**:
+
+```c
+p[i] = (int16_t)clamp_i64(round_away(src[i] * APR_S16_SCALE), -32768, 32767);
+```
+
+`round_away` reaches the integer domain via a C cast. On x86 `cvttsd2si` of
+NaN or ±Inf yields `INT64_MIN`, which the clamp pins to **−32768 — full-scale
+negative**. So a NaN anywhere in the mix becomes **maximum loudness**, and a
+`+Inf` becomes maximum loudness of the wrong sign. Same pattern in the S24 and
+S32 branches.
+
+**Every encoder routes through this function**, so it is the highest-leverage
+place in the codebase to get this right — and per AGENTS.md rule 1 it is a
+safety issue, not a correctness nicety. Required: NaN→0, +Inf→max, −Inf→min,
+finite values untouched. Sent to the core agent (owner of `mix.c`) while it was
+still running.
+
+`src/actions/action_m4a.c` currently scrubs non-finite values itself with a
+comment to delete the guard once mix.c is fixed. **Remove that workaround once
+confirmed.**
+
+### M4A action — done
+
+`src/actions/action_m4a.c` (915 lines), exports `apr_action_m4a` (id `"m4a"`).
+`tests/test_action_m4a.c`, 15 cases, green in Debug and Release.
+
+- **All MF/COM work on one thread the file owns.** `on_audio` never touches COM,
+  so the mixer's apartment is irrelevant. `create()` still surfaces MF failures
+  synchronously via a one-shot handshake.
+- Write-behind uses `core/ringbuf.c` rather than a private FIFO (rule 3): 2 s of
+  int16, 384 KB at 48 k stereo. Worst measured `on_audio`: **0.012–0.018 ms**.
+  Overruns refill with silence from `rb_read`'s `out_lost`, so a stall never
+  shortens or desyncs the file.
+- Container from `MF_TRANSCODE_CONTAINERTYPE = MPEG4`, not the extension.
+- Timestamps via `apr_frames_to_hns()` — absolute, never accumulated.
+
+**MF formats actually available here: 142 distinct triples** (Win11 26200) —
+rates 11025–96000, channels 1/2/6/8, bitrates 8–1152 kbps. Far wider than the
+documented "44100/48000, 1–2 ch, 96–192 kbps" because the list is the union of
+the AAC-LC and HE-AAC MFTs. **Deduplication is load-bearing**: without it the
+duplicates filled the array cap and real formats fell off the end.
+
+### Two findings not to lose
+
+1. **`IMFSinkWriter::Finalize` on a zero-sample stream fails**
+   (`MF_E_SINK_NO_SAMPLES_PROCESSED`) and leaves an unopenable file. An
+   armed-but-never-fed bus is a *normal* outcome (muted app, source that failed
+   to start), so the action writes one ~21 ms AAC frame of silence before
+   finalizing. Pinned by a test.
+2. **Mid-recording process death leaves an unplayable MP4** and cannot be fixed
+   from inside a dead process — `moov` is only emitted at `Finalize()`. Ordinary
+   exit paths are all covered (idempotent finalize; destroy finalizes for a
+   forgetful caller; finalize still runs after a mid-stream write error).
+   Three remedies documented in-file — fragmented MP4 via
+   `MFCreateFMPEG4MediaSink`, an ADTS `.aac` action id, or segment rotation —
+   each with a real cost, none taken unilaterally. **Decision needed.**
+
+### Repo state
+
+`build.cmd Debug test`: **13/13 suites pass** — capture, drift, mix and resample
+have landed too. Wave 2 agents still finishing.
+
+Note: MF link directives are `#pragma comment(lib, ...)` inside the m4a files
+rather than `CMakeLists.txt` edits, deliberately, since several agents were
+landing in that file this wave.
