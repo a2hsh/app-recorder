@@ -414,6 +414,55 @@
     X(UI_TREE_ACTION,              1514)                                      \
     X(UI_TREE_ACTION_FAILED,       1515)
 
+/* ---- session files: the options, and everything a load has to be able to
+ * say when what the file describes is not what the machine currently has.
+ *
+ * THE RESOLUTION MESSAGES ARE WHOLE SENTENCES CARRYING TWO NAMES, and that is
+ * not verbosity. "Teams could not be found" is useless; "the session recorded
+ * Teams at C:\Apps\Teams\Teams.exe and it is now running from
+ * D:\Program Files\Teams\Teams.exe" tells the reader what happened and lets
+ * them decide whether it is the same program. Every substitution the resolver
+ * can make has an entry here that names both halves.
+ *
+ * The EXCLUDE entries are separate from the ones in APR_STR_LIST_CLI_MSG on
+ * purpose: those describe a capture the user just asked for on the command
+ * line, and these describe one a FILE asked for, which is the case design
+ * 4.1.1 says must never proceed without confirmation. Different situation,
+ * different sentence. ---- */
+#define APR_STR_LIST_SESSION(X)                                               \
+    X(CLI_CMD_SAVE_SESSION,          1520)                                    \
+    X(CLI_OPT_SESSION,               1521)                                    \
+    X(CLI_OPT_ALLOW_SYSTEM_CAPTURE,  1522)                                    \
+    X(CLI_OPT_ALLOW_MISSING,         1523)                                    \
+    X(ERR_SESSION_NOT_FOUND,         1524)                                    \
+    X(ERR_SESSION_UNREADABLE,        1525)                                    \
+    X(ERR_SESSION_NOT_JSON,          1526)                                    \
+    X(ERR_SESSION_TRUNCATED,         1527)                                    \
+    X(ERR_SESSION_NOT_A_SESSION,     1528)                                    \
+    X(ERR_SESSION_TOO_NEW,           1529)                                    \
+    X(ERR_SESSION_TOO_OLD,           1530)                                    \
+    X(ERR_SESSION_BAD_FIELD,         1531)                                    \
+    X(ERR_SESSION_BAD_VALUE,         1532)                                    \
+    X(ERR_SESSION_TOO_MANY,          1533)                                    \
+    X(ERR_SESSION_DANGLING_REF,      1534)                                    \
+    X(ERR_SESSION_WITH_SOURCES,      1535)                                    \
+    X(ERR_SESSION_NEEDED,            1536)                                    \
+    X(ERR_SESSION_NOT_WRITTEN,       1537)                                    \
+    X(WARN_SESSION_FROM_NEWER,       1538)                                    \
+    X(WARN_SESSION_UNKNOWN_KEYS,     1539)                                    \
+    X(ERR_SESSION_SOURCE_MISSING,    1540)                                    \
+    X(ERR_SESSION_DEVICE_MISSING,    1541)                                    \
+    X(ERR_SESSION_AMBIGUOUS,         1542)                                    \
+    X(ERR_SESSION_AMBIGUOUS_PIDS,    1543)                                    \
+    X(ERR_SESSION_NEEDS_CONSENT,     1544)                                    \
+    X(WARN_SESSION_MOVED,            1545)                                    \
+    X(WARN_SESSION_BY_WINDOW_CLASS,  1546)                                    \
+    X(WARN_SESSION_FIRST_OF_MANY,    1547)                                    \
+    X(WARN_SESSION_DEVICE_BY_NAME,   1548)                                    \
+    X(WARN_SESSION_DROPPED,          1549)                                    \
+    X(STATUS_SESSION_LOADED,         1550)                                    \
+    X(STATUS_SESSION_SAVED,          1551)
+
 /* Every plain string, in declaration order. This is what C, the generated
  * enum and tests/test_strings.c walk; the groups above exist only so that
  * res/strings.rc can emit them in rc.exe-sized pieces. */
@@ -425,7 +474,8 @@
     APR_STR_LIST_UI(X)                                                         \
     APR_STR_LIST_UI_NODE(X)                                                    \
     APR_STR_LIST_UI_KEYS(X)                                    \
-    APR_STR_LIST_UI_TREE(X)
+    APR_STR_LIST_UI_TREE(X)                                                    \
+    APR_STR_LIST_SESSION(X)
 
 
 /* X(NAME, base) -- a plural string. Referenced in C as APR_S_NAME, which is

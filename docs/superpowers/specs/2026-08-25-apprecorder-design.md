@@ -552,6 +552,41 @@ is an automation surface, so this is low priority.
 and preserves the accessibility tree; full owner-draw replaces the control's
 semantics and leaves a screen reader nothing to read. This is a hard rule.
 
+**And it has an RTL caveat the rule alone does not imply — the two interact, and
+the trap produces no diagnostic.** Custom draw may set `clrText`, `clrTextBk` and
+the font, and **must issue no GDI coordinate of its own**. That restraint is
+exactly what makes `WS_EX_LAYOUTRTL` safe on a standard control: the style hands
+the control a mirrored DC, so any coordinate *we* compute would be mirrored
+twice. Adding a badge, a colour bar or an indent later silently breaks Arabic
+while looking perfect in English. High contrast and the selected state must
+return `CDRF_DODEFAULT`.
+
+**A control's notifications go to its parent, so "a docked TreeView" cannot be
+one window.** `NM_CUSTOMDRAW` arrives as `WM_NOTIFY` at the control's *parent*.
+The frame handles no `WM_NOTIFY` and must not be made to, so each such control
+lives inside a small host window of ours that owns its notifications.
+
+**Two focus traps, both silent:**
+
+- **`SetFocus()` from inside `WM_SETFOCUS` is swallowed** — the outer `SetFocus`
+  reasserts its own target as it unwinds. Post a private message instead. This
+  was caught only because the test asks `GetGUIThreadInfo` what *actually* holds
+  focus; every proxy check passed.
+- **A focus-forwarding container must not be `WS_TABSTOP`**, or Shift+Tab leaves
+  the control, lands on the container and is forwarded straight back in.
+  Guarding on "focus came from the child" does not work — it is indistinguishable
+  from "the frame handed this pane focus while the child held it", which strands
+  F6. `WS_EX_CONTROLPARENT` without `WS_TABSTOP` is the fix, and UIA still
+  reports the pane keyboard-focusable.
+
+**Selection is a model identity, not a window.** This is the first question two
+views force, so it is settled here: a selection is
+`{kind, bus id, source id, action index}`. Neither view holds a handle from the
+other; a controller wires the two directions and suppresses the echo. **The bus
+is load-bearing** — a source may feed several buses and appears once under each,
+so "the selected source" is ambiguous while "this source, on this bus" is not.
+That pair is exactly the identity of the edge the canvas draws.
+
 Supporting: comctl32 v6 manifest, per-monitor DPI v2, generous spacing, and a
 per-script font with verified coverage (see 6.2).
 
@@ -584,7 +619,7 @@ thread. **Two threads is required** — a UIA client querying a window on the ST
 that owns it can deadlock.
 
 It asserts every element has a non-empty Name and a correct ControlType, and
-prints the whole tree every run. Current: **18 elements, 0 unnamed, 14
+prints the whole tree every run. Current: **30 elements, 0 unnamed, 16
 keyboard-focusable.** A screen reader sees exactly what UIA exposes, so this
 tests the property directly rather than by proxy — and it earned its keep on the
 first run by finding the splitter defect above.

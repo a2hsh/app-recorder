@@ -71,6 +71,22 @@ if(TARGET apprecorder_core)
 endif()
 
 # ---------------------------------------------------------------------------
+# OGG/Opus: vendored libogg + libopus, both static for the same reason.
+# BSD-3-Clause -- see vendor/ogg/PROVENANCE.md and vendor/opus/PROVENANCE.md.
+# Warnings are relaxed inside those two targets only.
+#
+# Ogg/Opus support costs 220.5 KB of the Release image, measured by building
+# with and without src/actions/action_ogg.c. Unlike LAME's decoder there is no
+# encoder-only slice of libopus to carve out: the two halves share the entropy
+# coder, the MDCT, the FFT and the mode tables. See vendor/opus/CMakeLists.txt.
+# ---------------------------------------------------------------------------
+add_subdirectory(${CMAKE_SOURCE_DIR}/vendor/ogg)
+add_subdirectory(${CMAKE_SOURCE_DIR}/vendor/opus)
+if(TARGET apprecorder_core)
+  target_link_libraries(apprecorder_core PUBLIC ogg opus)
+endif()
+
+# ---------------------------------------------------------------------------
 # Tests: one executable per test file, so a hang in one does not hide others.
 # ---------------------------------------------------------------------------
 enable_testing()
@@ -173,7 +189,7 @@ if(UI_SRC)
 
   # The test loop above links every test against apprecorder_core only. The UI
   # tests additionally need the UI library, and through it the manifest.
-  foreach(_uitest test_ui_theme test_ui_a11y)
+  foreach(_uitest test_ui_theme test_ui_a11y test_ui_tree test_ui_canvas)
     if(TARGET ${_uitest})
       target_link_libraries(${_uitest} PRIVATE apprecorder_ui)
     endif()
@@ -198,4 +214,23 @@ if(TARGET apprecorder_core)
 
   add_executable(apprecorder ${CMAKE_SOURCE_DIR}/src/cli/main.c)
   target_link_libraries(apprecorder PRIVATE apprecorder_core)
+endif()
+
+# ---------------------------------------------------------------------------
+# Session persistence.
+#
+# src/session/*.c is already covered by the CORE_SRC glob above; the only
+# thing this block adds is the include path for the vendored JSON tokenizer,
+# and it is PRIVATE because session_load.c is the single translation unit
+# permitted to parse JSON (design section 9 names one owner for the format).
+# jsmn is a header-only MIT tokenizer -- see vendor/jsmn/PROVENANCE.md for the
+# checksum and for why JSMN_STRICT is load-bearing rather than tidy.
+#
+# Appended rather than folded into the include_directories() call at the top
+# for the same reason the i18n and CLI blocks are separate: that list is
+# shared, and an additive block cannot conflict with an agent editing it.
+# ---------------------------------------------------------------------------
+if(TARGET apprecorder_core)
+  target_include_directories(apprecorder_core
+    PRIVATE ${CMAKE_SOURCE_DIR}/vendor/jsmn)
 endif()

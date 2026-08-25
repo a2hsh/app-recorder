@@ -487,6 +487,19 @@ static HWND thread_focus(HANDLE thread)
     return gti.hwndFocus;
 }
 
+/* Focus is IN a pane when it is on the pane window or on anything inside it.
+ *
+ * The descendant case is not a loosening, it is the normal one now that the
+ * panes have content: a pane whose job is to hold a control hands focus
+ * straight on to that control, so that a screen reader lands on the tree (or
+ * the node) rather than on a container whose only utterance is its own name.
+ * What F6 has to guarantee is that focus MOVED TO THE OTHER PANE, and that is
+ * what this expresses. */
+static int focus_is_in(HWND pane, HWND focus)
+{
+    return pane && focus && (focus == pane || IsChild(pane, focus));
+}
+
 TEST(f6_really_moves_focus_between_panes)
 {
     UiHost h;
@@ -520,7 +533,7 @@ TEST(f6_really_moves_focus_between_panes)
         ui_stop(&h);
         return;
     }
-    ASSERT_TRUE(before == tree || before == canvas);
+    ASSERT_TRUE(focus_is_in(tree, before) || focus_is_in(canvas, before));
 
     /* F6 posted at the window, exactly as a key press arrives. The message
      * loop must intercept it BEFORE IsDialogMessage, which swallows it -- if
@@ -535,7 +548,12 @@ TEST(f6_really_moves_focus_between_panes)
     printf("      focus after F6:  %p\n", (void *)after);
 
     ASSERT_TRUE(after != before);
-    ASSERT_TRUE(after == tree || after == canvas);
+    /* And it really is the OTHER pane, not merely a different window inside
+     * the same one -- which is the thing the plain inequality above stopped
+     * proving once a pane could contain more than one focusable window. */
+    ASSERT_FALSE(focus_is_in(tree, before) && focus_is_in(tree, after));
+    ASSERT_FALSE(focus_is_in(canvas, before) && focus_is_in(canvas, after));
+    ASSERT_TRUE(focus_is_in(tree, after) || focus_is_in(canvas, after));
 
     /* And what a screen reader would read, when the desktop focus is ours. */
     if (uia_open(&c, h.frame)) {

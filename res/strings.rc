@@ -399,6 +399,63 @@
 #define APR_EN_UI_TREE_ACTION                   "%1!s!, written from %2!s!"
 #define APR_EN_UI_TREE_ACTION_FAILED            "%1!s!, written from %2!s!, stopped after an error"
 
+/* ---- session files (src/session/, and the --session option).
+ *
+ * WHY THE RESOLUTION MESSAGES CARRY TWO NAMES EACH. A session file records
+ * what to capture; process ids do not survive a reboot, so opening one is a
+ * search rather than a lookup, and it can succeed in ways that are not what
+ * the file asked for. "Teams was not found" leaves the reader nothing to do.
+ * Naming both what was recorded and what is there now lets them decide
+ * whether the substitution is the same program -- so every entry below that
+ * describes a substitution has an insert for each half.
+ *
+ * The system-capture entry is deliberately NOT the same sentence as
+ * WARN_SYSTEM_CAPTURE_SCOPE. That one describes a capture the user just
+ * asked for by typing --system-minus-tree. This one describes a capture a
+ * FILE asked for, which design 4.1.1 says must never proceed without
+ * confirmation, and it has to say what to do about it. */
+
+#define APR_EN_CLI_CMD_SAVE_SESSION             "save-session          Write the recording described on this command line to a session file instead of recording it."
+#define APR_EN_CLI_OPT_SESSION                  "--session <path>       The session file: read by record, written by save-session."
+#define APR_EN_CLI_OPT_ALLOW_SYSTEM_CAPTURE     "--allow-system-capture Agree to record everything the computer is playing, when a session file asks for it. Never implied."
+#define APR_EN_CLI_OPT_ALLOW_MISSING            "--allow-missing        Record without the sources that could not be found, instead of stopping."
+
+#define APR_EN_ERR_SESSION_NOT_FOUND            "There is no session file at %1!s!."
+#define APR_EN_ERR_SESSION_UNREADABLE           "%1!s! could not be read: %2!s!"
+#define APR_EN_ERR_SESSION_NOT_JSON             "%1!s! is not a session file: the text is not JSON."
+#define APR_EN_ERR_SESSION_TRUNCATED            "%1!s! stops part way through. It was probably not finished being written."
+#define APR_EN_ERR_SESSION_NOT_A_SESSION        "%1!s! is JSON, but it is not an apprecorder session."
+#define APR_EN_ERR_SESSION_TOO_NEW              "%1!s! was written by a newer version of apprecorder and needs at least version %2!s! of the session format to be read safely. This build reads version %3!s!."
+#define APR_EN_ERR_SESSION_TOO_OLD              "%1!s! uses session format version %2!s!, which this build no longer reads."
+#define APR_EN_ERR_SESSION_BAD_FIELD            "%1!s! cannot be used: %2!s! is not the kind of value that belongs there."
+#define APR_EN_ERR_SESSION_BAD_VALUE            "%1!s! cannot be used: %2!s! is outside the range apprecorder can work with."
+#define APR_EN_ERR_SESSION_TOO_MANY             "%1!s! describes more than apprecorder can hold, at %2!s!."
+#define APR_EN_ERR_SESSION_DANGLING_REF         "%1!s! cannot be used: %2!s! names a source the file does not describe."
+#define APR_EN_ERR_SESSION_WITH_SOURCES         "--session describes the whole recording, so %1!s! cannot be given as well. Edit the session file, or leave --session out."
+#define APR_EN_ERR_SESSION_NEEDED               "save-session needs --session <path> to say where to write."
+#define APR_EN_ERR_SESSION_NOT_WRITTEN          "%1!s! could not be written: %2!s!"
+
+#define APR_EN_WARN_SESSION_FROM_NEWER          "%1!s! was written by a newer version of apprecorder. Anything it asks for that this build does not know about is being ignored."
+#define APR_EN_WARN_SESSION_UNKNOWN_KEYS        "%1!s! contains settings this build does not know, starting with %2!s!. They are being ignored."
+
+#define APR_EN_ERR_SESSION_SOURCE_MISSING       "%1!s! is not running. The session recorded it at %2!s!."
+#define APR_EN_ERR_SESSION_DEVICE_MISSING       "%1!s! is not connected, so it cannot be recorded."
+#define APR_EN_ERR_SESSION_AMBIGUOUS            "There is more than one %1!s! and nothing in the session says which one to record."
+#define APR_EN_ERR_SESSION_AMBIGUOUS_PIDS       "Choose one with --pid: %1!s!"
+/* Design 4.1.1: this must say what is really being captured -- a whole
+ * process tree is held back, and everything else on the machine is recorded
+ * -- and it must say what the user has to do to agree to that. */
+#define APR_EN_ERR_SESSION_NEEDS_CONSENT        "%1!s! asks to record everything this computer plays, holding back only %2!s! and whatever it has started. apprecorder will not do that because a file asked for it. Add --allow-system-capture if that is what you want."
+
+#define APR_EN_WARN_SESSION_MOVED               "%1!s! is now running from %2!s!, not %3!s! where the session recorded it. Recording the copy that is running."
+#define APR_EN_WARN_SESSION_BY_WINDOW_CLASS     "There is more than one %1!s!. Recording process %2!s!, because its window matches the one the session recorded."
+#define APR_EN_WARN_SESSION_FIRST_OF_MANY       "There is more than one %1!s! and nothing tells them apart. Recording process %2!s!."
+#define APR_EN_WARN_SESSION_DEVICE_BY_NAME      "%1!s! is connected but Windows now identifies it differently. Recording it anyway."
+#define APR_EN_WARN_SESSION_DROPPED             "Recording without %1!s!, which could not be found."
+
+#define APR_EN_STATUS_SESSION_LOADED            "Loaded %1!s!."
+#define APR_EN_STATUS_SESSION_SAVED             "Saved %1!s!."
+
 #define APR_EN_N_OTHER_BUSES_ZERO               "%1!s! other buses"
 #define APR_EN_N_OTHER_BUSES_ONE                "%1!s! other bus"
 #define APR_EN_N_OTHER_BUSES_TWO                "%1!s! other buses"
@@ -468,6 +525,11 @@ END
 STRINGTABLE
 BEGIN
     APR_STR_LIST_UI_TREE(APR_EN_ENTRY)
+END
+
+STRINGTABLE
+BEGIN
+    APR_STR_LIST_SESSION(APR_EN_ENTRY)
 END
 
 STRINGTABLE
@@ -733,6 +795,48 @@ END
 #define APR_AR_UI_TREE_STATE_EXITED(id)                    /* not translated yet */
 #define APR_AR_UI_TREE_ACTION(id)                          /* not translated yet */
 #define APR_AR_UI_TREE_ACTION_FAILED(id)                   /* not translated yet */
+
+/* Session files. Not translated yet -- and see the note at the top of this
+ * section: the Arabic here must come from the ux-araby pass plus a Gemini
+ * review, not from an agent. Two of these need particular care when it is
+ * written. ERR_SESSION_NEEDS_CONSENT must not flatten "everything except X"
+ * into a single item: what is held back is a whole process TREE that keeps
+ * growing, which design 4.1.1 calls out as exactly the relationship a careless
+ * translation of "except" destroys. And WARN_SESSION_MOVED carries two paths
+ * in one sentence, so the inserts have to stay distinguishable in Arabic
+ * rather than reading as one list. */
+#define APR_AR_CLI_CMD_SAVE_SESSION(id)                    /* not translated yet */
+#define APR_AR_CLI_OPT_SESSION(id)                         /* not translated yet */
+#define APR_AR_CLI_OPT_ALLOW_SYSTEM_CAPTURE(id)            /* not translated yet */
+#define APR_AR_CLI_OPT_ALLOW_MISSING(id)                   /* not translated yet */
+#define APR_AR_ERR_SESSION_NOT_FOUND(id)                   /* not translated yet */
+#define APR_AR_ERR_SESSION_UNREADABLE(id)                  /* not translated yet */
+#define APR_AR_ERR_SESSION_NOT_JSON(id)                    /* not translated yet */
+#define APR_AR_ERR_SESSION_TRUNCATED(id)                   /* not translated yet */
+#define APR_AR_ERR_SESSION_NOT_A_SESSION(id)               /* not translated yet */
+#define APR_AR_ERR_SESSION_TOO_NEW(id)                     /* not translated yet */
+#define APR_AR_ERR_SESSION_TOO_OLD(id)                     /* not translated yet */
+#define APR_AR_ERR_SESSION_BAD_FIELD(id)                   /* not translated yet */
+#define APR_AR_ERR_SESSION_BAD_VALUE(id)                   /* not translated yet */
+#define APR_AR_ERR_SESSION_TOO_MANY(id)                    /* not translated yet */
+#define APR_AR_ERR_SESSION_DANGLING_REF(id)                /* not translated yet */
+#define APR_AR_ERR_SESSION_WITH_SOURCES(id)                /* not translated yet */
+#define APR_AR_ERR_SESSION_NEEDED(id)                      /* not translated yet */
+#define APR_AR_ERR_SESSION_NOT_WRITTEN(id)                 /* not translated yet */
+#define APR_AR_WARN_SESSION_FROM_NEWER(id)                 /* not translated yet */
+#define APR_AR_WARN_SESSION_UNKNOWN_KEYS(id)               /* not translated yet */
+#define APR_AR_ERR_SESSION_SOURCE_MISSING(id)              /* not translated yet */
+#define APR_AR_ERR_SESSION_DEVICE_MISSING(id)              /* not translated yet */
+#define APR_AR_ERR_SESSION_AMBIGUOUS(id)                   /* not translated yet */
+#define APR_AR_ERR_SESSION_AMBIGUOUS_PIDS(id)              /* not translated yet */
+#define APR_AR_ERR_SESSION_NEEDS_CONSENT(id)               /* not translated yet */
+#define APR_AR_WARN_SESSION_MOVED(id)                      /* not translated yet */
+#define APR_AR_WARN_SESSION_BY_WINDOW_CLASS(id)            /* not translated yet */
+#define APR_AR_WARN_SESSION_FIRST_OF_MANY(id)              /* not translated yet */
+#define APR_AR_WARN_SESSION_DEVICE_BY_NAME(id)             /* not translated yet */
+#define APR_AR_WARN_SESSION_DROPPED(id)                    /* not translated yet */
+#define APR_AR_STATUS_SESSION_LOADED(id)                   /* not translated yet */
+#define APR_AR_STATUS_SESSION_SAVED(id)                    /* not translated yet */
 
 #define APR_AR_P_N_OTHER_BUSES(base)         /* not translated yet */
 #define APR_AR_P_N_OUTPUTS(base)             /* not translated yet */
