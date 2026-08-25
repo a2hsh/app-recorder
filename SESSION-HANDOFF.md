@@ -3364,3 +3364,117 @@ owner exists). **Move it to `discover.c` when the UI needs it.**
 `build.cmd Release test`: **24/24 suites, 0 failures.**
 `apprecorder.exe` = **786,944 bytes (768.5 KB)** — under the 1 MB goal with four
 encoders, LAME, libogg and libopus statically linked.
+
+---
+
+# ★ START HERE — state as of 2026-08-26, ~06:00
+
+## It works. Try this first
+
+```
+cd d:\data\projects\apprecorder
+build.cmd Release test          → 24/24 suites, 0 failures
+build\Release\apprecorder.exe list-apps
+build\Release\apprecorder.exe list-devices
+```
+
+`list-devices` correctly finds Chat Mic, Stream Mix 1, Stream Mix 2 and Sample on
+the GoXLR. A full session round-trip was verified end to end:
+
+```
+apprecorder save-session --session my.json ^
+  --bus Mix       --exe teams.exe --device "Chat Mic"             --out mix.mp3 ^
+  --bus VoiceOnly                 --device "Chat Mic" --gain 3.5  --out voice.wav
+
+apprecorder record --session my.json --dry-run
+```
+
+Chat Mic appears on **both** buses at **different gains** — the graph feature,
+working.
+
+## What is done
+
+| Layer | State |
+|---|---|
+| foundation (harness, err, log, ringbuf, clock) | done, 74 cases |
+| capture (process / device / fake) | done |
+| core (graph, bus, mix, resample, drift) | done — **0.43 frames over 3 h** |
+| encoders WAV / MP3 / M4A / OGG-Opus | all four done |
+| i18n (catalog, CLDR plurals, RTL) | done — **Arabic not written** |
+| CLI | **working** |
+| UI foundation + canvas + tree panel | done, a11y tree tested |
+| session persistence | done |
+
+**Release binary 786,944 bytes (768.5 KB)** — under the 1 MB goal with four
+encoders, LAME, libogg and libopus linked in.
+
+## THE THREE THINGS ONLY YOU CAN DO
+
+### 1. The device-capture pass — highest risk in the project
+
+**No test anywhere has ever `start()`ed a real capture endpoint.** Every agent
+correctly refused, because starting one records your microphone without consent.
+So `capture_device.c`'s pump, gap-fill and discontinuity handling have **zero
+hardware coverage** — and that is the path carrying *all* the real drift (§5.1);
+process taps are the easy half. Also untested for the same reason: the
+`AUTOCONVERTPCM` retry path, and a real process tap recorded *through the CLI*.
+
+Five minutes with you awake closes this.
+
+### 2. The Arabic — 154+ strings pending
+
+Placeholders only; the pipeline is proven, the words are yours. Process per your
+CLAUDE.md: `ux-araby` for فصحى مبسطة, then a Gemini review pass, keeping your
+domain overrides — **«إمكانية الوصول»**, never «الإتاحة». Flipping the Arabic
+locale from PARTIAL to COMPLETE is the ship gate and the test prints the
+outstanding count every run.
+
+### 3. Two decisions left open
+
+- **M4A dies badly on a process kill** — the `moov` atom is only written at
+  finalize and cannot be rebuilt from a dead process. WAV, MP3 and OGG all
+  survive. Three fixes are documented in `action_m4a.c` (fragmented MP4, a
+  separate ADTS `.aac` action, or segment rotation), each with a real cost.
+- **Digit shaping** — Western vs Arabic-Indic numerals. One function
+  (`apr_str_number`) owns it. Your domain.
+
+## KNOWN DEFECTS — small, documented, not yet fixed
+
+1. **`AprActionVTable::display_name` is a wide literal in each encoder's vtable.**
+   A user-facing string in code — violates AGENTS.md rule 6. **My design error in
+   `action.h`.** The tree panel reads it for output rows. Needs an `AprStrId` per
+   format beside the registry; do all four vtables in one pass.
+2. **`capture_fake` has no health knob**, so `apr_source_muted()` /
+   `apr_source_alive()` cannot be driven from a test. Blocks proper coverage of
+   the tree's two state clauses **and** the CLI's `WARN_SOURCE_MUTED` path. Small
+   fix, unlocks both.
+3. **`action_m4a.c` still scrubs non-finite values** before `apr_pcm_from_float`.
+   Confirmed redundant since `mix.c` handles NaN/±Inf for every integer format.
+   Dead code, not a defect. Remove with a verified build.
+4. **`--out x.ogg` needs an explicit `--format ogg`**; `.opus` works without it.
+   Extension mapping is by the registry's `extension` field and Opus registers
+   `.opus`. Surprising; worth a CLI alias.
+5. **Window-class lookup is a private static in `session_load.c`.** Move to
+   `discover.c` when the UI needs it.
+6. **`CMakeLists.txt`'s `foreach(_uitest …)` list** is a three-way merge point.
+   A `MATCHES "^test_ui_"` loop would remove it permanently — safe now that the
+   UI agents are finished.
+7. **No dialog layer**, so the canvas announces "not available yet" for add
+   source/bus/output. It can navigate and rewire an existing graph but cannot
+   build one from scratch. **This is the main gap between the UI and being
+   usable.**
+
+## Process lessons worth keeping
+
+- **Write the contracts first.** `capture.h` and `action.h` were written before
+  the parallel agents launched, and `capture.h` was implemented **unchanged** by
+  four agents who could not see each other's work. Zero DRY violations found in
+  review.
+- **Stage explicit paths while agents run.** `git add -A` mid-wave attributed one
+  agent's work to another's commit. Happened twice.
+- **A wrong claim propagates into every file that paraphrases it.** The backwards
+  `WS_EX_LAYOUTRTL` statement survived in three places. Grep the claim, not the
+  file.
+- **Test the real property, not a proxy.** The UIA client found an unnamed
+  mouse-only splitter; `GetGUIThreadInfo` found a swallowed `SetFocus` that every
+  proxy check passed.
