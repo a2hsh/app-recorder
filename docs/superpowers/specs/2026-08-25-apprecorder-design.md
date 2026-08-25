@@ -590,6 +590,9 @@ src/
              ringbuf.c  clock.c  resample.c  mix.c
   capture/   com_shim.c  wasapi_common.c
              capture_process.c  capture_device.c  capture_fake.c
+             discover.c        /* which apps are rendering, which endpoints
+                                * exist. Both front ends need the same three
+                                * queries, so it is a module, not CLI code. */
   actions/   action_wav.c  action_mp3.c  action_ogg.c  action_m4a.c
   ui/        app.c  canvas.c  node_window.c  tree_panel.c
              theme.c  darkmode.c  dpi.c

@@ -2321,3 +2321,104 @@ It found two genuine defects:
   first run and were fixed.
 - `strings.h`/`strings.rc` were merged around the live CLI agent's restructure
   twice. **Worth a reviewer glance at those two files.**
+
+---
+
+## 2026-08-26 — CLI COMPLETE. **The first usable milestone works.**
+
+`src/cli/{cli.c,cli.h,main.c}`, `src/capture/discover.c` + `include/discover.h`,
+`tests/test_cli.c` (43 cases). **20/20 suites green Debug + Release.**
+**Release `apprecorder.exe` = 496 KB** — under the 1 MB goal *with three encoders
+and LAME inside it*.
+
+### Verified by me, running the real binary
+
+`list-devices` found the author's actual rig: **Chat Mic, Stream Mix 1, Stream
+Mix 2, Sample** (2- TC-HELICON GoXLR), correctly marking Stream Mix 1 as the
+default recording endpoint. `list-apps` showed the one app rendering audio at
+3am: `nvda.exe`.
+
+Dry-run of the real use case — an app plus Chat Mic mixed to MP3, *and* a
+voice-only WAV from the same mic — resolved both buses correctly. **That is a
+source feeding two buses, i.e. the graph feature, proven end to end.** Exit codes
+verified live: 0 valid, 2 bus with no output, 3 named app not running.
+
+### Flag grammar is positional
+
+`--bus <name>` opens a bus; every source and output after it belongs to that bus
+until the next `--bus`. Multiple buses in one invocation is therefore ordinary
+rather than special-cased:
+
+```
+apprecorder --bus Mix   --exe teams.exe --device Chat --out mix.wav \
+            --bus Voice --device Chat                 --out voice.wav
+```
+
+Sources: `--pid`, `--exe`, `--device`, `--fake`, `--system-minus-tree`, `--gain`.
+Outputs: `--out` (repeatable), `--format`, `--bitrate`, `--quality`. Format
+otherwise comes from the extension **matched against the registry's own
+`extension` field, so adding OGG needs no CLI edit.**
+
+### Exit codes
+
+0 finished (Ctrl+C is a 0) · 1 command line unreadable · 2 read but unusable ·
+3 named process/app/device absent · 4 output not creatable/closeable · 5 source
+not openable · 6 recorded and playable but a source died or an action failed ·
+7 internal. `--dry-run` returns the code the real run would have.
+
+### Ctrl+C finalize — measured, not asserted
+
+Ctrl+C sets a flag and returns TRUE so Windows never kills us; a second press
+still refuses to abandon the encoders. CTRL_CLOSE/LOGOFF/SHUTDOWN block *inside*
+the handler until files are closed. One graph-destroy site, in a `__finally`;
+`apr_cli_main` wraps the run in `__try/__except` so an access violation unwinds
+*through* it rather than skipping it. The loop also sleeps the 50 ms lookbehind
+and ticks once more so the last block is not dropped.
+
+**Verified live:** a real `GenerateConsoleCtrlEvent(CTRL_C_EVENT)` to a real
+`apprecorder.exe` recording WAV + M4A → exit 0, valid RIFF/WAVE, and **the M4A
+had its `moov` atom**. That is the property that makes M4A playable at all.
+
+### `--system-minus-tree` caught the trap 4.1.1 predicts
+
+Takes a **pid only**, prints four unsuppressible lines, and none is worded
+"everything except X". Pointed at a pwsh pid it listed `pwsh.exe,
+apprecorder.exe` — **it caught the recorder itself.**
+
+### Three things that cost real time (documented in-source)
+
+1. **rc.exe dies on a large STRINGTABLE**: `fatal error RC10056:` with *nothing
+   after the colon*. Probed: ~60 help-text-length entries compile, ~80 do not.
+   The catalog is now cut into named groups, each its own STRINGTABLE block.
+   Arabic stays one table because rc.exe **also rejects an empty STRINGTABLE**
+   and every Arabic group but the first is empty.
+2. **`AprCliPlan` overflowed a 1 MB stack** — static storage now, stated in caps
+   in the header.
+3. **`cl 14.42 /O1 /GL` ICE'd** (`C1001`, Release only) on the first
+   `parse_fixed`; rewritten around one accumulator.
+
+### Spec updated
+
+§7 module layout now lists `capture/discover.c` — both front ends need the same
+three queries, so it is a module rather than CLI code. Nothing else contradicted;
+§3, 4.1, 4.1.1, 5 and 10 all held.
+
+### Notes
+
+- 89 new catalog ids, English written, **Arabic now `7 translated, 154
+  awaiting`**. JSON field names are deliberately **not** localized — wire format,
+  not prose; that judgement is written into the `.rc`.
+- `apr_str_number_fixed()` added to the string layer rather than forking decimal
+  formatting into the CLI; indentation moved out of the catalog into
+  `say_indented()` (RTL insets from the other side).
+- `include/strings.h`, `res/strings.rc` and `CMakeLists.txt` were edited by the
+  CLI and UI agents **concurrently**. Suite is green with both in the tree, but
+  **that file pair deserves a reviewer glance.**
+
+### CAVEATS — the untested paths
+
+- **A real process tap has never been recorded through the CLI** — resolution and
+  refusal only.
+- **`--device` is still never `start()`ed anywhere.** Highest-risk untested path
+  in the project, and it carries all the real drift. **Needs a manual pass with
+  the author awake and consenting.**

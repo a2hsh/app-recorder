@@ -1,0 +1,1935 @@
+/*
+ * cli.c -- apprecorder's command line.
+ *
+ * Read cli.h first; it holds the grammar and the reasoning. What follows are
+ * the four things about this file that are load-bearing rather than obvious.
+ *
+ * 1. FINALIZE RUNS ON EVERY PATH, AND THAT IS ARRANGED STRUCTURALLY.
+ *
+ *    An M4A whose moov atom was never written does not play, and cannot be
+ *    repaired from inside a process that is already gone (SESSION-HANDOFF,
+ *    action_m4a). So there is exactly ONE place a graph is destroyed, it is a
+ *    __finally block, and apr_graph_destroy stops every bus -- which finalizes
+ *    every action -- before it frees anything. Nothing in do_record returns
+ *    past that block, an access violation inside it unwinds through it (main
+ *    supplies the __except that makes unwinding happen), and Ctrl+C never
+ *    reaches it at all because Ctrl+C is a request rather than a kill.
+ *
+ * 2. CTRL+C IS A REQUEST.
+ *
+ *    The handler sets a flag, signals an event and returns TRUE, so Windows
+ *    does not terminate us; the record loop notices and stops properly. A
+ *    second Ctrl+C says the files are being closed and STILL refuses to
+ *    abandon them. CTRL_CLOSE/LOGOFF/SHUTDOWN are different: Windows gives the
+ *    handler a few seconds and then terminates the process regardless, so
+ *    those block in the handler until the files are closed.
+ *
+ * 3. --dry-run OPENS NO AUDIO DEVICE.
+ *
+ *    Everything apr_cli_resolve does is a property query -- the process table,
+ *    the audio engine's session list, the endpoint list, and a
+ *    create-then-delete probe of each output path. None of it activates an
+ *    IAudioClient. That is what makes the flag worth having in a script: it
+ *    answers "would this work" without any of the side effects of finding out.
+ *
+ * 4. TEXT IS LOCALIZED; JSON IS NOT.
+ *
+ *    Every line a person reads comes from the catalog (AGENTS.md rule 6). The
+ *    field names and the numbers inside --json output are deliberately fixed
+ *    ASCII: they are a wire format a script matches on, and localizing them
+ *    would break every script the moment the interface language changed. That
+ *    is why JSON numbers go through swprintf and display numbers go through
+ *    apr_str_number, which is also the only place digit shaping is decided.
+ */
+#include <windows.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+#include <wchar.h>
+
+#include "cli/cli.h"
+
+#include "action.h"
+#include "clock.h"
+#include "discover.h"
+#include "graph.h"
+#include "log.h"
+#include "strings.h"
+
+#define APR_CLI_VERSION L"0.1.0"
+
+/* Longest single line the CLI composes. Catalog entries are whole sentences
+ * and paths are up to MAX_PATH, so this has room for two of each. */
+#define LINE_CCH 1200
+
+/* How many rows the listings will hold. Far past any real machine; a fuller
+ * list than this is reported as its true count rather than silently cut. */
+#define MAX_APPS      128
+#define MAX_ENDPOINTS 64
+#define MAX_TREE      256
+
+/* ---------------------------------------------------------------------------
+ * Output
+ * ------------------------------------------------------------------------- */
+
+typedef struct Ctx {
+    const AprCliIo *io;
+    int json;
+    int quiet;
+} Ctx;
+
+static void emit(const Ctx *cx, int stream, const wchar_t *line)
+{
+    if (cx && cx->io && cx->io->write) cx->io->write(cx->io->user, stream,
+                                                     line ? line : L"");
+}
+
+static void say(const Ctx *cx, int stream, AprStrId id,
+                const wchar_t *const *args, size_t nargs)
+{
+    wchar_t buf[LINE_CCH];
+    apr_str_format(id, buf, LINE_CCH, args, nargs);
+    emit(cx, stream, buf);
+}
+
+#define SAY0(cx, stream, id) say((cx), (stream), (id), NULL, 0)
+
+/* An indented line -- a source under its bus, a device id under its device.
+ *
+ * The indent lives HERE and never in the catalog, and that is not tidiness:
+ * indentation is layout, and in a right-to-left language a nested row is
+ * inset from the other side. A catalog entry that began with two spaces would
+ * be inset from the wrong side the moment the interface language changed, and
+ * a translator has no way to fix that from inside the string. apr_str_is_rtl()
+ * is the one place direction comes from (strings.h). */
+static void say_indented(const Ctx *cx, int stream, int level, AprStrId id,
+                         const wchar_t *const *args, size_t nargs)
+{
+    wchar_t body[LINE_CCH];
+    wchar_t out[LINE_CCH];
+    wchar_t pad[17];
+    int     n = level * 2;
+
+    if (n > 16) n = 16;
+    wmemset(pad, L' ', (size_t)n);
+    pad[n] = L'\0';
+
+    apr_str_format(id, body, LINE_CCH, args, nargs);
+    if (apr_str_is_rtl())
+        _snwprintf_s(out, LINE_CCH, _TRUNCATE, L"%ls%ls", body, pad);
+    else
+        _snwprintf_s(out, LINE_CCH, _TRUNCATE, L"%ls%ls", pad, body);
+    emit(cx, stream, out);
+}
+
+/* Progress and status: suppressed by --quiet, and never emitted at all in
+ * --json mode, where the document is the whole output. */
+static void note(const Ctx *cx, AprStrId id,
+                 const wchar_t *const *args, size_t nargs)
+{
+    if (cx->quiet || cx->json) return;
+    say(cx, APR_CLI_STDOUT, id, args, nargs);
+}
+
+/* Warnings are NOT suppressed by --quiet: --quiet means "warnings and errors
+ * only", and a muted source or a dead one is exactly what a person needs to
+ * be told. */
+static void warn(const Ctx *cx, AprStrId id,
+                 const wchar_t *const *args, size_t nargs)
+{
+    if (cx->json) return;
+    say(cx, APR_CLI_STDERR, id, args, nargs);
+}
+
+/* ---------------------------------------------------------------------------
+ * Numbers
+ *
+ * num()/fixed() are for people and go through the localization layer, which is
+ * the only place the Western-versus-Arabic-Indic digit question is decided.
+ * The JSON emitter never uses them.
+ * ------------------------------------------------------------------------- */
+
+typedef struct NumBuf { wchar_t s[40]; } NumBuf;
+
+static const wchar_t *num(NumBuf *b, int64_t v)
+{
+    apr_str_number(v, b->s, sizeof b->s / sizeof b->s[0]);
+    return b->s;
+}
+
+static const wchar_t *fixed(NumBuf *b, int64_t scaled, int decimals)
+{
+    apr_str_number_fixed(scaled, decimals, b->s, sizeof b->s / sizeof b->s[0]);
+    return b->s;
+}
+
+static const wchar_t *errtext(const AprErr *e, wchar_t *buf, size_t cch)
+{
+    return apr_err_format(e, buf, cch);
+}
+
+/* ---------------------------------------------------------------------------
+ * JSON. Two spaces of indent, one value per line, so a document is a sequence
+ * of short lines rather than one enormous one -- easier to read in a terminal
+ * and identical to a parser.
+ * ------------------------------------------------------------------------- */
+
+static void json_escape(const wchar_t *s, wchar_t *out, size_t cch)
+{
+    size_t o = 0;
+
+    if (!out || cch == 0) return;
+    out[0] = L'\0';
+    for (; s && *s && o + 8 < cch; s++) {
+        wchar_t ch = *s;
+        switch (ch) {
+        case L'"':  out[o++] = L'\\'; out[o++] = L'"';  break;
+        case L'\\': out[o++] = L'\\'; out[o++] = L'\\'; break;
+        case L'\n': out[o++] = L'\\'; out[o++] = L'n';  break;
+        case L'\r': out[o++] = L'\\'; out[o++] = L'r';  break;
+        case L'\t': out[o++] = L'\\'; out[o++] = L't';  break;
+        default:
+            if (ch < 0x20) {
+                o += (size_t)_snwprintf_s(out + o, cch - o, _TRUNCATE,
+                                          L"\\u%04x", (unsigned)ch);
+            } else {
+                out[o++] = ch;
+            }
+        }
+    }
+    out[o] = L'\0';
+}
+
+static void jline(const Ctx *cx, int indent, const wchar_t *fmt, ...)
+{
+    wchar_t buf[LINE_CCH];
+    wchar_t pad[17];
+    int     n = indent * 2;
+    va_list ap;
+
+    if (n > 16) n = 16;
+    wmemset(pad, L' ', (size_t)n);
+    pad[n] = L'\0';
+
+    va_start(ap, fmt);
+    _vsnwprintf_s(buf, LINE_CCH, _TRUNCATE, fmt, ap);
+    va_end(ap);
+
+    {
+        wchar_t out[LINE_CCH];
+        _snwprintf_s(out, LINE_CCH, _TRUNCATE, L"%ls%ls", pad, buf);
+        emit(cx, APR_CLI_STDOUT, out);
+    }
+}
+
+static void jstr(const Ctx *cx, int indent, const wchar_t *key,
+                 const wchar_t *value, int comma)
+{
+    wchar_t esc[LINE_CCH];
+    json_escape(value, esc, LINE_CCH);
+    jline(cx, indent, L"\"%ls\": \"%ls\"%ls", key, esc, comma ? L"," : L"");
+}
+
+static void jnum(const Ctx *cx, int indent, const wchar_t *key,
+                 int64_t value, int comma)
+{
+    jline(cx, indent, L"\"%ls\": %lld%ls", key, (long long)value,
+          comma ? L"," : L"");
+}
+
+static void jbool(const Ctx *cx, int indent, const wchar_t *key, int value,
+                  int comma)
+{
+    jline(cx, indent, L"\"%ls\": %ls%ls", key, value ? L"true" : L"false",
+          comma ? L"," : L"");
+}
+
+static void jreal(const Ctx *cx, int indent, const wchar_t *key, double value,
+                  int comma)
+{
+    jline(cx, indent, L"\"%ls\": %.3f%ls", key, value, comma ? L"," : L"");
+}
+
+/* ---------------------------------------------------------------------------
+ * Failure
+ * ------------------------------------------------------------------------- */
+
+static AprCliExit fail(const Ctx *cx, AprCliExit code, AprStrId id,
+                       const wchar_t *const *args, size_t nargs)
+{
+    wchar_t msg[LINE_CCH];
+
+    apr_str_format(id, msg, LINE_CCH, args, nargs);
+    if (cx->json) {
+        jline(cx, 0, L"{");
+        jbool(cx, 1, L"ok", 0, 1);
+        jnum(cx, 1, L"exitCode", (int64_t)code, 1);
+        jstr(cx, 1, L"error", msg, 0);
+        jline(cx, 0, L"}");
+    } else {
+        emit(cx, APR_CLI_STDERR, msg);
+    }
+    return code;
+}
+
+/* ---------------------------------------------------------------------------
+ * Parsing primitives. Hand-written rather than wcstol/wcstod, so that neither
+ * the CRT locale nor a stray suffix can turn "48k" into 48.
+ * ------------------------------------------------------------------------- */
+
+static int parse_i64(const wchar_t *s, int64_t *out)
+{
+    int64_t v = 0;
+    int     neg = 0, digits = 0;
+
+    if (!s || !*s) return 0;
+    if (*s == L'-') { neg = 1; s++; }
+    else if (*s == L'+') s++;
+    for (; *s; s++) {
+        if (*s < L'0' || *s > L'9') return 0;
+        if (v > (INT64_MAX - 9) / 10) return 0;
+        v = v * 10 + (*s - L'0');
+        digits++;
+    }
+    if (!digits) return 0;
+    *out = neg ? -v : v;
+    return 1;
+}
+
+/* "-6.5" with decimals=1 -> -65: a decimal read into a scaled integer, so no
+ * float is ever parsed and the CRT's locale cannot decide what a decimal point
+ * is. Extra precision is truncated rather than rounded -- a tenth of a decibel
+ * is already below anything audible, and a predictable truncation beats a
+ * surprising round.
+ *
+ * One accumulator on purpose. An earlier version kept the whole and fractional
+ * parts apart and scaled them separately; that shape made the Release compiler
+ * (cl 14.42, /O1 /GL) fail with an internal compiler error, and it was harder
+ * to read besides. */
+static int parse_fixed(const wchar_t *s, int decimals, int64_t *out)
+{
+    int64_t value = 0;
+    int     neg = 0, digits = 0, taken = 0, seen_dot = 0, d;
+
+    if (!s || !*s || decimals < 0 || decimals > 9) return 0;
+    if (*s == L'-') { neg = 1; s++; }
+    else if (*s == L'+') s++;
+
+    for (; *s; s++) {
+        if (*s == L'.') {
+            if (seen_dot) return 0;
+            seen_dot = 1;
+            continue;
+        }
+        if (*s < L'0' || *s > L'9') return 0;
+        digits++;
+        if (seen_dot) {
+            if (taken >= decimals) continue;   /* past our precision: drop it */
+            taken++;
+        }
+        if (value > (INT64_MAX - 9) / 10) return 0;
+        value = value * 10 + (*s - L'0');
+    }
+    if (!digits) return 0;
+
+    for (d = taken; d < decimals; d++) {
+        if (value > INT64_MAX / 10) return 0;
+        value *= 10;
+    }
+    *out = neg ? -value : value;
+    return 1;
+}
+
+static int eq(const wchar_t *a, const wchar_t *b)
+{
+    return a && b && wcscmp(a, b) == 0;
+}
+
+static int ieq(const wchar_t *a, const wchar_t *b)
+{
+    return a && b && _wcsicmp(a, b) == 0;
+}
+
+static int icontains(const wchar_t *hay, const wchar_t *needle)
+{
+    size_t nl;
+    if (!hay || !needle || !*needle) return 0;
+    nl = wcslen(needle);
+    for (; *hay; hay++) {
+        if (_wcsnicmp(hay, needle, nl) == 0) return 1;
+    }
+    return 0;
+}
+
+static void copy_cch(wchar_t *dst, size_t cch, const wchar_t *src)
+{
+    if (!dst || cch == 0) return;
+    dst[0] = L'\0';
+    if (src) wcsncpy_s(dst, cch, src, _TRUNCATE);
+}
+
+/* ---------------------------------------------------------------------------
+ * The stop signal, shared by the console control handler and the record loop
+ * ------------------------------------------------------------------------- */
+
+static volatile LONG g_stop_requested;
+static volatile LONG g_handler_installed;
+static HANDLE        g_stop_event;       /* manual reset */
+static HANDLE        g_finished_event;   /* manual reset; files are closed */
+
+void apr_cli_request_stop(void)
+{
+    InterlockedExchange(&g_stop_requested, 1);
+    if (g_stop_event) SetEvent(g_stop_event);
+}
+
+int apr_cli_test_ctrl_handler_installed(void)
+{
+    return (int)InterlockedCompareExchange(&g_handler_installed, 0, 0);
+}
+
+/* Written straight to the console rather than through AprCliIo: this runs on a
+ * thread Windows injects, and the io a caller supplied may not expect that. */
+static void console_line(int stream, const wchar_t *text);
+
+static BOOL WINAPI ctrl_handler(DWORD type)
+{
+    LONG was;
+
+    switch (type) {
+    case CTRL_C_EVENT:
+    case CTRL_BREAK_EVENT:
+        was = InterlockedExchange(&g_stop_requested, 1);
+        if (g_stop_event) SetEvent(g_stop_event);
+        if (was) {
+            /* Pressed again. Say what is happening and keep finalizing: an
+             * abandoned encoder is an unplayable file, which is worse than
+             * waiting. */
+            console_line(APR_CLI_STDERR, apr_str(APR_S_WARN_STILL_FINISHING));
+        }
+        return TRUE;
+
+    case CTRL_CLOSE_EVENT:
+    case CTRL_LOGOFF_EVENT:
+    case CTRL_SHUTDOWN_EVENT:
+        /* Windows terminates the process shortly after this returns, so the
+         * work has to finish HERE. Block until the files are closed. */
+        InterlockedExchange(&g_stop_requested, 1);
+        if (g_stop_event) SetEvent(g_stop_event);
+        if (g_finished_event) WaitForSingleObject(g_finished_event, 4000);
+        return TRUE;
+
+    default:
+        return FALSE;
+    }
+}
+
+static void stop_signal_open(void)
+{
+    InterlockedExchange(&g_stop_requested, 0);
+    if (!g_stop_event)     g_stop_event     = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!g_finished_event) g_finished_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (g_stop_event)     ResetEvent(g_stop_event);
+    if (g_finished_event) ResetEvent(g_finished_event);
+
+    if (SetConsoleCtrlHandler(ctrl_handler, TRUE))
+        InterlockedExchange(&g_handler_installed, 1);
+}
+
+static void stop_signal_close(void)
+{
+    if (g_finished_event) SetEvent(g_finished_event);
+    if (apr_cli_test_ctrl_handler_installed()) {
+        SetConsoleCtrlHandler(ctrl_handler, FALSE);
+        InterlockedExchange(&g_handler_installed, 0);
+    }
+    InterlockedExchange(&g_stop_requested, 0);
+}
+
+static int stop_requested(void)
+{
+    return (int)InterlockedCompareExchange(&g_stop_requested, 0, 0);
+}
+
+/* ---------------------------------------------------------------------------
+ * Defaults
+ * ------------------------------------------------------------------------- */
+
+static void plan_defaults(AprCliPlan *p)
+{
+    memset(p, 0, sizeof *p);
+    p->cmd       = APR_CLI_CMD_RECORD;
+    p->rate      = 48000;
+    p->channels  = 2;
+    p->log_level = APR_LOG_WARN;
+}
+
+static AprCliBus *current_bus(AprCliPlan *p)
+{
+    if (p->bus_count == 0) {
+        /* The implicit bus. Its name comes from the catalog rather than a
+         * literal, because it is shown to a person. */
+        copy_cch(p->buses[0].name, APR_NAME_CCH,
+                 apr_str(APR_S_CLI_DEFAULT_BUS_NAME));
+        p->bus_count = 1;
+    }
+    return &p->buses[p->bus_count - 1];
+}
+
+/* ---------------------------------------------------------------------------
+ * Parse
+ * ------------------------------------------------------------------------- */
+
+static int prescan(int argc, const wchar_t *const *argv, const wchar_t *flag)
+{
+    int i;
+    for (i = 1; i < argc; i++) {
+        if (eq(argv[i], flag)) return 1;
+    }
+    return 0;
+}
+
+static AprCliExit range_error(const Ctx *cx, const wchar_t *opt,
+                              int64_t lo, int64_t hi, int decimals,
+                              const wchar_t *given)
+{
+    NumBuf a, b;
+    const wchar_t *args[4];
+
+    args[0] = opt;
+    args[1] = fixed(&a, lo, decimals);
+    args[2] = fixed(&b, hi, decimals);
+    args[3] = given;
+    return fail(cx, APR_CLI_USAGE, APR_S_ERR_OUT_OF_RANGE, args, 4);
+}
+
+static AprCliExit number_error(const Ctx *cx, const wchar_t *opt,
+                               const wchar_t *given)
+{
+    const wchar_t *args[2];
+    args[0] = opt;
+    args[1] = given;
+    return fail(cx, APR_CLI_USAGE, APR_S_ERR_BAD_NUMBER, args, 2);
+}
+
+/* Reads "<hz>[,<ppm>[,<amplitude>]]". */
+static int parse_fake(const wchar_t *spec, AprCliSource *s)
+{
+    wchar_t  copy[64];
+    wchar_t *ctxp = NULL;
+    wchar_t *tok;
+    int64_t  v;
+    int      field = 0;
+
+    s->fake_hz  = 440;
+    s->fake_ppm = 0;
+    s->fake_amp = 0.25f;
+
+    copy_cch(copy, 64, spec);
+    tok = wcstok_s(copy, L",", &ctxp);
+    while (tok) {
+        switch (field) {
+        case 0:
+            if (!parse_i64(tok, &v) || v < 0 || v > 192000) return 0;
+            s->fake_hz = (uint32_t)v;
+            break;
+        case 1:
+            if (!parse_i64(tok, &v) || v < -100000 || v > 100000) return 0;
+            s->fake_ppm = (int32_t)v;
+            break;
+        case 2:
+            if (!parse_fixed(tok, 6, &v) || v < 0 || v > 1000000) return 0;
+            s->fake_amp = (float)((double)v / 1000000.0);
+            break;
+        default:
+            return 0;
+        }
+        field++;
+        tok = wcstok_s(NULL, L",", &ctxp);
+    }
+    return field > 0;
+}
+
+static AprCliSource *add_source(AprCliPlan *p, AprCliBus *b,
+                                AprCliSourceKind kind, const wchar_t *spec)
+{
+    AprCliSource *s;
+
+    (void)p;
+    if (b->source_count >= APR_MAX_SOURCES_PER_BUS) return NULL;
+    s = &b->sources[b->source_count++];
+    memset(s, 0, sizeof *s);
+    s->kind = kind;
+    s->gain = 1.0f;
+    s->gain_db_tenths = 0;
+    copy_cch(s->spec, APR_CLI_SPEC_CCH, spec);
+    copy_cch(s->label, APR_NAME_CCH, spec);
+    return s;
+}
+
+AprCliExit apr_cli_parse(int argc, const wchar_t *const *argv,
+                         AprCliPlan *plan, const AprCliIo *io)
+{
+    Ctx cx;
+    AprCliBus    *bus = NULL;
+    AprCliSource *last = NULL;
+    char  pending_format[16];
+    int   pending_bitrate = 0, pending_quality = 0;
+    int   i = 1;
+
+    if (!plan) return APR_CLI_INTERNAL;
+    plan_defaults(plan);
+    pending_format[0] = '\0';
+
+    cx.io    = io;
+    /* --json and --quiet may appear anywhere, including after the option that
+     * fails, so they are read before anything can fail. */
+    cx.json  = prescan(argc, argv, L"--json");
+    cx.quiet = prescan(argc, argv, L"--quiet");
+
+    if (argc > 1 && argv[1] && argv[1][0] != L'-') {
+        const wchar_t *c = argv[1];
+        if      (eq(c, L"record"))       plan->cmd = APR_CLI_CMD_RECORD;
+        else if (eq(c, L"list-apps"))    plan->cmd = APR_CLI_CMD_LIST_APPS;
+        else if (eq(c, L"list-devices")) plan->cmd = APR_CLI_CMD_LIST_DEVICES;
+        else if (eq(c, L"help"))         plan->cmd = APR_CLI_CMD_HELP;
+        else if (eq(c, L"version"))      plan->cmd = APR_CLI_CMD_VERSION;
+        else {
+            const wchar_t *args[1];
+            args[0] = c;
+            return fail(&cx, APR_CLI_USAGE, APR_S_ERR_UNKNOWN_COMMAND, args, 1);
+        }
+        i = 2;
+    }
+
+    for (; i < argc; i++) {
+        const wchar_t *a = argv[i];
+        const wchar_t *v = NULL;
+        int64_t        n = 0;
+        int            wants_value;
+
+        if (!a) continue;
+
+        wants_value = eq(a, L"--bus") || eq(a, L"--pid") || eq(a, L"--exe") ||
+                      eq(a, L"--device") || eq(a, L"--fake") ||
+                      eq(a, L"--system-minus-tree") || eq(a, L"--gain") ||
+                      eq(a, L"--out") || eq(a, L"--format") ||
+                      eq(a, L"--bitrate") || eq(a, L"--quality") ||
+                      eq(a, L"--rate") || eq(a, L"--channels") ||
+                      eq(a, L"--duration") || eq(a, L"--lang") ||
+                      eq(a, L"--log-level") || eq(a, L"--log-file");
+
+        if (wants_value) {
+            if (i + 1 >= argc) {
+                const wchar_t *args[1];
+                args[0] = a;
+                return fail(&cx, APR_CLI_USAGE, APR_S_ERR_OPTION_NEEDS_VALUE,
+                            args, 1);
+            }
+            v = argv[++i];
+        }
+
+        /* --- session-wide ------------------------------------------------- */
+        if (eq(a, L"--json") || eq(a, L"--quiet")) {
+            plan->json  = cx.json;
+            plan->quiet = cx.quiet;
+            continue;
+        }
+        if (eq(a, L"--dry-run")) { plan->dry_run = 1; continue; }
+        if (eq(a, L"--all"))     { plan->all = 1;     continue; }
+        if (eq(a, L"--help") || eq(a, L"-h") || eq(a, L"-?")) {
+            plan->cmd = APR_CLI_CMD_HELP;
+            continue;
+        }
+        if (eq(a, L"--rate")) {
+            if (!parse_i64(v, &n)) return number_error(&cx, a, v);
+            if (n < 8000 || n > 384000) return range_error(&cx, a, 8000, 384000, 0, v);
+            plan->rate = (uint32_t)n;
+            continue;
+        }
+        if (eq(a, L"--channels")) {
+            if (!parse_i64(v, &n)) return number_error(&cx, a, v);
+            if (n < 1 || n > 8) return range_error(&cx, a, 1, 8, 0, v);
+            plan->channels = (uint16_t)n;
+            continue;
+        }
+        if (eq(a, L"--duration")) {
+            if (!parse_fixed(v, 3, &n)) return number_error(&cx, a, v);
+            if (n < 1 || n > 86400000) return range_error(&cx, a, 1, 86400000, 3, v);
+            plan->duration_ms = n;
+            continue;
+        }
+        if (eq(a, L"--lang")) { copy_cch(plan->lang, 32, v); continue; }
+        if (eq(a, L"--log-file")) {
+            copy_cch(plan->log_file, APR_CLI_SPEC_CCH, v);
+            continue;
+        }
+        if (eq(a, L"--log-level")) {
+            if      (ieq(v, L"trace")) plan->log_level = APR_LOG_TRACE;
+            else if (ieq(v, L"debug")) plan->log_level = APR_LOG_DEBUG;
+            else if (ieq(v, L"info"))  plan->log_level = APR_LOG_INFO;
+            else if (ieq(v, L"warn"))  plan->log_level = APR_LOG_WARN;
+            else if (ieq(v, L"error")) plan->log_level = APR_LOG_ERROR;
+            else if (ieq(v, L"off"))   plan->log_level = APR_LOG_OFF;
+            else {
+                const wchar_t *args[2];
+                args[0] = a; args[1] = v;
+                return fail(&cx, APR_CLI_USAGE, APR_S_ERR_BAD_NUMBER, args, 2);
+            }
+            continue;
+        }
+
+        /* Everything below describes a recording. */
+        if (plan->cmd != APR_CLI_CMD_RECORD) {
+            const wchar_t *args[2];
+            args[0] = a;
+            args[1] = argv[1];
+            return fail(&cx, APR_CLI_USAGE, APR_S_ERR_OPTION_NOT_FOR_COMMAND,
+                        args, 2);
+        }
+
+        /* --- buses -------------------------------------------------------- */
+        if (eq(a, L"--bus")) {
+            if (plan->bus_count >= APR_MAX_BUSES) {
+                NumBuf nb;
+                const wchar_t *args[1];
+                args[0] = num(&nb, APR_MAX_BUSES);
+                return fail(&cx, APR_CLI_CONFIG, APR_S_ERR_TOO_MANY_BUSES, args, 1);
+            }
+            bus = &plan->buses[plan->bus_count++];
+            memset(bus, 0, sizeof *bus);
+            copy_cch(bus->name, APR_NAME_CCH, v);
+            last = NULL;
+            continue;
+        }
+
+        /* --- sources ------------------------------------------------------ */
+        if (eq(a, L"--pid") || eq(a, L"--exe") || eq(a, L"--device") ||
+            eq(a, L"--fake") || eq(a, L"--system-minus-tree"))
+        {
+            AprCliSourceKind kind =
+                eq(a, L"--pid")    ? APR_CLI_SRC_PID :
+                eq(a, L"--exe")    ? APR_CLI_SRC_EXE :
+                eq(a, L"--device") ? APR_CLI_SRC_DEVICE :
+                eq(a, L"--fake")   ? APR_CLI_SRC_FAKE :
+                                     APR_CLI_SRC_SYSTEM_MINUS_TREE;
+
+            bus = current_bus(plan);
+            last = add_source(plan, bus, kind, v);
+            if (!last) {
+                NumBuf nb;
+                const wchar_t *args[2];
+                args[0] = bus->name;
+                args[1] = num(&nb, APR_MAX_SOURCES_PER_BUS);
+                return fail(&cx, APR_CLI_CONFIG, APR_S_ERR_TOO_MANY_SOURCES,
+                            args, 2);
+            }
+            if (kind == APR_CLI_SRC_FAKE && !parse_fake(v, last))
+                return number_error(&cx, a, v);
+            if ((kind == APR_CLI_SRC_PID || kind == APR_CLI_SRC_SYSTEM_MINUS_TREE)) {
+                if (!parse_i64(v, &n) || n <= 0 || n > 0xffffffffLL)
+                    return number_error(&cx, a, v);
+                last->pid = (uint32_t)n;
+            }
+            continue;
+        }
+
+        if (eq(a, L"--gain")) {
+            if (!last) {
+                return fail(&cx, APR_CLI_USAGE, APR_S_ERR_GAIN_WITHOUT_SOURCE,
+                            NULL, 0);
+            }
+            if (!parse_fixed(v, 1, &n)) return number_error(&cx, a, v);
+            if (n < -1200 || n > 400) return range_error(&cx, a, -1200, 400, 1, v);
+            last->gain_db_tenths = (int32_t)n;
+            last->gain = (float)pow(10.0, (double)n / 200.0);
+            continue;
+        }
+
+        /* --- outputs ------------------------------------------------------ */
+        if (eq(a, L"--format")) {
+            size_t k;
+            pending_format[0] = '\0';
+            for (k = 0; k + 1 < sizeof pending_format && v[k]; k++)
+                pending_format[k] = (char)(v[k] < 128 ? v[k] : '?');
+            pending_format[k] = '\0';
+            continue;
+        }
+        if (eq(a, L"--bitrate")) {
+            if (!parse_i64(v, &n)) return number_error(&cx, a, v);
+            if (n < 0 || n > 1152) return range_error(&cx, a, 0, 1152, 0, v);
+            pending_bitrate = (int)n;
+            continue;
+        }
+        if (eq(a, L"--quality")) {
+            if (!parse_i64(v, &n)) return number_error(&cx, a, v);
+            if (n < 0 || n > 10) return range_error(&cx, a, 0, 10, 0, v);
+            pending_quality = (int)n;
+            continue;
+        }
+        if (eq(a, L"--out")) {
+            AprCliOutput *o;
+            bus = current_bus(plan);
+            if (bus->output_count >= APR_CLI_MAX_OUTPUTS_PER_BUS) {
+                NumBuf nb;
+                const wchar_t *args[2];
+                args[0] = bus->name;
+                args[1] = num(&nb, APR_CLI_MAX_OUTPUTS_PER_BUS);
+                return fail(&cx, APR_CLI_CONFIG, APR_S_ERR_TOO_MANY_OUTPUTS,
+                            args, 2);
+            }
+            o = &bus->outputs[bus->output_count++];
+            memset(o, 0, sizeof *o);
+            copy_cch(o->path, APR_CLI_SPEC_CCH, v);
+            strcpy_s(o->action_id, sizeof o->action_id, pending_format);
+            o->bitrate_kbps = pending_bitrate;
+            o->quality      = pending_quality;
+            /* Deliberately one-shot: --format applies to the output it
+             * precedes, so two outputs of different formats do not need the
+             * flag cleared by hand. */
+            pending_format[0] = '\0';
+            pending_bitrate = 0;
+            pending_quality = 0;
+            continue;
+        }
+
+        {
+            const wchar_t *args[1];
+            args[0] = a;
+            return fail(&cx, APR_CLI_USAGE, APR_S_ERR_UNKNOWN_OPTION, args, 1);
+        }
+    }
+
+    plan->json  = cx.json;
+    plan->quiet = cx.quiet;
+    return APR_CLI_OK;
+}
+
+/* ---------------------------------------------------------------------------
+ * Resolve
+ * ------------------------------------------------------------------------- */
+
+static const wchar_t *extension_of(const wchar_t *path)
+{
+    const wchar_t *dot = wcsrchr(path, L'.');
+    const wchar_t *sep = wcsrchr(path, L'\\');
+    const wchar_t *alt = wcsrchr(path, L'/');
+
+    if (sep && alt && alt > sep) sep = alt;
+    if (!sep) sep = alt;
+    if (!dot) return NULL;
+    if (sep && dot < sep) return NULL;
+    return dot[1] ? dot + 1 : NULL;
+}
+
+static const AprActionVTable *action_for_extension(const wchar_t *ext)
+{
+    size_t i, n = apr_action_count();
+
+    for (i = 0; i < n; i++) {
+        const AprActionVTable *vt = apr_action_at(i);
+        if (vt && vt->extension && vt->extension[0] && ieq(vt->extension, ext))
+            return vt;
+    }
+    return NULL;
+}
+
+/* Can this path be created and written? Creates nothing that was not already
+ * there: a file it had to create is deleted again, which is what makes this
+ * safe inside --dry-run. */
+static AprErr probe_writable(const wchar_t *path)
+{
+    HANDLE h;
+    BOOL   created;
+
+    SetLastError(0);
+    h = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE)
+        return APR_ERR_LAST(L"cannot write %ls", path);
+
+    created = (GetLastError() != ERROR_ALREADY_EXISTS);
+    CloseHandle(h);
+    if (created) DeleteFileW(path);
+    return apr_ok();
+}
+
+static void full_path(const wchar_t *in, wchar_t *out, size_t cch)
+{
+    if (GetFullPathNameW(in, (DWORD)cch, out, NULL) == 0)
+        copy_cch(out, cch, in);
+}
+
+/* One predicate, used both to count matches and to list them. */
+static int exe_hit(const AprAudioApp *a, const wchar_t *spec, int exact)
+{
+    if (exact) return ieq(a->exe, spec);
+    return icontains(a->exe, spec) || icontains(a->display, spec);
+}
+
+static AprCliExit resolve_process(const Ctx *cx, AprCliSource *s,
+                                  const AprAudioApp *apps, size_t app_count)
+{
+    const wchar_t *args[2];
+    size_t i;
+
+    if (s->kind == APR_CLI_SRC_PID || s->kind == APR_CLI_SRC_SYSTEM_MINUS_TREE) {
+        if (!apr_process_exists(s->pid)) {
+            args[0] = s->spec;
+            return fail(cx, APR_CLI_NOT_FOUND, APR_S_ERR_PID_NOT_RUNNING, args, 1);
+        }
+        if (apr_process_image_name(s->pid, s->label, APR_NAME_CCH) == 0)
+            copy_cch(s->label, APR_NAME_CCH, s->spec);
+        for (i = 0; i < app_count; i++) {
+            if (apps[i].pid == s->pid) s->muted_now = apps[i].muted;
+        }
+        return APR_CLI_OK;
+    }
+
+    /* --exe: matched against what the audio engine currently knows about, not
+     * against the process table. An application with no audio session has
+     * nothing to record. */
+    {
+        size_t  hits = 0, first = 0;
+        wchar_t list[LINE_CCH];
+        int     exact = 1;
+
+        /* An exact executable name wins outright; a partial one is tried only
+         * when nothing matched exactly. `exact` then records WHICH pass found
+         * the matches, so the "which one did you mean" list below uses the very
+         * same predicate and cannot name something that was not counted. */
+        for (i = 0; i < app_count; i++) {
+            if (!exe_hit(&apps[i], s->spec, 1)) continue;
+            if (!hits) first = i;
+            hits++;
+        }
+        if (hits == 0) {
+            exact = 0;
+            for (i = 0; i < app_count; i++) {
+                if (!exe_hit(&apps[i], s->spec, 0)) continue;
+                if (!hits) first = i;
+                hits++;
+            }
+        }
+        if (hits == 0) {
+            args[0] = s->spec;
+            return fail(cx, APR_CLI_NOT_FOUND, APR_S_ERR_EXE_NOT_PLAYING, args, 1);
+        }
+        if (hits > 1) {
+            NumBuf nb;
+            list[0] = L'\0';
+            for (i = 0; i < app_count; i++) {
+                wchar_t one[64];
+                if (!exe_hit(&apps[i], s->spec, exact)) continue;
+                _snwprintf_s(one, 64, _TRUNCATE, L"%ls%ls",
+                             list[0] ? L", " : L"", num(&nb, apps[i].pid));
+                wcsncat_s(list, LINE_CCH, one, _TRUNCATE);
+            }
+            args[0] = s->spec;
+            args[1] = list;
+            return fail(cx, APR_CLI_NOT_FOUND, APR_S_ERR_EXE_AMBIGUOUS, args, 2);
+        }
+        s->pid       = apps[first].pid;
+        s->muted_now = apps[first].muted;
+        copy_cch(s->label, APR_NAME_CCH,
+                 apps[first].exe[0] ? apps[first].exe : apps[first].display);
+        return APR_CLI_OK;
+    }
+}
+
+static AprCliExit resolve_device(const Ctx *cx, AprCliSource *s,
+                                 const AprAudioEndpoint *eps, size_t ep_count)
+{
+    const wchar_t *args[2];
+    size_t i, hits = 0, first = 0;
+    wchar_t list[LINE_CCH];
+
+    for (i = 0; i < ep_count; i++) {
+        if (ieq(eps[i].id, s->spec)) { first = i; hits = 1; break; }
+    }
+    if (hits == 0) {
+        for (i = 0; i < ep_count; i++) {
+            if (icontains(eps[i].name, s->spec)) {
+                if (!hits) first = i;
+                hits++;
+            }
+        }
+    }
+    if (hits == 0) {
+        args[0] = s->spec;
+        return fail(cx, APR_CLI_NOT_FOUND, APR_S_ERR_DEVICE_NOT_FOUND, args, 1);
+    }
+    if (hits > 1) {
+        list[0] = L'\0';
+        for (i = 0; i < ep_count; i++) {
+            if (icontains(eps[i].name, s->spec)) {
+                wchar_t one[APR_DISC_NAME_CCH + 4];
+                _snwprintf_s(one, APR_DISC_NAME_CCH + 4, _TRUNCATE, L"%ls%ls",
+                             list[0] ? L", " : L"", eps[i].name);
+                wcsncat_s(list, LINE_CCH, one, _TRUNCATE);
+            }
+        }
+        args[0] = s->spec;
+        args[1] = list;
+        return fail(cx, APR_CLI_NOT_FOUND, APR_S_ERR_DEVICE_AMBIGUOUS, args, 2);
+    }
+    copy_cch(s->endpoint_id, APR_DISC_ENDPOINT_CCH, eps[first].id);
+    copy_cch(s->label, APR_NAME_CCH,
+             eps[first].name[0] ? eps[first].name : eps[first].id);
+    return APR_CLI_OK;
+}
+
+/* The privacy warning. Design 4.1.1 is emphatic that this must never be worded
+ * as "everything except X": what is held back is a whole process TREE, it
+ * grows after the recording starts, and naming a terminal holds back every
+ * program launched from it. So the warning names the tree, lists who is in it
+ * right now, and says the launcher case out loud. */
+static void warn_system_capture(const Ctx *cx, const AprCliSource *s)
+{
+    uint32_t tree[MAX_TREE];
+    size_t   count = 0, i;
+    wchar_t  list[LINE_CCH];
+    const wchar_t *args[1];
+    AprErr   e;
+
+    args[0] = s->label;
+    SAY0(cx, APR_CLI_STDERR, APR_S_WARN_SYSTEM_CAPTURE_SCOPE);
+    say(cx, APR_CLI_STDERR, APR_S_WARN_SYSTEM_CAPTURE_TREE, args, 1);
+
+    e = apr_enum_process_tree(s->pid, tree, MAX_TREE, &count);
+    if (!apr_failed(&e) && count > 0) {
+        list[0] = L'\0';
+        for (i = 0; i < count && i < MAX_TREE; i++) {
+            wchar_t name[APR_NAME_CCH];
+            wchar_t one[APR_NAME_CCH + 32];
+            NumBuf  nb;
+            if (apr_process_image_name(tree[i], name, APR_NAME_CCH) == 0)
+                copy_cch(name, APR_NAME_CCH, num(&nb, tree[i]));
+            _snwprintf_s(one, APR_NAME_CCH + 32, _TRUNCATE, L"%ls%ls (%ls)",
+                         list[0] ? L", " : L"", name, num(&nb, tree[i]));
+            if (wcslen(list) + wcslen(one) + 1 >= LINE_CCH) break;
+            wcsncat_s(list, LINE_CCH, one, _TRUNCATE);
+        }
+        args[0] = list;
+        say(cx, APR_CLI_STDERR, APR_S_WARN_SYSTEM_CAPTURE_MEMBERS, args, 1);
+    }
+
+    args[0] = s->label;
+    say(cx, APR_CLI_STDERR, APR_S_WARN_SYSTEM_CAPTURE_LAUNCHER, args, 1);
+}
+
+AprCliExit apr_cli_resolve(AprCliPlan *plan, const AprCliIo *io)
+{
+    static AprAudioApp      apps[MAX_APPS];
+    static AprAudioEndpoint eps[MAX_ENDPOINTS];
+    Ctx    cx;
+    size_t app_count = 0, ep_count = 0;
+    size_t bi, si, oi;
+    int    want_apps = 0, want_devices = 0;
+
+    if (!plan) return APR_CLI_INTERNAL;
+    cx.io = io; cx.json = plan->json; cx.quiet = plan->quiet;
+
+    if (plan->cmd != APR_CLI_CMD_RECORD) return APR_CLI_OK;
+
+    if (plan->bus_count == 0)
+        return fail(&cx, APR_CLI_CONFIG, APR_S_ERR_NO_SOURCES, NULL, 0);
+
+    for (bi = 0; bi < plan->bus_count; bi++) {
+        AprCliBus *b = &plan->buses[bi];
+        const wchar_t *args[1];
+        args[0] = b->name;
+        if (b->source_count == 0)
+            return fail(&cx, APR_CLI_CONFIG, APR_S_ERR_BUS_HAS_NO_SOURCE, args, 1);
+        if (b->output_count == 0)
+            return fail(&cx, APR_CLI_CONFIG, APR_S_ERR_BUS_HAS_NO_OUTPUT, args, 1);
+        for (si = 0; si < b->source_count; si++) {
+            switch (b->sources[si].kind) {
+            case APR_CLI_SRC_PID:
+            case APR_CLI_SRC_EXE:
+            case APR_CLI_SRC_SYSTEM_MINUS_TREE: want_apps = 1;    break;
+            case APR_CLI_SRC_DEVICE:            want_devices = 1; break;
+            default: break;
+            }
+        }
+    }
+
+    /* Enumeration, not activation: nothing here opens an audio client, which
+     * is what lets --dry-run be trusted. */
+    if (want_apps)    (void)apr_enum_audio_apps(apps, MAX_APPS, &app_count);
+    if (want_devices) (void)apr_enum_capture_endpoints(eps, MAX_ENDPOINTS, &ep_count);
+    if (app_count > MAX_APPS)      app_count = MAX_APPS;
+    if (ep_count  > MAX_ENDPOINTS) ep_count  = MAX_ENDPOINTS;
+
+    for (bi = 0; bi < plan->bus_count; bi++) {
+        AprCliBus *b = &plan->buses[bi];
+
+        for (si = 0; si < b->source_count; si++) {
+            AprCliSource *s = &b->sources[si];
+            AprCliExit    rc = APR_CLI_OK;
+
+            switch (s->kind) {
+            case APR_CLI_SRC_PID:
+            case APR_CLI_SRC_EXE:
+                rc = resolve_process(&cx, s, apps, app_count);
+                break;
+            case APR_CLI_SRC_SYSTEM_MINUS_TREE:
+                rc = resolve_process(&cx, s, apps, app_count);
+                if (rc == APR_CLI_OK) warn_system_capture(&cx, s);
+                break;
+            case APR_CLI_SRC_DEVICE:
+                rc = resolve_device(&cx, s, eps, ep_count);
+                break;
+            case APR_CLI_SRC_FAKE:
+                /* Its label stays the spec it was given ("440,30"), because the
+                 * kind is already printed beside it and repeating "generated by
+                 * apprecorder (generated by apprecorder)" tells nobody which
+                 * synthetic source this is. */
+                break;
+            }
+            if (rc != APR_CLI_OK) return rc;
+
+            /* Loopback sits after the session volume, so a muted application
+             * records as pure silence while looking perfectly healthy. Say so
+             * BEFORE the recording, which is the only moment it helps. */
+            if (s->muted_now) {
+                const wchar_t *args[1];
+                args[0] = s->label;
+                warn(&cx, APR_S_WARN_SOURCE_MUTED, args, 1);
+            }
+        }
+
+        for (oi = 0; oi < b->output_count; oi++) {
+            AprCliOutput *o = &b->outputs[oi];
+            const wchar_t *args[2];
+            AprErr e;
+
+            if (o->action_id[0] == '\0') {
+                const wchar_t *ext = extension_of(o->path);
+                const AprActionVTable *vt;
+                if (!ext) {
+                    args[0] = o->path;
+                    return fail(&cx, APR_CLI_CONFIG, APR_S_ERR_NO_EXTENSION, args, 1);
+                }
+                vt = action_for_extension(ext);
+                if (!vt) {
+                    args[0] = ext;
+                    return fail(&cx, APR_CLI_CONFIG, APR_S_ERR_UNKNOWN_FORMAT, args, 1);
+                }
+                strcpy_s(o->action_id, sizeof o->action_id, vt->id);
+            } else if (!apr_action_find(o->action_id)) {
+                wchar_t wide[16];
+                size_t  k;
+                for (k = 0; k + 1 < 16 && o->action_id[k]; k++)
+                    wide[k] = (wchar_t)o->action_id[k];
+                wide[k] = L'\0';
+                args[0] = wide;
+                return fail(&cx, APR_CLI_CONFIG, APR_S_ERR_UNKNOWN_FORMAT, args, 1);
+            }
+
+            /* Two recordings cannot share a file, and the comparison has to be
+             * of the resolved paths -- "a.wav" and ".\a.wav" are one file. */
+            {
+                wchar_t mine[APR_CLI_SPEC_CCH];
+                size_t  bj, oj;
+                full_path(o->path, mine, APR_CLI_SPEC_CCH);
+                for (bj = 0; bj <= bi; bj++) {
+                    size_t limit = (bj == bi) ? oi : plan->buses[bj].output_count;
+                    for (oj = 0; oj < limit; oj++) {
+                        wchar_t other[APR_CLI_SPEC_CCH];
+                        full_path(plan->buses[bj].outputs[oj].path, other,
+                                  APR_CLI_SPEC_CCH);
+                        if (ieq(mine, other)) {
+                            args[0] = o->path;
+                            return fail(&cx, APR_CLI_CONFIG,
+                                        APR_S_ERR_DUPLICATE_OUTPUT, args, 1);
+                        }
+                    }
+                }
+            }
+
+            e = probe_writable(o->path);
+            if (apr_failed(&e)) {
+                wchar_t why[512];
+                args[0] = o->path;
+                args[1] = errtext(&e, why, 512);
+                return fail(&cx, APR_CLI_OUTPUT, APR_S_ERR_OUTPUT_NOT_WRITABLE,
+                            args, 2);
+            }
+        }
+    }
+
+    return APR_CLI_OK;
+}
+
+/* ---------------------------------------------------------------------------
+ * help / version
+ * ------------------------------------------------------------------------- */
+
+static void print_usage(const Ctx *cx)
+{
+    static const AprStrId lines[] = {
+        APR_S_APP_NAME, APR_S_APP_TAGLINE,
+        (AprStrId)0,
+        APR_S_CLI_USAGE_HEADER,
+        (AprStrId)0,
+        APR_S_CLI_COMMANDS_HEADER,
+        APR_S_CLI_CMD_RECORD, APR_S_CLI_CMD_LIST_APPS, APR_S_CLI_CMD_LIST_DEVICES,
+        APR_S_CLI_CMD_HELP, APR_S_CLI_CMD_VERSION,
+        (AprStrId)0,
+        APR_S_CLI_SOURCES_HEADER,
+        APR_S_CLI_OPT_BUS, APR_S_CLI_OPT_PID, APR_S_CLI_OPT_EXE,
+        APR_S_CLI_OPT_DEVICE, APR_S_CLI_OPT_FAKE, APR_S_CLI_OPT_GAIN,
+        APR_S_CLI_OPT_SYSTEM_MINUS_TREE,
+        (AprStrId)0,
+        APR_S_CLI_OUTPUTS_HEADER,
+        APR_S_CLI_OPT_OUT, APR_S_CLI_OPT_FORMAT, APR_S_CLI_OPT_BITRATE,
+        APR_S_CLI_OPT_QUALITY,
+        (AprStrId)0,
+        APR_S_CLI_SESSION_HEADER,
+        APR_S_CLI_OPT_RATE, APR_S_CLI_OPT_CHANNELS, APR_S_CLI_OPT_DURATION,
+        APR_S_CLI_OPT_DRY_RUN, APR_S_CLI_OPT_JSON, APR_S_CLI_OPT_QUIET,
+        APR_S_CLI_OPT_ALL, APR_S_CLI_OPT_LANG, APR_S_CLI_OPT_LOG_LEVEL,
+        APR_S_CLI_OPT_LOG_FILE,
+        (AprStrId)0,
+        APR_S_CLI_EXIT_HEADER,
+        APR_S_CLI_EXIT_OK, APR_S_CLI_EXIT_USAGE, APR_S_CLI_EXIT_CONFIG,
+        APR_S_CLI_EXIT_NOT_FOUND, APR_S_CLI_EXIT_OUTPUT, APR_S_CLI_EXIT_CAPTURE,
+        APR_S_CLI_EXIT_INCOMPLETE, APR_S_CLI_EXIT_INTERNAL,
+        (AprStrId)0,
+        APR_S_CLI_EXAMPLES_HEADER,
+        APR_S_CLI_EXAMPLE_ONE, APR_S_CLI_EXAMPLE_TWO,
+        (AprStrId)0,
+        APR_S_CLI_STOP_HINT
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof lines / sizeof lines[0]; i++) {
+        if (lines[i] == 0) emit(cx, APR_CLI_STDOUT, L"");
+        else               emit(cx, APR_CLI_STDOUT, apr_str(lines[i]));
+    }
+}
+
+static AprCliExit do_version(const Ctx *cx)
+{
+    const wchar_t *args[1];
+    args[0] = APR_CLI_VERSION;
+
+    if (cx->json) {
+        jline(cx, 0, L"{");
+        jstr(cx, 1, L"name", apr_str(APR_S_APP_NAME), 1);
+        jstr(cx, 1, L"version", APR_CLI_VERSION, 0);
+        jline(cx, 0, L"}");
+    } else {
+        say(cx, APR_CLI_STDOUT, APR_S_CLI_VERSION_LINE, args, 1);
+    }
+    return APR_CLI_OK;
+}
+
+/* ---------------------------------------------------------------------------
+ * Listings
+ * ------------------------------------------------------------------------- */
+
+static AprCliExit do_list_apps(const Ctx *cx, const AprCliPlan *plan)
+{
+    static AprAudioApp apps[MAX_APPS];
+    size_t count = 0, i, shown = 0;
+    AprErr e;
+
+    e = apr_enum_audio_apps(apps, MAX_APPS, &count);
+    if (apr_failed(&e)) {
+        wchar_t why[512];
+        const wchar_t *args[2];
+        args[0] = apr_str(APR_S_APP_NAME);
+        args[1] = errtext(&e, why, 512);
+        return fail(cx, APR_CLI_INTERNAL, APR_S_ERR_CAPTURE_START, args, 2);
+    }
+    if (count > MAX_APPS) count = MAX_APPS;
+
+    for (i = 0; i < count; i++) if (plan->all || apps[i].active) shown++;
+
+    if (cx->json) {
+        size_t emitted = 0;
+        jline(cx, 0, L"{");
+        jline(cx, 1, L"\"apps\": [");
+        for (i = 0; i < count; i++) {
+            if (!plan->all && !apps[i].active) continue;
+            emitted++;
+            jline(cx, 2, L"{");
+            jnum(cx, 3, L"pid", (int64_t)apps[i].pid, 1);
+            jstr(cx, 3, L"exe", apps[i].exe, 1);
+            jstr(cx, 3, L"name", apps[i].display, 1);
+            jstr(cx, 3, L"path", apps[i].path, 1);
+            jbool(cx, 3, L"active", apps[i].active, 1);
+            jbool(cx, 3, L"muted", apps[i].muted, 1);
+            jreal(cx, 3, L"volume", (double)apps[i].volume, 0);
+            /* The comma has to count what was EMITTED, not what was scanned:
+             * filtering out the last row of the scan would otherwise leave a
+             * trailing comma and a document no parser accepts. */
+            jline(cx, 2, L"}%ls", (emitted < shown) ? L"," : L"");
+        }
+        jline(cx, 1, L"]");
+        jline(cx, 0, L"}");
+        return APR_CLI_OK;
+    }
+
+    if (shown == 0) {
+        SAY0(cx, APR_CLI_STDOUT, APR_S_LIST_APPS_EMPTY);
+        return APR_CLI_OK;
+    }
+
+    SAY0(cx, APR_CLI_STDOUT, APR_S_LIST_APPS_HEADER);
+    for (i = 0; i < count; i++) {
+        NumBuf nb;
+        const wchar_t *args[2];
+        AprStrId id;
+
+        if (!plan->all && !apps[i].active) continue;
+        args[0] = num(&nb, (int64_t)apps[i].pid);
+        args[1] = apps[i].display[0] ? apps[i].display : apps[i].exe;
+        id = apps[i].muted   ? APR_S_LIST_APPS_ROW_MUTED
+           : !apps[i].active ? APR_S_LIST_APPS_ROW_IDLE
+                             : APR_S_LIST_APPS_ROW;
+        say(cx, APR_CLI_STDOUT, id, args, 2);
+    }
+    return APR_CLI_OK;
+}
+
+static AprCliExit do_list_devices(const Ctx *cx)
+{
+    static AprAudioEndpoint eps[MAX_ENDPOINTS];
+    size_t count = 0, i;
+    AprErr e;
+
+    e = apr_enum_capture_endpoints(eps, MAX_ENDPOINTS, &count);
+    if (apr_failed(&e)) {
+        wchar_t why[512];
+        const wchar_t *args[2];
+        args[0] = apr_str(APR_S_APP_NAME);
+        args[1] = errtext(&e, why, 512);
+        return fail(cx, APR_CLI_INTERNAL, APR_S_ERR_CAPTURE_START, args, 2);
+    }
+    if (count > MAX_ENDPOINTS) count = MAX_ENDPOINTS;
+
+    if (cx->json) {
+        jline(cx, 0, L"{");
+        jline(cx, 1, L"\"devices\": [");
+        for (i = 0; i < count; i++) {
+            jline(cx, 2, L"{");
+            jstr(cx, 3, L"id", eps[i].id, 1);
+            jstr(cx, 3, L"name", eps[i].name, 1);
+            jbool(cx, 3, L"default", eps[i].is_default, 0);
+            jline(cx, 2, L"}%ls", (i + 1 < count) ? L"," : L"");
+        }
+        jline(cx, 1, L"]");
+        jline(cx, 0, L"}");
+        return APR_CLI_OK;
+    }
+
+    if (count == 0) {
+        SAY0(cx, APR_CLI_STDOUT, APR_S_LIST_DEVICES_EMPTY);
+        return APR_CLI_OK;
+    }
+    SAY0(cx, APR_CLI_STDOUT, APR_S_LIST_DEVICES_HEADER);
+    for (i = 0; i < count; i++) {
+        const wchar_t *args[1];
+        args[0] = eps[i].name[0] ? eps[i].name : eps[i].id;
+        say(cx, APR_CLI_STDOUT,
+            eps[i].is_default ? APR_S_LIST_DEVICES_ROW_DEFAULT
+                              : APR_S_LIST_DEVICES_ROW, args, 1);
+        args[0] = eps[i].id;
+        say_indented(cx, APR_CLI_STDOUT, 2, APR_S_LIST_DEVICES_ID_LINE, args, 1);
+    }
+    return APR_CLI_OK;
+}
+
+/* ---------------------------------------------------------------------------
+ * --dry-run
+ * ------------------------------------------------------------------------- */
+
+static AprStrId kind_string(AprCliSourceKind k)
+{
+    switch (k) {
+    case APR_CLI_SRC_DEVICE:              return APR_S_SOURCE_KIND_DEVICE;
+    case APR_CLI_SRC_FAKE:                return APR_S_SOURCE_KIND_FAKE;
+    case APR_CLI_SRC_SYSTEM_MINUS_TREE:   return APR_S_SOURCE_KIND_SYSTEM_MINUS_TREE;
+    default:                              return APR_S_SOURCE_KIND_PROCESS;
+    }
+}
+
+static const char *kind_wire(AprCliSourceKind k)
+{
+    switch (k) {
+    case APR_CLI_SRC_DEVICE:            return "device";
+    case APR_CLI_SRC_FAKE:              return "fake";
+    case APR_CLI_SRC_SYSTEM_MINUS_TREE: return "systemMinusTree";
+    default:                            return "process";
+    }
+}
+
+static void wide_of(const char *s, wchar_t *out, size_t cch)
+{
+    size_t i;
+    for (i = 0; i + 1 < cch && s[i]; i++) out[i] = (wchar_t)s[i];
+    out[i] = L'\0';
+}
+
+static AprCliExit do_dry_run(const Ctx *cx, const AprCliPlan *p)
+{
+    size_t bi, si, oi;
+
+    if (cx->json) {
+        jline(cx, 0, L"{");
+        jbool(cx, 1, L"ok", 1, 1);
+        jbool(cx, 1, L"dryRun", 1, 1);
+        jnum(cx, 1, L"exitCode", 0, 1);
+        jnum(cx, 1, L"sampleRate", (int64_t)p->rate, 1);
+        jnum(cx, 1, L"channels", (int64_t)p->channels, 1);
+        jnum(cx, 1, L"durationMs", p->duration_ms, 1);
+        jline(cx, 1, L"\"buses\": [");
+        for (bi = 0; bi < p->bus_count; bi++) {
+            const AprCliBus *b = &p->buses[bi];
+            jline(cx, 2, L"{");
+            jstr(cx, 3, L"name", b->name, 1);
+            jline(cx, 3, L"\"sources\": [");
+            for (si = 0; si < b->source_count; si++) {
+                const AprCliSource *s = &b->sources[si];
+                wchar_t kw[32];
+                wide_of(kind_wire(s->kind), kw, 32);
+                jline(cx, 4, L"{");
+                jstr(cx, 5, L"kind", kw, 1);
+                jstr(cx, 5, L"spec", s->spec, 1);
+                jstr(cx, 5, L"label", s->label, 1);
+                jnum(cx, 5, L"pid", (int64_t)s->pid, 1);
+                jstr(cx, 5, L"endpointId", s->endpoint_id, 1);
+                jbool(cx, 5, L"muted", s->muted_now, 1);
+                jreal(cx, 5, L"gainDb", (double)s->gain_db_tenths / 10.0, 0);
+                jline(cx, 4, L"}%ls", (si + 1 < b->source_count) ? L"," : L"");
+            }
+            jline(cx, 3, L"],");
+            jline(cx, 3, L"\"outputs\": [");
+            for (oi = 0; oi < b->output_count; oi++) {
+                const AprCliOutput *o = &b->outputs[oi];
+                wchar_t fw[16];
+                wide_of(o->action_id, fw, 16);
+                jline(cx, 4, L"{");
+                jstr(cx, 5, L"path", o->path, 1);
+                jstr(cx, 5, L"format", fw, 1);
+                jnum(cx, 5, L"bitrateKbps", o->bitrate_kbps, 1);
+                jnum(cx, 5, L"quality", o->quality, 0);
+                jline(cx, 4, L"}%ls", (oi + 1 < b->output_count) ? L"," : L"");
+            }
+            jline(cx, 3, L"]");
+            jline(cx, 2, L"}%ls", (bi + 1 < p->bus_count) ? L"," : L"");
+        }
+        jline(cx, 1, L"]");
+        jline(cx, 0, L"}");
+        return APR_CLI_OK;
+    }
+
+    SAY0(cx, APR_CLI_STDOUT, APR_S_STATUS_DRY_RUN_HEADER);
+    {
+        NumBuf a, b;
+        const wchar_t *args[2];
+        args[0] = num(&a, (int64_t)p->rate);
+        args[1] = num(&b, (int64_t)p->channels);
+        say(cx, APR_CLI_STDOUT, APR_S_STATUS_PLAN_SESSION, args, 2);
+    }
+    for (bi = 0; bi < p->bus_count; bi++) {
+        const AprCliBus *b = &p->buses[bi];
+        const wchar_t *args[3];
+
+        args[0] = b->name;
+        say(cx, APR_CLI_STDOUT, APR_S_STATUS_PLAN_BUS, args, 1);
+
+        for (si = 0; si < b->source_count; si++) {
+            const AprCliSource *s = &b->sources[si];
+            NumBuf g;
+            args[0] = s->label;
+            args[1] = apr_str(kind_string(s->kind));
+            args[2] = fixed(&g, s->gain_db_tenths, 1);
+            say_indented(cx, APR_CLI_STDOUT, 1, APR_S_STATUS_PLAN_SOURCE, args, 3);
+        }
+        for (oi = 0; oi < b->output_count; oi++) {
+            const AprCliOutput *o = &b->outputs[oi];
+            wchar_t fw[16];
+            wide_of(o->action_id, fw, 16);
+            args[0] = o->path;
+            args[1] = fw;
+            say_indented(cx, APR_CLI_STDOUT, 1, APR_S_STATUS_PLAN_OUTPUT, args, 2);
+        }
+    }
+    SAY0(cx, APR_CLI_STDOUT, APR_S_STATUS_DRY_RUN_OK);
+    return APR_CLI_OK;
+}
+
+/* ---------------------------------------------------------------------------
+ * Recording
+ * ------------------------------------------------------------------------- */
+
+typedef struct RunState {
+    AprGraph *g;
+    AprBusId  bus_ids[APR_MAX_BUSES];
+    int       reported_dead[APR_MAX_SOURCES];
+    int       reported_muted[APR_MAX_SOURCES];
+    int       incomplete;
+    uint64_t  frames_out[APR_MAX_BUSES];
+} RunState;
+
+static AprCliExit build_graph(const Ctx *cx, const AprCliPlan *p, RunState *st)
+{
+    size_t bi, si, oi;
+    AprErr e;
+
+    e = apr_graph_create(p->rate, p->channels, &st->g);
+    if (apr_failed(&e)) {
+        wchar_t why[512];
+        const wchar_t *args[2];
+        args[0] = apr_str(APR_S_APP_NAME);
+        args[1] = errtext(&e, why, 512);
+        return fail(cx, APR_CLI_INTERNAL, APR_S_ERR_CAPTURE_START, args, 2);
+    }
+
+    for (bi = 0; bi < p->bus_count; bi++) {
+        const AprCliBus *b = &p->buses[bi];
+
+        e = apr_graph_add_bus(st->g, b->name, &st->bus_ids[bi]);
+        if (apr_failed(&e)) {
+            wchar_t why[512];
+            const wchar_t *args[2];
+            args[0] = b->name;
+            args[1] = errtext(&e, why, 512);
+            return fail(cx, APR_CLI_CONFIG, APR_S_ERR_CAPTURE_START, args, 2);
+        }
+
+        for (si = 0; si < b->source_count; si++) {
+            const AprCliSource *s = &b->sources[si];
+            AprCaptureConfig    cfg;
+            AprSourceId         sid = 0;
+
+            memset(&cfg, 0, sizeof cfg);
+            switch (s->kind) {
+            case APR_CLI_SRC_DEVICE:
+                cfg.kind = APR_SRC_DEVICE;
+                cfg.device.endpoint_id = s->endpoint_id;
+                break;
+            case APR_CLI_SRC_FAKE:
+                cfg.kind = APR_SRC_FAKE;
+                cfg.fake.tone_hz        = s->fake_hz;
+                cfg.fake.rate_error_ppm = s->fake_ppm;
+                cfg.fake.amplitude      = s->fake_amp;
+                break;
+            case APR_CLI_SRC_SYSTEM_MINUS_TREE:
+                cfg.kind = APR_SRC_PROCESS;
+                cfg.process.pid     = s->pid;
+                cfg.process.exclude = 1;
+                break;
+            default:
+                cfg.kind = APR_SRC_PROCESS;
+                cfg.process.pid     = s->pid;
+                cfg.process.exclude = 0;
+                break;
+            }
+
+            e = apr_graph_add_source(st->g, s->label, &cfg, &sid);
+            if (apr_failed(&e)) {
+                wchar_t why[512];
+                const wchar_t *args[2];
+                args[0] = s->label;
+                args[1] = errtext(&e, why, 512);
+                return fail(cx, APR_CLI_CAPTURE, APR_S_ERR_CAPTURE_START, args, 2);
+            }
+            e = apr_graph_connect(st->g, sid, st->bus_ids[bi], s->gain);
+            if (apr_failed(&e)) {
+                const wchar_t *args[2];
+                args[0] = s->label;
+                args[1] = b->name;
+                return fail(cx, APR_CLI_CONFIG, APR_S_ERR_SOURCE_ALREADY_ON_BUS,
+                            args, 2);
+            }
+        }
+
+        for (oi = 0; oi < b->output_count; oi++) {
+            const AprCliOutput *o = &b->outputs[oi];
+            AprActionConfig     acfg;
+
+            memset(&acfg, 0, sizeof acfg);
+            acfg.out_path     = o->path;
+            acfg.sample_rate  = p->rate;
+            acfg.channels     = p->channels;
+            acfg.bitrate_kbps = o->bitrate_kbps;
+            acfg.quality      = o->quality;
+
+            e = apr_graph_add_action(st->g, st->bus_ids[bi], o->action_id, &acfg);
+            if (apr_failed(&e)) {
+                wchar_t why[512];
+                const wchar_t *args[2];
+                args[0] = o->path;
+                args[1] = errtext(&e, why, 512);
+                return fail(cx, APR_CLI_OUTPUT, APR_S_ERR_FILE_OPEN, args, 2);
+            }
+        }
+    }
+    return APR_CLI_OK;
+}
+
+static void poll_sources(const Ctx *cx, RunState *st)
+{
+    size_t i, n = apr_graph_source_count(st->g);
+
+    for (i = 0; i < n && i < APR_MAX_SOURCES; i++) {
+        AprSource *s = apr_graph_source_at(st->g, i);
+        const wchar_t *args[1];
+
+        if (!s) continue;
+        apr_source_poll(s, NULL);
+        args[0] = apr_source_name(s);
+
+        /* Loopback keeps emitting perfect silence forever after the target
+         * exits and WASAPI never says so (design 4.1 #6). Without this line a
+         * dead application produces a file that looks like a success. */
+        if (!apr_source_alive(s) && !st->reported_dead[i]) {
+            st->reported_dead[i] = 1;
+            st->incomplete = 1;
+            warn(cx, APR_S_WARN_SOURCE_EXITED, args, 1);
+        }
+        if (apr_source_muted(s) && !st->reported_muted[i]) {
+            st->reported_muted[i] = 1;
+            warn(cx, APR_S_WARN_SOURCE_MUTED, args, 1);
+        }
+    }
+}
+
+static void report_action_failures(const Ctx *cx, RunState *st)
+{
+    size_t bi, k;
+
+    for (bi = 0; bi < apr_graph_bus_count(st->g); bi++) {
+        AprBus *b = apr_graph_bus_at(st->g, bi);
+        if (!b) continue;
+        for (k = 0; k < apr_bus_action_count(b); k++) {
+            if (apr_bus_action_failed(b, k)) {
+                const AprActionVTable *vt = apr_bus_action_at(b, k);
+                AprErr  e   = apr_bus_action_error(b, k);
+                wchar_t why[512];
+                const wchar_t *args[2];
+                st->incomplete = 1;
+                args[0] = (vt && vt->display_name) ? vt->display_name
+                                                   : apr_bus_name(b);
+                args[1] = errtext(&e, why, 512);
+                warn(cx, APR_S_WARN_ACTION_FAILED, args, 2);
+            }
+        }
+    }
+}
+
+/* The loop. Everything about the timeline comes from QPC (clock.h): the bus
+ * renders exactly what the elapsed time says is due, so a late tick produces a
+ * longer block and nothing accumulates. */
+static AprCliExit record_loop(const Ctx *cx, const AprCliPlan *p, RunState *st)
+{
+    uint64_t freq  = apr_qpc_freq();
+    uint64_t start;
+    AprErr   e;
+
+    e = apr_graph_start(st->g, apr_qpc_now());
+    if (apr_failed(&e)) {
+        wchar_t why[512];
+        const wchar_t *args[2];
+        args[0] = apr_str(APR_S_APP_NAME);
+        args[1] = errtext(&e, why, 512);
+        /* One source failing to arm does not stop a session (design 10), but
+         * it has to be said out loud. */
+        warn(cx, APR_S_ERR_CAPTURE_START, args, 2);
+        st->incomplete = 1;
+    }
+    start = apr_qpc_now();
+
+    {
+        size_t bi;
+        for (bi = 0; bi < p->bus_count; bi++) {
+            size_t oi;
+            for (oi = 0; oi < p->buses[bi].output_count; oi++) {
+                const wchar_t *args[1];
+                args[0] = p->buses[bi].outputs[oi].path;
+                note(cx, APR_S_STATUS_RECORDING_TO, args, 1);
+            }
+        }
+        if (!p->duration_ms && !cx->quiet && !cx->json)
+            SAY0(cx, APR_CLI_STDOUT, APR_S_CLI_STOP_HINT);
+    }
+
+    for (;;) {
+        uint64_t now;
+        int64_t  elapsed_ms;
+
+        if (g_stop_event) WaitForSingleObject(g_stop_event, 10);
+        else              Sleep(10);
+
+        now = apr_qpc_now();
+        (void)apr_graph_tick(st->g, now);
+        poll_sources(cx, st);
+
+        elapsed_ms = (int64_t)apr_mul_div_u64(now - start, 1000u, freq, NULL);
+        if (p->duration_ms && elapsed_ms >= p->duration_ms) break;
+        if (stop_requested()) break;
+    }
+
+    /* The mixer deliberately runs APR_BUS_LOOKBEHIND_MS behind wall clock
+     * (bus.h), so stopping at this instant would throw away the last block.
+     * Wait for it to become due, render it, and only then finalize. */
+    Sleep(APR_BUS_LOOKBEHIND_MS + 10);
+    (void)apr_graph_tick(st->g, apr_qpc_now());
+
+    {
+        size_t bi;
+        for (bi = 0; bi < p->bus_count && bi < APR_MAX_BUSES; bi++) {
+            AprBus *b = apr_graph_bus(st->g, st->bus_ids[bi]);
+            st->frames_out[bi] = b ? apr_bus_frames_out(b) : 0;
+        }
+    }
+
+    {
+        size_t bi, oi;
+        for (bi = 0; bi < p->bus_count; bi++) {
+            for (oi = 0; oi < p->buses[bi].output_count; oi++) {
+                const wchar_t *args[1];
+                args[0] = p->buses[bi].outputs[oi].path;
+                note(cx, APR_S_STATUS_FINISHING, args, 1);
+            }
+        }
+    }
+
+    e = apr_graph_stop(st->g);
+    report_action_failures(cx, st);
+    if (apr_failed(&e)) st->incomplete = 1;
+
+    return APR_CLI_OK;
+}
+
+static void report_result(const Ctx *cx, const AprCliPlan *p, RunState *st,
+                          AprCliExit code)
+{
+    size_t bi, oi;
+
+    if (cx->json) {
+        jline(cx, 0, L"{");
+        jbool(cx, 1, L"ok", code == APR_CLI_OK, 1);
+        jnum(cx, 1, L"exitCode", (int64_t)code, 1);
+        jbool(cx, 1, L"dryRun", 0, 1);
+        jline(cx, 1, L"\"outputs\": [");
+        for (bi = 0; bi < p->bus_count; bi++) {
+            for (oi = 0; oi < p->buses[bi].output_count; oi++) {
+                wchar_t fw[16];
+                int last = (bi + 1 == p->bus_count) &&
+                           (oi + 1 == p->buses[bi].output_count);
+                wide_of(p->buses[bi].outputs[oi].action_id, fw, 16);
+                jline(cx, 2, L"{");
+                jstr(cx, 3, L"path", p->buses[bi].outputs[oi].path, 1);
+                jstr(cx, 3, L"format", fw, 1);
+                jstr(cx, 3, L"bus", p->buses[bi].name, 1);
+                jreal(cx, 3, L"seconds",
+                      p->rate ? (double)st->frames_out[bi] / (double)p->rate : 0.0, 0);
+                jline(cx, 2, L"}%ls", last ? L"" : L",");
+            }
+        }
+        jline(cx, 1, L"]");
+        jline(cx, 0, L"}");
+        return;
+    }
+
+    for (bi = 0; bi < p->bus_count; bi++) {
+        for (oi = 0; oi < p->buses[bi].output_count; oi++) {
+            NumBuf sb;
+            const wchar_t *args[2];
+            int64_t ms = p->rate
+                ? (int64_t)apr_mul_div_u64(st->frames_out[bi], 1000u, p->rate, NULL)
+                : 0;
+            args[0] = p->buses[bi].outputs[oi].path;
+            args[1] = fixed(&sb, ms, 3);
+            note(cx, APR_S_STATUS_WROTE, args, 2);
+        }
+    }
+    if (!cx->quiet) SAY0(cx, APR_CLI_STDOUT, APR_S_STATUS_STOPPED);
+}
+
+static AprCliExit do_record(const Ctx *cx, const AprCliPlan *p)
+{
+    static RunState st;      /* static: APR_MAX_SOURCES of bookkeeping */
+    AprCliExit rc;
+
+    memset(&st, 0, sizeof st);
+    stop_signal_open();
+
+    /* ONE place a graph is destroyed, and it is a __finally. apr_graph_destroy
+     * stops every bus, which finalizes every action, before it frees anything
+     * -- so the "a killed recording must not leave an unplayable file" rule is
+     * a property of the control flow rather than of remembering to call
+     * something. main() supplies the __except that makes an access violation
+     * unwind through here rather than skip it. */
+    __try {
+        rc = build_graph(cx, p, &st);
+        if (rc == APR_CLI_OK) rc = record_loop(cx, p, &st);
+        if (rc == APR_CLI_OK && st.incomplete) rc = APR_CLI_INCOMPLETE;
+        if (rc == APR_CLI_OK || rc == APR_CLI_INCOMPLETE)
+            report_result(cx, p, &st, rc);
+    }
+    __finally {
+        apr_graph_destroy(st.g);
+        st.g = NULL;
+        stop_signal_close();
+    }
+
+    return rc;
+}
+
+/* ---------------------------------------------------------------------------
+ * Driver
+ * ------------------------------------------------------------------------- */
+
+static LANGID langid_of(const wchar_t *tag)
+{
+    LCID lcid;
+
+    if (!tag || !tag[0]) return MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US);
+    lcid = LocaleNameToLCID(tag, LOCALE_ALLOW_NEUTRAL_NAMES);
+    if (lcid == 0) return 0;
+    return LANGIDFROMLCID(lcid);
+}
+
+AprCliExit apr_cli_run(int argc, const wchar_t *const *argv, const AprCliIo *io)
+{
+    static AprCliPlan plan;   /* static: several KB of buses */
+    Ctx        cx;
+    AprCliExit rc;
+    int        log_owned = 0;
+
+    /* English unless asked otherwise. Design 6.2: the CLI is an automation
+     * surface, so it does not follow the thread UI language the way the app
+     * does -- a script's output must not change because the machine's
+     * language did. */
+    apr_str_set_language(MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US));
+
+    cx.io = io; cx.json = 0; cx.quiet = 0;
+
+    if (argc <= 1) {
+        print_usage(&cx);
+        return APR_CLI_USAGE;
+    }
+
+    rc = apr_cli_parse(argc, argv, &plan, io);
+    cx.json  = plan.json;
+    cx.quiet = plan.quiet;
+    if (rc != APR_CLI_OK) return rc;
+
+    if (plan.lang[0]) {
+        LANGID id = langid_of(plan.lang);
+        /* An unreadable tag is not fatal: the program stays usable in the
+         * primary language, which is what strings.h promises. */
+        if (id) apr_str_set_language(id);
+    }
+
+    apr_log_set_level(plan.log_level);
+    if (plan.log_file[0]) {
+        AprLogConfig lc;
+        memset(&lc, 0, sizeof lc);
+        lc.level            = plan.log_level;
+        lc.path             = plan.log_file;
+        lc.background_drain = 1;
+        (void)apr_log_init(&lc);
+        log_owned = 1;
+    }
+
+    switch (plan.cmd) {
+    case APR_CLI_CMD_HELP:
+        print_usage(&cx);
+        rc = APR_CLI_OK;
+        break;
+    case APR_CLI_CMD_VERSION:
+        rc = do_version(&cx);
+        break;
+    case APR_CLI_CMD_LIST_APPS:
+        rc = do_list_apps(&cx, &plan);
+        break;
+    case APR_CLI_CMD_LIST_DEVICES:
+        rc = do_list_devices(&cx);
+        break;
+    case APR_CLI_CMD_RECORD:
+    default:
+        rc = apr_cli_resolve(&plan, io);
+        if (rc == APR_CLI_OK) {
+            rc = plan.dry_run ? do_dry_run(&cx, &plan) : do_record(&cx, &plan);
+        }
+        break;
+    }
+
+    if (log_owned) apr_log_shutdown();
+    return rc;
+}
+
+/* ---------------------------------------------------------------------------
+ * The console
+ *
+ * Wide text goes to a console with WriteConsoleW and to a pipe or a file as
+ * UTF-8. Doing it by hand rather than through the CRT's _O_U8TEXT modes keeps
+ * both paths correct at once: a redirected run produces UTF-8 a script can
+ * read, and an interactive run produces text the console renders directly with
+ * no code page in the way.
+ * ------------------------------------------------------------------------- */
+
+static void console_line(int stream, const wchar_t *text)
+{
+    HANDLE h = GetStdHandle(stream == APR_CLI_STDERR ? STD_ERROR_HANDLE
+                                                     : STD_OUTPUT_HANDLE);
+    DWORD  mode = 0, written = 0;
+    size_t len  = text ? wcslen(text) : 0;
+
+    if (h == NULL || h == INVALID_HANDLE_VALUE) return;
+
+    if (GetConsoleMode(h, &mode)) {
+        if (len) WriteConsoleW(h, text, (DWORD)len, &written, NULL);
+        WriteConsoleW(h, L"\r\n", 2, &written, NULL);
+        return;
+    }
+    {
+        char  *utf8;
+        int    need = WideCharToMultiByte(CP_UTF8, 0, text ? text : L"",
+                                          (int)len, NULL, 0, NULL, NULL);
+        utf8 = (char *)malloc((size_t)need + 2);
+        if (!utf8) return;
+        if (need) WideCharToMultiByte(CP_UTF8, 0, text, (int)len, utf8, need,
+                                      NULL, NULL);
+        utf8[need]     = '\r';
+        utf8[need + 1] = '\n';
+        WriteFile(h, utf8, (DWORD)need + 2, &written, NULL);
+        free(utf8);
+    }
+}
+
+static void console_write(void *user, int stream, const wchar_t *line)
+{
+    (void)user;
+    console_line(stream, line);
+}
+
+int apr_cli_main(int argc, wchar_t **argv)
+{
+    AprCliIo   io;
+    AprCliExit rc;
+
+    SetConsoleOutputCP(CP_UTF8);
+    io.write = console_write;
+    io.user  = NULL;
+
+    /* The outer handler exists so that the __finally in do_record actually
+     * runs during unwinding: without a handler somewhere above it, an access
+     * violation would take the process down with the encoders unfinalized. */
+    __try {
+        rc = apr_cli_run(argc, (const wchar_t *const *)argv, &io);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        rc = APR_CLI_INTERNAL;
+    }
+    return (int)rc;
+}

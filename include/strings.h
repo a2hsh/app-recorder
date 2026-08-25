@@ -103,15 +103,38 @@
  * preprocessor-only: rc.exe reads this header too and cannot parse C.
  *
  * Numbering: singular ids from 1001; plural bases from 1200 spaced by 8 (each
- * plural occupies base+0 .. base+5, one per CLDR category). Keep every id
- * inside [APR_STR_ID_MIN, APR_STR_ID_MAX).
+ * plural occupies base+0 .. base+5, one per CLDR category); the UI shell's own
+ * ids sit at 1300+ so that the CLI block, the plural bases and the UI block can
+ * each grow without three agents renumbering each other. Keep every id inside
+ * [APR_STR_ID_MIN, APR_STR_ID_MAX).
  * ------------------------------------------------------------------------- */
 
 #define APR_STR_ID_MIN 1000
-#define APR_STR_ID_MAX 1280
+#define APR_STR_ID_MAX 1400
 
 /* X(NAME, id) -- a plain string. Referenced in C as APR_S_NAME. */
-#define APR_STR_LIST(X)                                                        \
+
+/* WHY THE LIST IS CUT INTO GROUPS, AND WHY THAT IS NOT COSMETIC
+ *
+ *   res/strings.rc expands one of these lists inside a single STRINGTABLE, and
+ *   rc.exe gives up -- "fatal error RC10056:", with nothing after the colon --
+ *   once the text a single macro invocation expands to gets large. Measured on
+ *   the 10.0.22621 rc.exe: about 60 entries of ordinary help-text length go
+ *   through and about 80 do not. So the catalog is declared in named groups,
+ *   each emitted into its own STRINGTABLE block, and APR_STR_LIST is their
+ *   sum.
+ *
+ *   ADDING A STRING: put it in the group it belongs to, and give the .rc its
+ *   text in the matching block of every LANGUAGE section. Starting a NEW group
+ *   -- which is what a large new area of the product should do rather than
+ *   growing an existing group past the limit -- means adding it here, to
+ *   APR_STR_LIST at the end of this section, and to the English section of
+ *   res/strings.rc. Nothing else in the product knows the groups exist: C code,
+ *   the generated enum and tests/test_strings.c all walk APR_STR_LIST.
+ * ------------------------------------------------------------------------- */
+
+/* ---- the product itself, and what both front ends share. ---- */
+#define APR_STR_LIST_CORE(X)                                                   \
     X(APP_NAME,                  1001)                                         \
     X(APP_TAGLINE,               1002)                                         \
     X(CLI_USAGE_HEADER,          1010)                                         \
@@ -134,6 +157,153 @@
     X(NODE_KIND_ACTION,          1052)                                         \
     X(UIA_SOURCE_FEEDS,          1053)                                         \
     X(UIA_BUS_FEEDS,             1054)
+
+/* ---- the command line: usage text, one entry per printed line. ---- */
+#define APR_STR_LIST_CLI(X)                                                    \
+    X(CLI_COMMANDS_HEADER,         1060)                                      \
+    X(CLI_CMD_RECORD,              1061)                                      \
+    X(CLI_CMD_LIST_APPS,           1062)                                      \
+    X(CLI_CMD_LIST_DEVICES,        1063)                                      \
+    X(CLI_CMD_HELP,                1064)                                      \
+    X(CLI_CMD_VERSION,             1065)                                      \
+    X(CLI_SOURCES_HEADER,          1066)                                      \
+    X(CLI_OPT_BUS,                 1067)                                      \
+    X(CLI_OPT_EXE,                 1068)                                      \
+    X(CLI_OPT_FAKE,                1069)                                      \
+    X(CLI_OPT_GAIN,                1070)                                      \
+    X(CLI_OPT_SYSTEM_MINUS_TREE,   1071)                                      \
+    X(CLI_OUTPUTS_HEADER,          1072)                                      \
+    X(CLI_OPT_BITRATE,             1073)                                      \
+    X(CLI_OPT_QUALITY,             1074)                                      \
+    X(CLI_SESSION_HEADER,          1075)                                      \
+    X(CLI_OPT_RATE,                1076)                                      \
+    X(CLI_OPT_CHANNELS,            1077)                                      \
+    X(CLI_OPT_DURATION,            1078)                                      \
+    X(CLI_OPT_DRY_RUN,             1079)                                      \
+    X(CLI_OPT_JSON,                1080)                                      \
+    X(CLI_OPT_QUIET,               1081)                                      \
+    X(CLI_OPT_ALL,                 1082)                                      \
+    X(CLI_OPT_LOG_LEVEL,           1083)                                      \
+    X(CLI_OPT_LOG_FILE,            1084)                                      \
+    X(CLI_EXIT_HEADER,             1085)                                      \
+    X(CLI_EXIT_OK,                 1086)                                      \
+    X(CLI_EXIT_USAGE,              1087)                                      \
+    X(CLI_EXIT_CONFIG,             1088)                                      \
+    X(CLI_EXIT_NOT_FOUND,          1089)                                      \
+    X(CLI_EXIT_OUTPUT,             1090)                                      \
+    X(CLI_EXIT_CAPTURE,            1091)                                      \
+    X(CLI_EXIT_INCOMPLETE,         1092)                                      \
+    X(CLI_EXIT_INTERNAL,           1093)                                      \
+    X(CLI_EXAMPLES_HEADER,         1094)                                      \
+    X(CLI_EXAMPLE_ONE,             1095)                                      \
+    X(CLI_EXAMPLE_TWO,             1096)                                      \
+    X(CLI_STOP_HINT,               1097)                                      \
+    X(CLI_VERSION_LINE,            1098)
+
+/* ---- the command line: what it says when it refuses. ---- */
+#define APR_STR_LIST_CLI_ERR(X)                                                \
+    X(ERR_UNKNOWN_COMMAND,         1100)                                      \
+    X(ERR_UNKNOWN_OPTION,          1101)                                      \
+    X(ERR_OPTION_NEEDS_VALUE,      1102)                                      \
+    X(ERR_BAD_NUMBER,              1103)                                      \
+    X(ERR_OUT_OF_RANGE,            1104)                                      \
+    X(ERR_GAIN_WITHOUT_SOURCE,     1105)                                      \
+    X(ERR_BUS_HAS_NO_SOURCE,       1106)                                      \
+    X(ERR_BUS_HAS_NO_OUTPUT,       1107)                                      \
+    X(ERR_PID_NOT_RUNNING,         1108)                                      \
+    X(ERR_EXE_NOT_PLAYING,         1109)                                      \
+    X(ERR_EXE_AMBIGUOUS,           1110)                                      \
+    X(ERR_DEVICE_NOT_FOUND,        1111)                                      \
+    X(ERR_DEVICE_AMBIGUOUS,        1112)                                      \
+    X(ERR_NO_EXTENSION,            1113)                                      \
+    X(ERR_OUTPUT_NOT_WRITABLE,     1114)                                      \
+    X(ERR_TOO_MANY_BUSES,          1115)                                      \
+    X(ERR_TOO_MANY_SOURCES,        1116)                                      \
+    X(ERR_TOO_MANY_OUTPUTS,        1117)                                      \
+    X(ERR_CAPTURE_START,           1118)                                      \
+    X(ERR_DUPLICATE_OUTPUT,        1119)                                      \
+    X(ERR_OPTION_NOT_FOR_COMMAND,  1120)
+
+/* ---- the command line: warnings, progress, and the two listings. ---- */
+#define APR_STR_LIST_CLI_MSG(X)                                                \
+    X(WARN_SYSTEM_CAPTURE_SCOPE,   1130)                                      \
+    X(WARN_SYSTEM_CAPTURE_TREE,    1131)                                      \
+    X(WARN_SYSTEM_CAPTURE_MEMBERS, 1132)                                      \
+    X(WARN_SYSTEM_CAPTURE_LAUNCHER, 1133)                                     \
+    X(WARN_STILL_FINISHING,        1134)                                      \
+    X(WARN_ACTION_FAILED,          1135)                                      \
+    X(STATUS_DRY_RUN_HEADER,       1140)                                      \
+    X(STATUS_DRY_RUN_OK,           1141)                                      \
+    X(STATUS_PLAN_SESSION,         1142)                                      \
+    X(STATUS_PLAN_BUS,             1143)                                      \
+    X(STATUS_PLAN_SOURCE,          1144)                                      \
+    X(STATUS_PLAN_OUTPUT,          1145)                                      \
+    X(STATUS_WROTE,                1146)                                      \
+    X(STATUS_ELAPSED,              1147)                                      \
+    X(LIST_APPS_HEADER,            1150)                                      \
+    X(LIST_APPS_EMPTY,             1151)                                      \
+    X(LIST_APPS_ROW,               1152)                                      \
+    X(LIST_APPS_ROW_MUTED,         1153)                                      \
+    X(LIST_APPS_ROW_IDLE,          1154)                                      \
+    X(LIST_DEVICES_HEADER,         1155)                                      \
+    X(LIST_DEVICES_EMPTY,          1156)                                      \
+    X(LIST_DEVICES_ROW,            1157)                                      \
+    X(LIST_DEVICES_ROW_DEFAULT,    1158)                                      \
+    X(LIST_DEVICES_ID_LINE,        1159)                                      \
+    X(SOURCE_KIND_PROCESS,         1160)                                      \
+    X(SOURCE_KIND_SYSTEM_MINUS_TREE, 1161)                                    \
+    X(SOURCE_KIND_DEVICE,          1162)                                      \
+    X(SOURCE_KIND_FAKE,            1163)                                      \
+    X(CLI_DEFAULT_BUS_NAME,        1164)
+
+/* ---- the window: menu commands, pane names, and what a screen reader
+ * reads. Menu text carries its accelerator after a tab so a translator keeps
+ * label and shortcut together, and the ampersand marks the mnemonic -- the
+ * ampersand is the keyboard path to the item, not decoration. ---- */
+#define APR_STR_LIST_UI(X)                                                    \
+    X(UI_TITLE_UNTITLED,           1300)                                      \
+    X(UI_TITLE_SESSION,            1301)                                      \
+    X(UI_PANE_CANVAS,              1302)                                      \
+    X(UI_PANE_TREE,                1303)                                      \
+    X(UI_PANE_STATUS,              1304)                                      \
+    X(UI_DESC_CANVAS,              1305)                                      \
+    X(UI_DESC_TREE,                1306)                                      \
+    X(UI_STATUS_READY,             1307)                                      \
+    X(UI_PANE_SPLITTER,            1308)                                      \
+    X(UI_DESC_SPLITTER,            1309)                                      \
+    X(UI_MENU_FILE,                1310)                                      \
+    X(UI_MENU_FILE_NEW,            1311)                                      \
+    X(UI_MENU_FILE_OPEN,           1312)                                      \
+    X(UI_MENU_FILE_SAVE,           1313)                                      \
+    X(UI_MENU_FILE_SAVE_AS,        1314)                                      \
+    X(UI_MENU_FILE_EXIT,           1315)                                      \
+    X(UI_MENU_EDIT,                1320)                                      \
+    X(UI_MENU_ADD_SOURCE,          1321)                                      \
+    X(UI_MENU_ADD_BUS,             1322)                                      \
+    X(UI_MENU_ADD_ACTION,          1323)                                      \
+    X(UI_MENU_CONNECT,             1324)                                      \
+    X(UI_MENU_REMOVE,              1325)                                      \
+    X(UI_MENU_RECORDING,           1330)                                      \
+    X(UI_MENU_RECORD_START,        1331)                                      \
+    X(UI_MENU_RECORD_STOP,         1332)                                      \
+    X(UI_MENU_VIEW,                1340)                                      \
+    X(UI_MENU_VIEW_TREE,           1341)                                      \
+    X(UI_MENU_VIEW_DARK,           1342)                                      \
+    X(UI_MENU_VIEW_NEXT_PANE,      1343)                                      \
+    X(UI_MENU_HELP,                1350)                                      \
+    X(UI_MENU_HELP_KEYS,           1351)                                      \
+    X(UI_MENU_HELP_ABOUT,          1352)
+
+/* Every plain string, in declaration order. This is what C, the generated
+ * enum and tests/test_strings.c walk; the groups above exist only so that
+ * res/strings.rc can emit them in rc.exe-sized pieces. */
+#define APR_STR_LIST(X)                                                        \
+    APR_STR_LIST_CORE(X)                                                       \
+    APR_STR_LIST_CLI(X)                                                        \
+    APR_STR_LIST_CLI_ERR(X)                                                    \
+    APR_STR_LIST_CLI_MSG(X)                                                   \
+    APR_STR_LIST_UI(X)
+
 
 /* X(NAME, base) -- a plural string. Referenced in C as APR_S_NAME, which is
  * the BASE id; the six CLDR categories live at base+APR_PLURAL_ZERO through
@@ -314,6 +484,21 @@ size_t apr_str_plural_format(AprStrId base_id, int64_t n,
  * author confirms whether Arabic-Indic digits are wanted, this function is the
  * only thing that changes. */
 size_t apr_str_number(int64_t n, wchar_t *buf, size_t cch);
+
+/* Render `scaled` / 10^`decimals` as display text -- a gain in dB, a duration
+ * in seconds, anything that is not a whole number.
+ *
+ * The caller supplies the value ALREADY MULTIPLIED by 10^decimals as an
+ * integer, so no float ever reaches this layer and the rounding decision stays
+ * where the quantity is understood. `decimals` is 0..6.
+ *
+ * Lives beside apr_str_number for the same reason apr_str_number exists: this
+ * is the only other place a number becomes user-visible digits, so the
+ * Western-versus-Arabic-Indic decision and the decimal separator are settled
+ * in one file rather than in every caller's swprintf. Returns 0 and writes an
+ * empty string if the result would not fit -- half a number is a lie. */
+size_t apr_str_number_fixed(int64_t scaled, int decimals,
+                            wchar_t *buf, size_t cch);
 
 /* ---------------------------------------------------------------------------
  * Plural rules, exposed

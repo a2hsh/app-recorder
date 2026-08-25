@@ -126,3 +126,76 @@ if(TARGET apprecorder_core)
   target_sources(apprecorder_core PRIVATE ${I18N_SRC})
   target_sources(apprecorder_core INTERFACE ${CMAKE_SOURCE_DIR}/res/strings.rc)
 endif()
+
+# ---------------------------------------------------------------------------
+# UI layer.
+#
+# A STATIC LIBRARY WITH NO ENTRY POINT, deliberately. WinMain in a library
+# collides with every test's main(), and which front end owns the process is
+# not this layer's decision -- apr_ui_app_run() is the entry a future WinMain
+# calls.
+#
+# res/apprecorder.rc is an INTERFACE source for the same reason res/strings.rc
+# is one on apprecorder_core: a .res defines no symbols, so link.exe may drop
+# it when pulling objects out of a .lib, and the manifest would vanish with no
+# diagnostic. /MANIFEST:NO goes with it because link.exe's own manifest tool
+# REPLACES resource #1 in the finished image -- with both mechanisms active the
+# generated manifest wins and ours is silently discarded, leaving a comctl32 v5,
+# system-DPI-aware process. tests/test_ui_a11y.c asserts at runtime that the
+# manifest actually took effect, so this cannot drift unnoticed.
+#
+# APR_HAVE_UI_CANVAS / APR_HAVE_UI_TREE_PANEL follow the action-registry
+# pattern above: defined from the presence of the source file, so app.c calls
+# the real pane factory once it exists and falls back to a named placeholder
+# until then. A half-written canvas cannot break the link for anyone else.
+# ---------------------------------------------------------------------------
+file(GLOB UI_SRC ${CMAKE_SOURCE_DIR}/src/ui/*.c)
+if(UI_SRC)
+  add_library(apprecorder_ui STATIC ${UI_SRC})
+  target_link_libraries(apprecorder_ui PUBLIC
+    apprecorder_core comctl32 uxtheme dwmapi oleacc gdi32 user32 shell32
+  )
+  # rc.exe dependency scanning follows #include only, so a change to the
+  # manifest itself does not rebuild the .res: the old manifest stays
+  # embedded and the next run fails with "the side-by-side configuration is
+  # incorrect" against a file you have already fixed. State the dependency.
+  set_source_files_properties(${CMAKE_SOURCE_DIR}/res/apprecorder.rc
+    PROPERTIES OBJECT_DEPENDS ${CMAKE_SOURCE_DIR}/res/apprecorder.manifest)
+  target_sources(apprecorder_ui INTERFACE ${CMAKE_SOURCE_DIR}/res/apprecorder.rc)
+  target_link_options(apprecorder_ui INTERFACE /MANIFEST:NO)
+
+  foreach(_pane canvas tree_panel)
+    if(EXISTS ${CMAKE_SOURCE_DIR}/src/ui/${_pane}.c)
+      string(TOUPPER ${_pane} _PANE)
+      target_compile_definitions(apprecorder_ui PRIVATE APR_HAVE_UI_${_PANE})
+    endif()
+  endforeach()
+
+  # The test loop above links every test against apprecorder_core only. The UI
+  # tests additionally need the UI library, and through it the manifest.
+  foreach(_uitest test_ui_theme test_ui_a11y)
+    if(TARGET ${_uitest})
+      target_link_libraries(${_uitest} PRIVATE apprecorder_ui)
+    endif()
+  endforeach()
+endif()
+
+# ---------------------------------------------------------------------------
+# Command-line front end.
+#
+# cli.c goes into apprecorder_core rather than into the executable, so that
+# tests/test_cli.c can drive the parser, the resolver, the dry run and the
+# record loop directly -- there is no process boundary between the suite and
+# the command line, and no output to scrape. src/cli/main.c is the only thing
+# the executable adds, and it is four lines.
+#
+# It is a separate glob for the same reason src/i18n is: the CORE_SRC list
+# above is shared, and appending here rather than editing it keeps this change
+# additive while other agents are in that file.
+# ---------------------------------------------------------------------------
+if(TARGET apprecorder_core)
+  target_sources(apprecorder_core PRIVATE ${CMAKE_SOURCE_DIR}/src/cli/cli.c)
+
+  add_executable(apprecorder ${CMAKE_SOURCE_DIR}/src/cli/main.c)
+  target_link_libraries(apprecorder PRIVATE apprecorder_core)
+endif()
