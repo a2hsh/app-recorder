@@ -78,7 +78,12 @@ typedef enum AprCliCommand {
     APR_CLI_CMD_LIST_APPS,
     APR_CLI_CMD_LIST_DEVICES,
     APR_CLI_CMD_HELP,
-    APR_CLI_CMD_VERSION
+    APR_CLI_CMD_VERSION,
+    /* Describe a recording and write it down instead of making it. Takes the
+     * same positional grammar as `record` and the same --session flag; which
+     * direction the file is read or written is the command's job to say, not
+     * a second flag's. */
+    APR_CLI_CMD_SAVE_SESSION
 } AprCliCommand;
 
 typedef enum AprCliSourceKind {
@@ -146,6 +151,35 @@ typedef struct AprCliPlan {
 
     AprCliBus buses[APR_MAX_BUSES];
     size_t    bus_count;
+
+    /* ---- session files (session.h) ------------------------------------- */
+
+    /* Read by `record`, written by `save-session`. Empty when not given. */
+    wchar_t session_file[APR_CLI_SPEC_CCH];
+
+    /* Consent for an EXCLUDE source that a session file asks for. Design
+     * 4.1.1: recording everything the machine plays must never be enabled by
+     * a file, so this has to be typed. It deliberately does NOT enable
+     * anything on its own -- without a session that asks for it, it does
+     * nothing at all. */
+    int allow_system_capture;
+
+    /* Record without the sources that could not be found, rather than
+     * stopping. The run then finishes APR_CLI_INCOMPLETE, never OK, because
+     * what was recorded is not what was asked for. */
+    int allow_missing;
+
+    /* Set when a session was loaded and something was lost along the way, so
+     * that the exit code says so even though every file is playable. */
+    int session_incomplete;
+
+    /* Whether the session format's own values were overridden on the command
+     * line. A session carries a rate, a channel count and a duration; a flag
+     * that was actually typed wins over the file, and one that was not must
+     * not silently overwrite it with a default. */
+    int explicit_rate;
+    int explicit_channels;
+    int explicit_duration;
 
     AprLogLevel log_level;
     wchar_t     log_file[APR_CLI_SPEC_CCH];

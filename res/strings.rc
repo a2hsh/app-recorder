@@ -422,7 +422,12 @@
 
 #define APR_EN_ERR_SESSION_NOT_FOUND            "There is no session file at %1!s!."
 #define APR_EN_ERR_SESSION_UNREADABLE           "%1!s! could not be read: %2!s!"
-#define APR_EN_ERR_SESSION_NOT_JSON             "%1!s! is not a session file: the text is not JSON."
+/* The backslash sentence is not padding. A hand-edited session file on
+ * Windows fails here far more often than for any other reason: JSON treats a
+ * backslash as an escape, so C:\Users\me is invalid and C:\\Users\\me is what
+ * is meant. Files apprecorder writes are always correct; this message is for
+ * the ones a person edited. */
+#define APR_EN_ERR_SESSION_NOT_JSON             "%1!s! is not a session file: the text is not JSON. If you edited it by hand, check that every backslash in a Windows path is doubled, or use forward slashes instead."
 #define APR_EN_ERR_SESSION_TRUNCATED            "%1!s! stops part way through. It was probably not finished being written."
 #define APR_EN_ERR_SESSION_NOT_A_SESSION        "%1!s! is JSON, but it is not an apprecorder session."
 #define APR_EN_ERR_SESSION_TOO_NEW              "%1!s! was written by a newer version of apprecorder and needs at least version %2!s! of the session format to be read safely. This build reads version %3!s!."

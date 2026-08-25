@@ -55,6 +55,7 @@
 #include "discover.h"
 #include "graph.h"
 #include "log.h"
+#include "session.h"
 #include "strings.h"
 
 #define APR_CLI_VERSION L"0.1.0"
@@ -577,6 +578,10 @@ AprCliExit apr_cli_parse(int argc, const wchar_t *const *argv,
     char  pending_format[16];
     int   pending_bitrate = 0, pending_quality = 0;
     int   i = 1;
+    /* The first option that describes the graph, remembered so that
+     * "--session and --pid together" can name which one it means rather than
+     * making the user work it out. */
+    const wchar_t *graph_opt = NULL;
 
     if (!plan) return APR_CLI_INTERNAL;
     plan_defaults(plan);
@@ -595,6 +600,7 @@ AprCliExit apr_cli_parse(int argc, const wchar_t *const *argv,
         else if (eq(c, L"list-devices")) plan->cmd = APR_CLI_CMD_LIST_DEVICES;
         else if (eq(c, L"help"))         plan->cmd = APR_CLI_CMD_HELP;
         else if (eq(c, L"version"))      plan->cmd = APR_CLI_CMD_VERSION;
+        else if (eq(c, L"save-session")) plan->cmd = APR_CLI_CMD_SAVE_SESSION;
         else {
             const wchar_t *args[1];
             args[0] = c;
@@ -618,7 +624,17 @@ AprCliExit apr_cli_parse(int argc, const wchar_t *const *argv,
                       eq(a, L"--bitrate") || eq(a, L"--quality") ||
                       eq(a, L"--rate") || eq(a, L"--channels") ||
                       eq(a, L"--duration") || eq(a, L"--lang") ||
-                      eq(a, L"--log-level") || eq(a, L"--log-file");
+                      eq(a, L"--log-level") || eq(a, L"--log-file") ||
+                      eq(a, L"--session");
+
+        if (eq(a, L"--bus") || eq(a, L"--pid") || eq(a, L"--exe") ||
+            eq(a, L"--device") || eq(a, L"--fake") ||
+            eq(a, L"--system-minus-tree") || eq(a, L"--gain") ||
+            eq(a, L"--out") || eq(a, L"--format") ||
+            eq(a, L"--bitrate") || eq(a, L"--quality"))
+        {
+            if (!graph_opt) graph_opt = a;
+        }
 
         if (wants_value) {
             if (i + 1 >= argc) {
@@ -638,6 +654,20 @@ AprCliExit apr_cli_parse(int argc, const wchar_t *const *argv,
         }
         if (eq(a, L"--dry-run")) { plan->dry_run = 1; continue; }
         if (eq(a, L"--all"))     { plan->all = 1;     continue; }
+        if (eq(a, L"--session")) {
+            copy_cch(plan->session_file, APR_CLI_SPEC_CCH, v);
+            continue;
+        }
+        /* Consent, and it does nothing on its own. Without a session file
+         * asking for an EXCLUDE source this flag enables no capture of any
+         * kind -- design 4.1.1 is about a FILE not being able to widen the
+         * scope, and a flag that widened it by itself would be the same bug
+         * wearing a different hat. */
+        if (eq(a, L"--allow-system-capture")) {
+            plan->allow_system_capture = 1;
+            continue;
+        }
+        if (eq(a, L"--allow-missing")) { plan->allow_missing = 1; continue; }
         if (eq(a, L"--help") || eq(a, L"-h") || eq(a, L"-?")) {
             plan->cmd = APR_CLI_CMD_HELP;
             continue;
@@ -646,18 +676,21 @@ AprCliExit apr_cli_parse(int argc, const wchar_t *const *argv,
             if (!parse_i64(v, &n)) return number_error(&cx, a, v);
             if (n < 8000 || n > 384000) return range_error(&cx, a, 8000, 384000, 0, v);
             plan->rate = (uint32_t)n;
+            plan->explicit_rate = 1;
             continue;
         }
         if (eq(a, L"--channels")) {
             if (!parse_i64(v, &n)) return number_error(&cx, a, v);
             if (n < 1 || n > 8) return range_error(&cx, a, 1, 8, 0, v);
             plan->channels = (uint16_t)n;
+            plan->explicit_channels = 1;
             continue;
         }
         if (eq(a, L"--duration")) {
             if (!parse_fixed(v, 3, &n)) return number_error(&cx, a, v);
             if (n < 1 || n > 86400000) return range_error(&cx, a, 1, 86400000, 3, v);
             plan->duration_ms = n;
+            plan->explicit_duration = 1;
             continue;
         }
         if (eq(a, L"--lang")) { copy_cch(plan->lang, 32, v); continue; }
@@ -680,8 +713,11 @@ AprCliExit apr_cli_parse(int argc, const wchar_t *const *argv,
             continue;
         }
 
-        /* Everything below describes a recording. */
-        if (plan->cmd != APR_CLI_CMD_RECORD) {
+        /* Everything below describes a recording -- which save-session also
+         * does, because writing one down and making one take exactly the
+         * same grammar. */
+        if (plan->cmd != APR_CLI_CMD_RECORD &&
+            plan->cmd != APR_CLI_CMD_SAVE_SESSION) {
             const wchar_t *args[2];
             args[0] = a;
             args[1] = argv[1];
@@ -803,6 +839,18 @@ AprCliExit apr_cli_parse(int argc, const wchar_t *const *argv,
 
     plan->json  = cx.json;
     plan->quiet = cx.quiet;
+
+    /* A session file describes the WHOLE recording. Merging it with options
+     * typed alongside would leave "which one wins" as something a person has
+     * to remember at 2 a.m., and getting it wrong records the wrong thing. */
+    if (plan->cmd == APR_CLI_CMD_RECORD && plan->session_file[0] && graph_opt) {
+        const wchar_t *args[1];
+        args[0] = graph_opt;
+        return fail(&cx, APR_CLI_USAGE, APR_S_ERR_SESSION_WITH_SOURCES, args, 1);
+    }
+    if (plan->cmd == APR_CLI_CMD_SAVE_SESSION && !plan->session_file[0])
+        return fail(&cx, APR_CLI_USAGE, APR_S_ERR_SESSION_NEEDED, NULL, 0);
+
     return APR_CLI_OK;
 }
 
@@ -1031,7 +1079,8 @@ AprCliExit apr_cli_resolve(AprCliPlan *plan, const AprCliIo *io)
     if (!plan) return APR_CLI_INTERNAL;
     cx.io = io; cx.json = plan->json; cx.quiet = plan->quiet;
 
-    if (plan->cmd != APR_CLI_CMD_RECORD) return APR_CLI_OK;
+    if (plan->cmd != APR_CLI_CMD_RECORD &&
+        plan->cmd != APR_CLI_CMD_SAVE_SESSION) return APR_CLI_OK;
 
     if (plan->bus_count == 0)
         return fail(&cx, APR_CLI_CONFIG, APR_S_ERR_NO_SOURCES, NULL, 0);
@@ -1176,7 +1225,7 @@ static void print_usage(const Ctx *cx)
         (AprStrId)0,
         APR_S_CLI_COMMANDS_HEADER,
         APR_S_CLI_CMD_RECORD, APR_S_CLI_CMD_LIST_APPS, APR_S_CLI_CMD_LIST_DEVICES,
-        APR_S_CLI_CMD_HELP, APR_S_CLI_CMD_VERSION,
+        APR_S_CLI_CMD_SAVE_SESSION, APR_S_CLI_CMD_HELP, APR_S_CLI_CMD_VERSION,
         (AprStrId)0,
         APR_S_CLI_SOURCES_HEADER,
         APR_S_CLI_OPT_BUS, APR_S_CLI_OPT_PID, APR_S_CLI_OPT_EXE,
@@ -1192,6 +1241,8 @@ static void print_usage(const Ctx *cx)
         APR_S_CLI_OPT_DRY_RUN, APR_S_CLI_OPT_JSON, APR_S_CLI_OPT_QUIET,
         APR_S_CLI_OPT_ALL, APR_S_CLI_OPT_LANG, APR_S_CLI_OPT_LOG_LEVEL,
         APR_S_CLI_OPT_LOG_FILE,
+        APR_S_CLI_OPT_SESSION, APR_S_CLI_OPT_ALLOW_SYSTEM_CAPTURE,
+        APR_S_CLI_OPT_ALLOW_MISSING,
         (AprStrId)0,
         APR_S_CLI_EXIT_HEADER,
         APR_S_CLI_EXIT_OK, APR_S_CLI_EXIT_USAGE, APR_S_CLI_EXIT_CONFIG,
@@ -1785,6 +1836,468 @@ static AprCliExit do_record(const Ctx *cx, const AprCliPlan *p)
 }
 
 /* ---------------------------------------------------------------------------
+ * Session files
+ *
+ * Two directions over one flag: `record --session f` reads it, `save-session
+ * --session f` writes it. Which one is the command's job to say.
+ *
+ * THE INTERESTING PART IS NEITHER OF THOSE. It is that opening a session is a
+ * SEARCH -- process ids do not survive a reboot, so every source has to be
+ * found again, and it can be found in ways that are not what the file asked
+ * for. session.h owns that search and hands back a report; everything below
+ * is the front end turning that report into sentences and one exit code.
+ *
+ * The exit codes are the existing ones, deliberately, rather than a parallel
+ * scheme for sessions:
+ *
+ *   2 CONFIG      the file was read and cannot be turned into a recording:
+ *                 malformed, truncated, not ours, from a reader we are not,
+ *                 or asking for system-wide capture without consent.
+ *   3 NOT_FOUND   the file is not there, or something it names is not there.
+ *   4 OUTPUT      save-session could not write it.
+ *   6 INCOMPLETE  --allow-missing was given and something was in fact missing:
+ *                 every file is playable, and it is not what was asked for.
+ * ------------------------------------------------------------------------- */
+
+/* Static: an AprSession is a few hundred kilobytes of fixed arrays, for the
+ * same reason AprCliPlan is (session.h), and a local one overflows the
+ * default 1 MB stack. */
+static AprSession              g_session;
+static AprSessionLoadReport    g_load_report;
+static AprSessionResolveReport g_resolve_report;
+
+static AprStrId session_fault_string(AprSessionFault f)
+{
+    switch (f) {
+    case APR_SESSION_FAULT_FILE_MISSING:    return APR_S_ERR_SESSION_NOT_FOUND;
+    case APR_SESSION_FAULT_FILE_UNREADABLE: return APR_S_ERR_SESSION_UNREADABLE;
+    case APR_SESSION_FAULT_TOO_LARGE:       return APR_S_ERR_SESSION_TOO_MANY;
+    case APR_SESSION_FAULT_NOT_JSON:        return APR_S_ERR_SESSION_NOT_JSON;
+    case APR_SESSION_FAULT_TRUNCATED:       return APR_S_ERR_SESSION_TRUNCATED;
+    case APR_SESSION_FAULT_NOT_A_SESSION:   return APR_S_ERR_SESSION_NOT_A_SESSION;
+    case APR_SESSION_FAULT_TOO_NEW:         return APR_S_ERR_SESSION_TOO_NEW;
+    case APR_SESSION_FAULT_TOO_OLD:         return APR_S_ERR_SESSION_TOO_OLD;
+    case APR_SESSION_FAULT_BAD_TYPE:        return APR_S_ERR_SESSION_BAD_FIELD;
+    case APR_SESSION_FAULT_BAD_VALUE:       return APR_S_ERR_SESSION_BAD_VALUE;
+    case APR_SESSION_FAULT_TOO_MANY:        return APR_S_ERR_SESSION_TOO_MANY;
+    case APR_SESSION_FAULT_DANGLING_REF:    return APR_S_ERR_SESSION_DANGLING_REF;
+    default:                                return APR_S_ERR_SESSION_NOT_A_SESSION;
+    }
+}
+
+/* Every load fault is exit 2 except "the file is not there", which is the
+ * absent-named-thing code the rest of the CLI already uses. */
+static AprCliExit session_fault_code(AprSessionFault f)
+{
+    return (f == APR_SESSION_FAULT_FILE_MISSING) ? APR_CLI_NOT_FOUND
+                                                 : APR_CLI_CONFIG;
+}
+
+static AprCliExit report_load_fault(const Ctx *cx, const AprCliPlan *p,
+                                    const AprSessionLoadReport *rep,
+                                    const AprErr *e)
+{
+    const wchar_t *args[3];
+    NumBuf a, b;
+    wchar_t why[512];
+
+    args[0] = p->session_file;
+    switch (rep->fault) {
+    case APR_SESSION_FAULT_TOO_NEW:
+        args[1] = num(&a, rep->min_reader);
+        args[2] = num(&b, APR_SESSION_FORMAT_VERSION);
+        return fail(cx, APR_CLI_CONFIG, APR_S_ERR_SESSION_TOO_NEW, args, 3);
+    case APR_SESSION_FAULT_TOO_OLD:
+        args[1] = num(&a, rep->version);
+        return fail(cx, APR_CLI_CONFIG, APR_S_ERR_SESSION_TOO_OLD, args, 2);
+    case APR_SESSION_FAULT_BAD_TYPE:
+    case APR_SESSION_FAULT_BAD_VALUE:
+    case APR_SESSION_FAULT_TOO_MANY:
+    case APR_SESSION_FAULT_DANGLING_REF:
+        /* `where` is a JSON path -- "buses[1].sources[0].gainDb" -- which is
+         * the difference between a person finding the line and not. */
+        args[1] = rep->where;
+        return fail(cx, session_fault_code(rep->fault),
+                    session_fault_string(rep->fault), args, 2);
+    case APR_SESSION_FAULT_FILE_UNREADABLE:
+        args[1] = errtext(e, why, 512);
+        return fail(cx, APR_CLI_CONFIG, APR_S_ERR_SESSION_UNREADABLE, args, 2);
+    default:
+        return fail(cx, session_fault_code(rep->fault),
+                    session_fault_string(rep->fault), args, 1);
+    }
+}
+
+/* One resolution, said out loud. Substitutions are warnings -- the recording
+ * proceeds and the user is told what was swapped -- and failures are either a
+ * warning (under --allow-missing) or the reason the run stops. */
+static void say_resolution(const Ctx *cx, const AprCliPlan *p,
+                           const AprSession *s,
+                           const AprSessionResolution *r)
+{
+    const AprSessionSource *src = &s->sources[r->source_index];
+    const wchar_t *args[3];
+    NumBuf nb;
+
+    switch (r->status) {
+    case APR_SESSION_MOVED:
+        args[0] = r->name;
+        args[1] = r->substituted;
+        args[2] = r->wanted;
+        warn(cx, APR_S_WARN_SESSION_MOVED, args, 3);
+        break;
+    case APR_SESSION_BY_WINDOW_CLASS:
+        args[0] = r->name;
+        args[1] = num(&nb, (int64_t)r->chosen_pid);
+        warn(cx, APR_S_WARN_SESSION_BY_WINDOW_CLASS, args, 2);
+        break;
+    case APR_SESSION_FIRST_OF_MANY:
+        args[0] = r->name;
+        args[1] = num(&nb, (int64_t)r->chosen_pid);
+        warn(cx, APR_S_WARN_SESSION_FIRST_OF_MANY, args, 2);
+        break;
+    case APR_SESSION_DEVICE_BY_NAME:
+        args[0] = r->name;
+        warn(cx, APR_S_WARN_SESSION_DEVICE_BY_NAME, args, 1);
+        break;
+
+    case APR_SESSION_NOT_RUNNING:
+        args[0] = r->name;
+        args[1] = r->wanted;
+        warn(cx, APR_S_ERR_SESSION_SOURCE_MISSING, args, 2);
+        break;
+    case APR_SESSION_DEVICE_ABSENT:
+        /* r->wanted is the FRIENDLY name, never the endpoint GUID. That is
+         * the whole reason both halves are stored. */
+        args[0] = r->wanted;
+        warn(cx, APR_S_ERR_SESSION_DEVICE_MISSING, args, 1);
+        break;
+    case APR_SESSION_AMBIGUOUS: {
+        wchar_t list[LINE_CCH];
+        size_t  i;
+        args[0] = r->name;
+        warn(cx, APR_S_ERR_SESSION_AMBIGUOUS, args, 1);
+        /* Refusing is only defensible with the answer attached: name every
+         * rival so the user can pin one with --pid. */
+        list[0] = L'\0';
+        for (i = 0; i < r->candidates_listed; i++) {
+            wchar_t one[48];
+            _snwprintf_s(one, 48, _TRUNCATE, L"%ls%ls",
+                         list[0] ? L", " : L"",
+                         num(&nb, (int64_t)r->candidates[i].pid));
+            wcsncat_s(list, LINE_CCH, one, _TRUNCATE);
+        }
+        if (list[0]) {
+            args[0] = list;
+            warn(cx, APR_S_ERR_SESSION_AMBIGUOUS_PIDS, args, 1);
+        }
+        break;
+    }
+    case APR_SESSION_NEEDS_CONSENT:
+        args[0] = p->session_file;
+        args[1] = r->name;
+        warn(cx, APR_S_ERR_SESSION_NEEDS_CONSENT, args, 2);
+        break;
+
+    default:
+        break;
+    }
+
+    if (!apr_session_status_usable(r->status) && p->allow_missing &&
+        src->kind != APR_SESSION_SRC_SYSTEM_MINUS_TREE)
+    {
+        args[0] = r->name;
+        warn(cx, APR_S_WARN_SESSION_DROPPED, args, 1);
+    }
+}
+
+/* The loaded, resolved session becomes an ordinary plan, so that everything
+ * downstream -- apr_cli_resolve, --dry-run, do_record -- is the code path a
+ * typed command line already takes. A second builder would be a second set of
+ * bugs. */
+static void plan_from_session(AprCliPlan *p, const AprSession *s)
+{
+    size_t bi, ei, oi;
+
+    if (!p->explicit_rate)     p->rate        = s->sample_rate;
+    if (!p->explicit_channels) p->channels    = s->channels;
+    if (!p->explicit_duration) p->duration_ms = s->duration_ms;
+
+    p->bus_count = 0;
+    for (bi = 0; bi < s->bus_count && bi < APR_MAX_BUSES; bi++) {
+        const AprSessionBus *sb = &s->buses[bi];
+        AprCliBus *b = &p->buses[p->bus_count++];
+
+        memset(b, 0, sizeof *b);
+        copy_cch(b->name, APR_NAME_CCH, sb->name);
+
+        for (ei = 0; ei < sb->edge_count; ei++) {
+            const AprSessionSource *ss;
+            AprCliSource *cs;
+
+            if (sb->edges[ei].source_index >= s->source_count) continue;
+            ss = &s->sources[sb->edges[ei].source_index];
+
+            /* A source that could not be found is left out HERE and nowhere
+             * else, so that "dropped" is one decision in one place. Reaching
+             * this line at all means the caller already agreed to it. */
+            if (!ss->resolved) continue;
+            if (b->source_count >= APR_MAX_SOURCES_PER_BUS) continue;
+
+            cs = &b->sources[b->source_count++];
+            memset(cs, 0, sizeof *cs);
+            cs->gain_db_tenths = sb->edges[ei].gain_db_tenths;
+            cs->gain = (float)pow(10.0, (double)cs->gain_db_tenths / 200.0);
+            copy_cch(cs->label, APR_NAME_CCH,
+                     ss->resolved_label[0] ? ss->resolved_label : ss->name);
+
+            switch (ss->kind) {
+            case APR_SESSION_SRC_DEVICE:
+                cs->kind = APR_CLI_SRC_DEVICE;
+                copy_cch(cs->endpoint_id, APR_DISC_ENDPOINT_CCH,
+                         ss->resolved_endpoint_id);
+                copy_cch(cs->spec, APR_CLI_SPEC_CCH, ss->resolved_endpoint_id);
+                break;
+            case APR_SESSION_SRC_FAKE:
+                cs->kind = APR_CLI_SRC_FAKE;
+                cs->fake_hz  = ss->fake_hz;
+                cs->fake_ppm = ss->fake_ppm;
+                cs->fake_amp = ss->fake_amp;
+                _snwprintf_s(cs->spec, APR_CLI_SPEC_CCH, _TRUNCATE, L"%lu,%ld",
+                             (unsigned long)ss->fake_hz, (long)ss->fake_ppm);
+                break;
+            case APR_SESSION_SRC_SYSTEM_MINUS_TREE:
+                /* Kept as its own kind rather than collapsed into a pid, so
+                 * that apr_cli_resolve prints the whole tree warning again on
+                 * every single run (design 4.1.1). A session must not make
+                 * system-wide capture quieter than typing it does. */
+                cs->kind = APR_CLI_SRC_SYSTEM_MINUS_TREE;
+                cs->pid  = ss->resolved_pid;
+                _snwprintf_s(cs->spec, APR_CLI_SPEC_CCH, _TRUNCATE, L"%lu",
+                             (unsigned long)ss->resolved_pid);
+                break;
+            case APR_SESSION_SRC_PROCESS:
+            default:
+                cs->kind = APR_CLI_SRC_PID;
+                cs->pid  = ss->resolved_pid;
+                cs->muted_now = ss->muted_now;
+                _snwprintf_s(cs->spec, APR_CLI_SPEC_CCH, _TRUNCATE, L"%lu",
+                             (unsigned long)ss->resolved_pid);
+                break;
+            }
+        }
+
+        for (oi = 0; oi < sb->action_count &&
+                     b->output_count < APR_CLI_MAX_OUTPUTS_PER_BUS; oi++) {
+            AprCliOutput *o = &b->outputs[b->output_count++];
+            memset(o, 0, sizeof *o);
+            copy_cch(o->path, APR_CLI_SPEC_CCH, sb->actions[oi].path);
+            strcpy_s(o->action_id, sizeof o->action_id, sb->actions[oi].id);
+            o->bitrate_kbps = sb->actions[oi].bitrate_kbps;
+            o->quality      = sb->actions[oi].quality;
+        }
+    }
+}
+
+static AprCliExit load_session(const Ctx *cx, AprCliPlan *p)
+{
+    AprSessionResolveOptions opt;
+    AprErr e;
+    size_t i;
+    AprCliExit worst = APR_CLI_OK;
+
+    e = apr_session_load(p->session_file, &g_session, &g_load_report);
+    if (apr_failed(&e)) return report_load_fault(cx, p, &g_load_report, &e);
+
+    /* Readable, and not written by this build. Say so once: a setting we
+     * ignored may be the reason the recording is not what they expected. */
+    if (g_load_report.from_newer_writer) {
+        const wchar_t *args[1];
+        args[0] = p->session_file;
+        warn(cx, APR_S_WARN_SESSION_FROM_NEWER, args, 1);
+    }
+    if (g_load_report.unknown_keys > 0) {
+        const wchar_t *args[2];
+        args[0] = p->session_file;
+        args[1] = g_load_report.first_unknown_key;
+        warn(cx, APR_S_WARN_SESSION_UNKNOWN_KEYS, args, 2);
+    }
+
+    memset(&opt, 0, sizeof opt);
+    opt.allow_system_capture = p->allow_system_capture;
+    opt.allow_missing        = p->allow_missing;
+    /* pick_when_ambiguous stays off. There is nobody to prompt in a script,
+     * so the CLI refuses and names the rivals -- exactly what --exe already
+     * does for the same situation. */
+
+    e = apr_session_resolve(&g_session, &opt, &g_resolve_report);
+
+    for (i = 0; i < g_resolve_report.count; i++) {
+        const AprSessionResolution *r = &g_resolve_report.items[i];
+        const AprSessionSource     *s = &g_session.sources[r->source_index];
+
+        say_resolution(cx, p, &g_session, r);
+        if (apr_session_status_usable(r->status)) continue;
+
+        /* Consent is a configuration answer, not a missing thing: the file
+         * was perfectly readable and describes a recording we will not make. */
+        if (r->status == APR_SESSION_NEEDS_CONSENT) {
+            worst = APR_CLI_CONFIG;
+        } else if (s->kind == APR_SESSION_SRC_SYSTEM_MINUS_TREE ||
+                   !p->allow_missing) {
+            if (worst != APR_CLI_CONFIG) worst = APR_CLI_NOT_FOUND;
+        } else {
+            /* Dropped on purpose. Playable files, not the asked-for
+             * recording -- which is precisely what exit 6 means. */
+            p->session_incomplete = 1;
+        }
+    }
+    if (worst != APR_CLI_OK) return worst;
+    if (apr_failed(&e) && !p->allow_missing) return APR_CLI_NOT_FOUND;
+
+    plan_from_session(p, &g_session);
+
+    {
+        const wchar_t *args[1];
+        args[0] = p->session_file;
+        note(cx, APR_S_STATUS_SESSION_LOADED, args, 1);
+    }
+    return APR_CLI_OK;
+}
+
+/* ---------------------------------------------------------------------------
+ * save-session
+ *
+ * The plan is already resolved when this runs, so the pids are real and the
+ * endpoint ids are real -- which is what lets the identity fields be captured
+ * from the live machine rather than guessed from what was typed.
+ *
+ * Sources are DEDUPLICATED here. The command line nests a source inside each
+ * bus it feeds, because that is how it was typed; the file lists each source
+ * once and references it by key, because that is what makes it a graph and
+ * what lets one source carry a different gain on each bus (design 3.2).
+ * ------------------------------------------------------------------------- */
+
+static int same_source(const AprSessionSource *a, const AprCliSource *b)
+{
+    switch (a->kind) {
+    case APR_SESSION_SRC_DEVICE:
+        return b->kind == APR_CLI_SRC_DEVICE &&
+               _wcsicmp(a->endpoint_id, b->endpoint_id) == 0;
+    case APR_SESSION_SRC_FAKE:
+        return b->kind == APR_CLI_SRC_FAKE &&
+               a->fake_hz == b->fake_hz && a->fake_ppm == b->fake_ppm &&
+               a->fake_amp == b->fake_amp;
+    case APR_SESSION_SRC_SYSTEM_MINUS_TREE:
+        return b->kind == APR_CLI_SRC_SYSTEM_MINUS_TREE && a->pid == b->pid;
+    case APR_SESSION_SRC_PROCESS:
+    default:
+        return (b->kind == APR_CLI_SRC_PID || b->kind == APR_CLI_SRC_EXE) &&
+               a->pid == b->pid;
+    }
+}
+
+static size_t intern_source(AprSession *s, const AprCliSource *cs)
+{
+    AprSessionSource *d;
+    size_t i;
+
+    for (i = 0; i < s->source_count; i++)
+        if (same_source(&s->sources[i], cs)) return i;
+
+    if (s->source_count >= APR_MAX_SOURCES) return (size_t)-1;
+    d = &s->sources[s->source_count];
+    memset(d, 0, sizeof *d);
+    sprintf_s(d->key, APR_SESSION_KEY_CCH, "s%u", (unsigned)s->source_count);
+    wcscpy_s(d->name, APR_NAME_CCH, cs->label[0] ? cs->label : cs->spec);
+
+    switch (cs->kind) {
+    case APR_CLI_SRC_DEVICE:
+        d->kind = APR_SESSION_SRC_DEVICE;
+        (void)apr_session_describe_device(d, cs->endpoint_id);
+        break;
+    case APR_CLI_SRC_FAKE:
+        d->kind     = APR_SESSION_SRC_FAKE;
+        d->fake_hz  = cs->fake_hz;
+        d->fake_ppm = cs->fake_ppm;
+        d->fake_amp = cs->fake_amp;
+        break;
+    case APR_CLI_SRC_SYSTEM_MINUS_TREE:
+        d->kind = APR_SESSION_SRC_SYSTEM_MINUS_TREE;
+        (void)apr_session_describe_process(d, cs->pid);
+        break;
+    default:
+        d->kind = APR_SESSION_SRC_PROCESS;
+        (void)apr_session_describe_process(d, cs->pid);
+        break;
+    }
+    s->source_count++;
+    return s->source_count - 1;
+}
+
+static AprCliExit do_save_session(const Ctx *cx, const AprCliPlan *p)
+{
+    size_t bi, si, oi;
+    AprErr e;
+
+    apr_session_init(&g_session);
+    g_session.sample_rate = p->rate;
+    g_session.channels    = p->channels;
+    g_session.duration_ms = p->duration_ms;
+
+    for (bi = 0; bi < p->bus_count && bi < APR_MAX_BUSES; bi++) {
+        const AprCliBus *cb = &p->buses[bi];
+        AprSessionBus   *sb = &g_session.buses[g_session.bus_count++];
+
+        memset(sb, 0, sizeof *sb);
+        wcscpy_s(sb->name, APR_NAME_CCH, cb->name);
+
+        for (si = 0; si < cb->source_count; si++) {
+            size_t idx = intern_source(&g_session, &cb->sources[si]);
+            AprSessionEdge *ed;
+            if (idx == (size_t)-1) continue;
+            ed = &sb->edges[sb->edge_count++];
+            memset(ed, 0, sizeof *ed);
+            strcpy_s(ed->key, APR_SESSION_KEY_CCH, g_session.sources[idx].key);
+            ed->gain_db_tenths = cb->sources[si].gain_db_tenths;
+            ed->source_index   = idx;
+        }
+        for (oi = 0; oi < cb->output_count; oi++) {
+            AprSessionAction *a = &sb->actions[sb->action_count++];
+            memset(a, 0, sizeof *a);
+            strcpy_s(a->id, sizeof a->id, cb->outputs[oi].action_id);
+            wcscpy_s(a->path, APR_DISC_PATH_CCH, cb->outputs[oi].path);
+            a->bitrate_kbps = cb->outputs[oi].bitrate_kbps;
+            a->quality      = cb->outputs[oi].quality;
+        }
+    }
+
+    e = apr_session_save(&g_session, p->session_file);
+    if (apr_failed(&e)) {
+        wchar_t why[512];
+        const wchar_t *args[2];
+        args[0] = p->session_file;
+        args[1] = errtext(&e, why, 512);
+        return fail(cx, APR_CLI_OUTPUT, APR_S_ERR_SESSION_NOT_WRITTEN, args, 2);
+    }
+
+    if (cx->json) {
+        jline(cx, 0, L"{");
+        jbool(cx, 1, L"ok", 1, 1);
+        jnum(cx, 1, L"exitCode", 0, 1);
+        jstr(cx, 1, L"session", p->session_file, 1);
+        jnum(cx, 1, L"sources", (int64_t)g_session.source_count, 1);
+        jnum(cx, 1, L"buses", (int64_t)g_session.bus_count, 0);
+        jline(cx, 0, L"}");
+    } else {
+        const wchar_t *args[1];
+        args[0] = p->session_file;
+        note(cx, APR_S_STATUS_SESSION_SAVED, args, 1);
+    }
+    return APR_CLI_OK;
+}
+
+/* ---------------------------------------------------------------------------
  * Driver
  * ------------------------------------------------------------------------- */
 
@@ -1855,11 +2368,28 @@ AprCliExit apr_cli_run(int argc, const wchar_t *const *argv, const AprCliIo *io)
     case APR_CLI_CMD_LIST_DEVICES:
         rc = do_list_devices(&cx);
         break;
+    case APR_CLI_CMD_SAVE_SESSION:
+        rc = apr_cli_resolve(&plan, io);
+        if (rc == APR_CLI_OK) rc = do_save_session(&cx, &plan);
+        break;
     case APR_CLI_CMD_RECORD:
     default:
+        /* A session file is read BEFORE apr_cli_resolve, and then resolved
+         * again by it. That is not duplicated work: session resolution turns
+         * stored identity into a pid, and apr_cli_resolve turns a pid into a
+         * checked, writable, non-colliding recording. Running the second over
+         * the first means a session-loaded run and a typed one reach
+         * do_record through exactly the same checks. */
+        if (plan.session_file[0]) {
+            rc = load_session(&cx, &plan);
+            if (rc != APR_CLI_OK) break;
+        }
         rc = apr_cli_resolve(&plan, io);
         if (rc == APR_CLI_OK) {
             rc = plan.dry_run ? do_dry_run(&cx, &plan) : do_record(&cx, &plan);
+            /* Recorded, playable, and not what the session asked for. */
+            if (rc == APR_CLI_OK && plan.session_incomplete)
+                rc = APR_CLI_INCOMPLETE;
         }
         break;
     }

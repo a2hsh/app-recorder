@@ -3284,3 +3284,83 @@ second of audio: **0.004 ms**.
 - **The CLI maps extensions to actions, so `--out x.ogg` needs an explicit
   `--format ogg`.** A CLI decision, deliberately left alone. Worth revisiting —
   `.opus` works without the flag, `.ogg` does not, which will surprise people.
+
+---
+
+## 2026-08-26 — SESSION PERSISTENCE complete. All planned work landed.
+
+`include/session.h`, `src/session/session_{save,load}.c`,
+`tests/test_session.c` (47 cases), `vendor/jsmn/` (MIT, sha256 recorded,
+unmodified). CLI gains `--session`, `save-session`, `--allow-system-capture`,
+`--allow-missing`.
+
+### Schema — sources are top-level, buses reference them
+
+Nesting sources inside buses **could not express** "Chat Mic at 0 dB on the mix
+and +3.5 dB on its own file" — that is the graph shape from §3.2, so per-edge
+gain lives on the bus's reference, in tenths of a dB. Header carries `version` +
+`minReader`; each source stores its **whole identity** (pid hint, exe, image
+path, window class — or endpoint id **and** friendly name — or tone/ppm/amp).
+
+### Identity resolution returns a report, not a boolean
+
+`AprSessionResolveReport`: status, what was asked for, what was substituted, and
+the full candidate list with pids.
+
+- **Not running** → `NOT_RUNNING`, source stays in the model, exit 3.
+  `--allow-missing` drops it, warns by name, finishes **exit 6**.
+- **Several instances** → pid hint (only among candidates already matched on
+  image), then window class, then refuse `AMBIGUOUS` **printing every rival pid**
+  so the user can pin one with `--pid`.
+- **Moved executable** → `MOVED`, both paths in one sentence.
+- **Absent device** → named by **friendly name, never the GUID**. A changed
+  endpoint id with a matching name resolves as `DEVICE_BY_NAME`.
+- **Running but silent** (absent from the audio-session list) → last-resort match
+  on **pid + image name together**. A bare pid is never trusted.
+
+Resolution runs against a supplied `AprSessionMachine` rather than a global test
+seam, so a UI preview can use the same entry point.
+
+### EXCLUDE — the reasoning here is sharp and should not be softened
+
+- **Consent is checked before the lookup**, so the answer never depends on
+  whether the excluded app happens to be playing right then.
+- Without `--allow-system-capture` the load stops at **exit 2 naming the flag**.
+- **`--allow-missing` can never drop an EXCLUDE source.** Dropping an ordinary
+  source records *less* than asked; dropping an exclusion target records
+  **more**. Those are not the same risk and must not share a flag.
+- A loaded EXCLUDE source stays its own CLI kind, so the full process-tree
+  warning reprints every run.
+
+### Versioning
+
+`minReader > ours` → refuse. `version > ours` with `minReader <= ours` → load and
+warn. Too old → refuse. **Unknown keys ignored, counted and named** — the
+forward-compat lane. A known key of the **wrong type is fatal**.
+
+### Two findings
+
+1. **jsmn is a tokenizer, not a validator** — `{ , , }` and `{"a": }` tokenize
+   fine. The key/value structure check is ours, and the tests are split so each
+   mechanism is tested against inputs it owns.
+2. **A hand-edited Windows path is the likeliest parse failure** — `C:\Users\me`
+   is invalid JSON. The error message now says so explicitly.
+
+### Honest note from the agent
+
+Mutation-tested with five deliberate breaks; **the fifth (bare pid trusted) was
+not caught at first**, because `chosen_pid` was copied from what we searched for
+rather than what we found. Fixed in both code and test.
+
+### Follow-up
+
+Window-class lookup is a private static in `session_load.c` (one caller, no
+owner exists). **Move it to `discover.c` when the UI needs it.**
+
+---
+
+## 2026-08-26 — FULL VERIFICATION
+
+`build.cmd Release test`: **24/24 suites, 0 failures.**
+`apprecorder.exe` = **786,944 bytes (768.5 KB)** — under the 1 MB goal with four
+encoders, LAME, libogg and libopus statically linked.
