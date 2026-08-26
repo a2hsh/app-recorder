@@ -55,6 +55,7 @@
 #include "capture.h"
 #include "clock.h"
 #include "discover.h"
+#include "errmsg.h"
 #include "log.h"
 #include "runner.h"
 #include "session.h"
@@ -404,12 +405,19 @@ static int busy(AprController *c)
  * Building a graph
  * ======================================================================== */
 
+/* THE FRAME IS THE CATALOG'S AND SO IS THE REASON.
+ *
+ * `id` names the operation ("That source could not be added: %1!s!"); the
+ * insert is why. Both halves have to come out of the catalog or the sentence
+ * is half translated, which is what BUGS.md M11 was about -- this used to
+ * hand apr_err_format()'s English prose, raise site and all, straight into a
+ * translated frame. The diagnostic still exists; it goes to the log. */
 static void report_failure(AprController *c, AprStrId id, const AprErr *e)
 {
     const wchar_t *args[1];
     wchar_t why[512];
 
-    apr_err_format(e, why, 512);
+    apr_err_reason(e, why, 512);
     args[0] = why;
     say(c, id, args, 1);
 }
@@ -1252,7 +1260,11 @@ static void handle_notice(AprController *c, AprRunNotice *n)
         break;
 
     case APR_RUN_EV_ACTION_FAILED:
-        apr_err_format(&n->err, why, 512);
+        /* The reason travelled here from a writer thread as (kind, code) and
+         * becomes words HERE, on the UI thread, where apr_str() is allowed --
+         * see errmsg.h. Rendering it at the raise site would have needed a
+         * lock and an allocation on a thread that must have neither. */
+        apr_err_reason(&n->err, why, 512);
         args[0] = n->name;
         args[1] = why;
         /* THE BALLOON IS CONDITIONAL LIKE EVERY OTHER ONE. It used to be

@@ -120,6 +120,93 @@ AprErr apr_source_start(AprSource *s);
 void   apr_source_stop(AprSource *s);
 
 /* ---------------------------------------------------------------------------
+ * RECONNECTION -- a source that dies must be able to come back.
+ *
+ * WHY THIS IS HERE AND NOT IN THE CAPTURE LAYER
+ *
+ *   A capture is one attachment to one pid or one endpoint id. When the target
+ *   exits or the device is unplugged, that attachment is over and no amount of
+ *   retrying inside it can help: what has to happen is a NEW capture, on a new
+ *   pid, writing into the SAME ring, so that everything downstream -- every
+ *   bus reader's cursor, every drift controller, the source's clock anchor --
+ *   carries on untouched. The ring and the anchor are this file's, so the swap
+ *   is this file's.
+ *
+ * THE ONE INVARIANT ALL THREE CALLS EXIST TO PRESERVE
+ *
+ *   THE RING'S WRITE POSITION IS THE ABSOLUTE FRAME INDEX. Frame n was
+ *   captured at the tick apr_clock_frame_ticks(clock, n) names, and that stays
+ *   true across a death, an absence of twenty minutes, and a recovery.
+ *   Alignment over content (design 3.1), applied to the largest loss there is.
+ *   Resuming at "now" instead would put every frame after the hole earlier than
+ *   it belongs, and a fixed offset on one source is a permanent desync of every
+ *   bus it feeds -- silent, and unfixable after the files are written.
+ *
+ * THREADING
+ *
+ *   All three are producer-side operations and must not run while another
+ *   producer does: call them from ONE thread, and never from the capture pump.
+ *   Re-resolving a source means COM enumeration, which is exactly the
+ *   unbounded work BUGS.md M3 moved off the pump -- so this is driven from the
+ *   reconnect worker (reconnect.h), which is that same lesson applied a layer
+ *   up. Readers are unaffected and need not stop: a detached source simply
+ *   produces silence, which is what they already handle.
+ * ------------------------------------------------------------------------- */
+
+/* Retire the capture and leave the source with none. The ring, the readers,
+ * the clock anchor and the refcount all survive. Health becomes "not alive",
+ * which is exactly what it was when the target exited.
+ *
+ * RETURNS A FAILURE, AND CHANGES NOTHING, when the capture could not be
+ * retired inside its bounded join -- a pump wedged inside WASAPI is still
+ * writing into this ring, and attaching a second producer to it would be two
+ * threads scribbling over one another. Retrying later is legal. */
+AprErr apr_source_detach(AprSource *s);
+
+/* Nonzero while a capture is attached. */
+int apr_source_attached(const AprSource *s);
+
+/* Keep a DETACHED source's ring at the absolute frame index `now_ticks`
+ * implies, by writing silence. Returns the frames written.
+ *
+ * WHY A DETACHED SOURCE IS PADDED AT ALL. A reader that finds nothing in the
+ * ring already emits silence and holds its absolute position, so alignment
+ * survives without this. What does not survive is everything measured against
+ * `produced`: a device edge's drift controller sees the backlog collapse and
+ * winds up against a source that is not there, and the recovery then arrives
+ * into a controller that has spent twenty minutes integrating a fiction.
+ * Padding keeps produced == due, so the controller sees a perfectly behaved
+ * source that happens to be silent -- which is the truth.
+ *
+ * A no-op for an attached source (its capture is the producer), for an
+ * unanchored one (there is no timeline to hold a place in yet), and whenever
+ * the ring is already at or past the index due. */
+uint64_t apr_source_pad_to(AprSource *s, uint64_t now_ticks);
+
+/* Attach a NEW capture, built from `cfg`, to this source's existing ring.
+ *
+ * `cfg` is the identity of the replacement -- a new pid, a new endpoint id --
+ * at the same rate and channel count as the source, which is refused
+ * otherwise: the ring's frame size is fixed and a mismatch would shear every
+ * frame after the recovery.
+ *
+ * Detaches first if a capture is still attached, and reports that failure
+ * rather than adding a second producer. On success the new capture is armed
+ * with this source's ORIGINAL clock anchor, so its first frame lands at the
+ * absolute index it belongs at rather than wherever the ring happens to be
+ * (capture.h, resume_anchor_ticks) -- and it is started if the source was
+ * started, so a recovery needs no second call.
+ *
+ * apr_source_generation() increments on every success. That is how a front end
+ * tells "this source has been recovered" from "this source is still the one it
+ * always was", without either of them having to watch for an edge. */
+AprErr apr_source_reattach(AprSource *s, const AprCaptureConfig *cfg);
+
+/* Captures this source has had. 1 for a source that has never been reattached,
+ * so a plain increment is a recovery. */
+uint32_t apr_source_generation(const AprSource *s);
+
+/* ---------------------------------------------------------------------------
  * Identity and state -- the queries the canvas and the accessibility tree both
  * read. Neither view is derived from the other; both project this.
  * ------------------------------------------------------------------------- */

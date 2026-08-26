@@ -680,6 +680,106 @@
 
 #define APR_EN_UI_DLG_RESOLVE_CONSENT      "%1!s! asks to record EVERYTHING this computer plays, holding back only %2!s! and whatever it has started. apprecorder will not do that because a file asked for it -- confirm it yourself first."
 
+
+/* ---------------------------------------------------------------------------
+ * WHY SOMETHING FAILED. The %2!s! of every failure sentence in this catalog.
+ *
+ * These used to be English prose in a hand-written table in
+ * src/platform/err.c, handed straight into a translated frame -- so the day
+ * Arabic ships, every failure sentence would have been half Arabic and half
+ * English (BUGS.md M11). The author is blind and this is what he hears at the
+ * worst possible moment, which is why it was worth a mechanism rather than a
+ * patch.
+ *
+ * THE FIRST BLOCK IS ONE ENTRY PER HAND-TABLED WASAPI CODE, and the text is
+ * the same text err.c's table carries for the log. Two spellings of one
+ * sentence is a drift hazard, so tests/test_err.c asserts they are equal
+ * character for character rather than trusting whoever edits one to remember
+ * the other. Ordinary HRESULTs and Win32 codes are deliberately absent:
+ * Windows already describes those in the reader's own language and the space
+ * is open-ended, so errmsg.h asks FormatMessageW for the display language
+ * instead of tabling them here.
+ *
+ * They read as capitalised sentences because that is what a frame like
+ * "%1!s! could not be started: %2!s!" wants after its colon, and because they
+ * are the same sentences the log has always printed.
+ * ------------------------------------------------------------------------- */
+
+#define APR_EN_ERR_HR_E_NOT_INITIALIZED               "The audio client has not been initialised."
+#define APR_EN_ERR_HR_E_ALREADY_INITIALIZED           "The audio client is already initialised."
+#define APR_EN_ERR_HR_E_WRONG_ENDPOINT_TYPE           "Wrong endpoint type for the requested operation (render vs capture)."
+#define APR_EN_ERR_HR_E_DEVICE_INVALIDATED            "The audio endpoint went away: unplugged, disabled, or its format was changed. The stream must be reopened."
+#define APR_EN_ERR_HR_E_NOT_STOPPED                   "The audio stream is still running."
+#define APR_EN_ERR_HR_E_BUFFER_TOO_LARGE              "The requested buffer is larger than the free space in the endpoint."
+#define APR_EN_ERR_HR_E_OUT_OF_ORDER                  "A previous GetBuffer is still outstanding; ReleaseBuffer it first."
+#define APR_EN_ERR_HR_E_UNSUPPORTED_FORMAT            "The endpoint does not support the requested wave format."
+#define APR_EN_ERR_HR_E_INVALID_SIZE                  "The buffer size passed to ReleaseBuffer is not valid."
+#define APR_EN_ERR_HR_E_DEVICE_IN_USE                 "The endpoint is already in use in exclusive mode."
+#define APR_EN_ERR_HR_E_BUFFER_OPERATION_PENDING      "The buffer operation is still pending."
+#define APR_EN_ERR_HR_E_THREAD_NOT_REGISTERED         "The calling thread is not registered with the Multimedia Class Scheduler Service."
+#define APR_EN_ERR_HR_E_EXCLUSIVE_MODE_NOT_ALLOWED    "Exclusive mode is disabled for this endpoint."
+#define APR_EN_ERR_HR_E_ENDPOINT_CREATE_FAILED        "The audio engine could not create the endpoint, usually because the requested period or buffer size is out of range."
+#define APR_EN_ERR_HR_E_SERVICE_NOT_RUNNING           "The Windows Audio service is not running."
+#define APR_EN_ERR_HR_E_EVENTHANDLE_NOT_EXPECTED      "An event handle was set on a stream not opened with AUDCLNT_STREAMFLAGS_EVENTCALLBACK."
+#define APR_EN_ERR_HR_E_EXCLUSIVE_MODE_ONLY           "The endpoint supports exclusive mode only."
+#define APR_EN_ERR_HR_E_BUFDURATION_PERIOD_NOT_EQUAL  "In exclusive event-driven mode the buffer duration must equal the device period."
+#define APR_EN_ERR_HR_E_EVENTHANDLE_NOT_SET           "The stream was opened event-driven but no event handle was set."
+#define APR_EN_ERR_HR_E_INCORRECT_BUFFER_SIZE         "The buffer size passed to GetBuffer is wrong."
+#define APR_EN_ERR_HR_E_BUFFER_SIZE_ERROR             "The buffer duration is out of range for this endpoint."
+#define APR_EN_ERR_HR_E_CPUUSAGE_EXCEEDED             "The audio engine refused the stream: process CPU usage exceeds its allowance."
+#define APR_EN_ERR_HR_E_BUFFER_ERROR                  "GetBuffer failed to retrieve a data buffer."
+#define APR_EN_ERR_HR_E_BUFFER_SIZE_NOT_ALIGNED       "The buffer size is not aligned; reopen with the aligned size the client reports."
+#define APR_EN_ERR_HR_E_INVALID_DEVICE_PERIOD         "The requested device period is not valid."
+#define APR_EN_ERR_HR_E_INVALID_STREAM_FLAG           "A stream flag is not valid for this activation."
+#define APR_EN_ERR_HR_E_ENDPOINT_OFFLOAD_NOT_CAPABLE  "The endpoint cannot do offloaded audio."
+#define APR_EN_ERR_HR_E_OUT_OF_OFFLOAD_RESOURCES      "The endpoint has no offload resources left."
+#define APR_EN_ERR_HR_E_OFFLOAD_MODE_ONLY             "The endpoint supports offload mode only."
+#define APR_EN_ERR_HR_E_NONOFFLOAD_MODE_ONLY          "The endpoint supports non-offload mode only."
+#define APR_EN_ERR_HR_E_RESOURCES_INVALIDATED         "The stream's resources were invalidated and it must be reopened."
+#define APR_EN_ERR_HR_E_RAW_MODE_UNSUPPORTED          "The endpoint does not support raw mode."
+#define APR_EN_ERR_HR_E_ENGINE_PERIODICITY_LOCKED     "Another client has locked the audio engine's periodicity."
+#define APR_EN_ERR_HR_E_ENGINE_FORMAT_LOCKED          "Another client has locked the audio engine's format."
+#define APR_EN_ERR_HR_E_HEADTRACKING_ENABLED          "The operation is not allowed while head tracking is enabled."
+#define APR_EN_ERR_HR_E_HEADTRACKING_UNSUPPORTED      "The endpoint does not support head tracking."
+#define APR_EN_ERR_HR_E_EFFECT_NOT_AVAILABLE          "The requested audio effect is not available on this endpoint."
+#define APR_EN_ERR_HR_E_EFFECT_STATE_READ_ONLY        "The audio effect's state is read-only."
+#define APR_EN_ERR_HR_S_BUFFER_EMPTY                  "No capture data was available this pass."
+#define APR_EN_ERR_HR_S_THREAD_ALREADY_REGISTERED     "The thread is already registered with MMCSS."
+#define APR_EN_ERR_HR_S_POSITION_STALLED              "The stream position has stalled: the endpoint produced no new frames."
+
+/* One sentence per AprErrKind, and it is the FLOOR: every failure that reaches
+ * a user resolves to something here, so none can fall through to a literal in
+ * C. The three numeric ones keep the code rather than swallowing it, for the
+ * case where Windows has no text for it in the display language.
+ *
+ * The rest are for refusals where the kind is TOO COARSE TO BE USEFUL. "That
+ * is not possible while the session is in the state it is in" is true of a
+ * full bus and of six other things; "that bus already holds as many sources
+ * as it can mix" is the one a person can act on. A raise site names one with
+ * APR_ERR_SAY -- one integer store, so still safe on a capture pump. */
+
+#define APR_EN_ERR_REASON_UNKNOWN             "apprecorder could not tell why."
+#define APR_EN_ERR_REASON_HRESULT             "The audio system reported error %1!s!."
+#define APR_EN_ERR_REASON_WIN32               "Windows reported error %1!s!."
+#define APR_EN_ERR_REASON_ERRNO               "The C runtime reported error %1!s!."
+#define APR_EN_ERR_REASON_INVALID_ARG         "apprecorder asked for something impossible. That is a defect in apprecorder, and the log has the details."
+#define APR_EN_ERR_REASON_NO_MEMORY           "There was not enough memory."
+#define APR_EN_ERR_REASON_STATE               "That is not possible while the session is in the state it is in."
+#define APR_EN_ERR_REASON_NOT_FOUND           "What it names is not here."
+#define APR_EN_ERR_REASON_UNSUPPORTED         "This build of apprecorder cannot do that."
+#define APR_EN_ERR_REASON_TIMEOUT             "It did not finish in the time allowed."
+#define APR_EN_ERR_REASON_OVERRUN             "Audio was dropped because something could not keep up."
+#define APR_EN_ERR_REASON_IO                  "The file could not be written."
+#define APR_EN_ERR_REASON_BUSY                "A recording is running, so that cannot change until it stops."
+#define APR_EN_ERR_REASON_TOO_MANY_SOURCES    "This session already holds as many sources as apprecorder can record at once."
+#define APR_EN_ERR_REASON_TOO_MANY_BUSES      "This session already holds as many buses as apprecorder can record at once."
+#define APR_EN_ERR_REASON_BUS_FULL_SOURCES    "That bus already holds as many sources as it can mix."
+#define APR_EN_ERR_REASON_BUS_FULL_OUTPUTS    "That bus already holds as many outputs as it can write."
+#define APR_EN_ERR_REASON_RATE_MISMATCH       "The source records at a different sample rate from the bus."
+#define APR_EN_ERR_REASON_ALREADY_ON_BUS      "That source is already on that bus."
+#define APR_EN_ERR_REASON_NOT_ON_BUS          "That source is not on that bus."
+#define APR_EN_ERR_REASON_NAME_NEEDED         "The output has no file name to write to."
+
 #define APR_EN_ENTRY(name, id)      id      APR_EN_##name
 #define APR_EN_PENTRY(name, base)                                              \
     base+0  APR_EN_##name##_ZERO                                               \
@@ -755,6 +855,16 @@ END
 STRINGTABLE
 BEGIN
     APR_STR_LIST_UI_TRAY(APR_EN_ENTRY)
+END
+
+STRINGTABLE
+BEGIN
+    APR_STR_LIST_ERR_HR(APR_EN_ENTRY)
+END
+
+STRINGTABLE
+BEGIN
+    APR_STR_LIST_ERR_REASON(APR_EN_ENTRY)
 END
 
 STRINGTABLE
@@ -1238,6 +1348,85 @@ END
 #define APR_AR_UI_MENU_HIDE_TO_TRAY(id)     /* not translated yet */
 
 #define APR_AR_UI_DLG_RESOLVE_CONSENT(id)   /* not translated yet */
+
+/* The error reasons. One marker, for the same reason APP_NAME carries one:
+ * to prove the whole path end to end -- an error raised on a capture pump,
+ * travelling as an identity, resolving through the catalog into the block for
+ * the language actually in effect -- before any of it is translated.
+ *
+ * APR_S_ERR_HR_E_DEVICE_INVALIDATED is the one chosen because it is the
+ * failure a user is most likely to meet (a headset unplugged mid-recording)
+ * and because it is the sentence BUGS.md M11 quotes. tests/test_err.c pins it
+ * by exact code points, so the UTF-8 -> UTF-16 path through rc.exe is
+ * verified rather than assumed.
+ *
+ * Everything else is declared untranslated and falls back to English, which
+ * is the honest state until the translation pass runs. */
+
+#define APR_AR_ERR_HR_E_NOT_INITIALIZED(id)           /* not translated yet */
+#define APR_AR_ERR_HR_E_ALREADY_INITIALIZED(id)       /* not translated yet */
+#define APR_AR_ERR_HR_E_WRONG_ENDPOINT_TYPE(id)       /* not translated yet */
+#define APR_AR_ERR_HR_E_DEVICE_INVALIDATED(id)        id  "AR-PLACEHOLDER-REASON تجربة"
+#define APR_AR_ERR_HR_E_NOT_STOPPED(id)               /* not translated yet */
+#define APR_AR_ERR_HR_E_BUFFER_TOO_LARGE(id)          /* not translated yet */
+#define APR_AR_ERR_HR_E_OUT_OF_ORDER(id)              /* not translated yet */
+#define APR_AR_ERR_HR_E_UNSUPPORTED_FORMAT(id)        /* not translated yet */
+#define APR_AR_ERR_HR_E_INVALID_SIZE(id)              /* not translated yet */
+#define APR_AR_ERR_HR_E_DEVICE_IN_USE(id)             /* not translated yet */
+#define APR_AR_ERR_HR_E_BUFFER_OPERATION_PENDING(id)  /* not translated yet */
+#define APR_AR_ERR_HR_E_THREAD_NOT_REGISTERED(id)     /* not translated yet */
+#define APR_AR_ERR_HR_E_EXCLUSIVE_MODE_NOT_ALLOWED(id) /* not translated yet */
+#define APR_AR_ERR_HR_E_ENDPOINT_CREATE_FAILED(id)    /* not translated yet */
+#define APR_AR_ERR_HR_E_SERVICE_NOT_RUNNING(id)       /* not translated yet */
+#define APR_AR_ERR_HR_E_EVENTHANDLE_NOT_EXPECTED(id)  /* not translated yet */
+#define APR_AR_ERR_HR_E_EXCLUSIVE_MODE_ONLY(id)       /* not translated yet */
+#define APR_AR_ERR_HR_E_BUFDURATION_PERIOD_NOT_EQUAL(id) /* not translated yet */
+#define APR_AR_ERR_HR_E_EVENTHANDLE_NOT_SET(id)       /* not translated yet */
+#define APR_AR_ERR_HR_E_INCORRECT_BUFFER_SIZE(id)     /* not translated yet */
+#define APR_AR_ERR_HR_E_BUFFER_SIZE_ERROR(id)         /* not translated yet */
+#define APR_AR_ERR_HR_E_CPUUSAGE_EXCEEDED(id)         /* not translated yet */
+#define APR_AR_ERR_HR_E_BUFFER_ERROR(id)              /* not translated yet */
+#define APR_AR_ERR_HR_E_BUFFER_SIZE_NOT_ALIGNED(id)   /* not translated yet */
+#define APR_AR_ERR_HR_E_INVALID_DEVICE_PERIOD(id)     /* not translated yet */
+#define APR_AR_ERR_HR_E_INVALID_STREAM_FLAG(id)       /* not translated yet */
+#define APR_AR_ERR_HR_E_ENDPOINT_OFFLOAD_NOT_CAPABLE(id) /* not translated yet */
+#define APR_AR_ERR_HR_E_OUT_OF_OFFLOAD_RESOURCES(id)  /* not translated yet */
+#define APR_AR_ERR_HR_E_OFFLOAD_MODE_ONLY(id)         /* not translated yet */
+#define APR_AR_ERR_HR_E_NONOFFLOAD_MODE_ONLY(id)      /* not translated yet */
+#define APR_AR_ERR_HR_E_RESOURCES_INVALIDATED(id)     /* not translated yet */
+#define APR_AR_ERR_HR_E_RAW_MODE_UNSUPPORTED(id)      /* not translated yet */
+#define APR_AR_ERR_HR_E_ENGINE_PERIODICITY_LOCKED(id) /* not translated yet */
+#define APR_AR_ERR_HR_E_ENGINE_FORMAT_LOCKED(id)      /* not translated yet */
+#define APR_AR_ERR_HR_E_HEADTRACKING_ENABLED(id)      /* not translated yet */
+#define APR_AR_ERR_HR_E_HEADTRACKING_UNSUPPORTED(id)  /* not translated yet */
+#define APR_AR_ERR_HR_E_EFFECT_NOT_AVAILABLE(id)      /* not translated yet */
+#define APR_AR_ERR_HR_E_EFFECT_STATE_READ_ONLY(id)    /* not translated yet */
+#define APR_AR_ERR_HR_S_BUFFER_EMPTY(id)              /* not translated yet */
+#define APR_AR_ERR_HR_S_THREAD_ALREADY_REGISTERED(id) /* not translated yet */
+#define APR_AR_ERR_HR_S_POSITION_STALLED(id)          /* not translated yet */
+
+#define APR_AR_ERR_REASON_UNKNOWN(id)         /* not translated yet */
+#define APR_AR_ERR_REASON_HRESULT(id)         /* not translated yet */
+#define APR_AR_ERR_REASON_WIN32(id)           /* not translated yet */
+#define APR_AR_ERR_REASON_ERRNO(id)           /* not translated yet */
+#define APR_AR_ERR_REASON_INVALID_ARG(id)     /* not translated yet */
+#define APR_AR_ERR_REASON_NO_MEMORY(id)       /* not translated yet */
+#define APR_AR_ERR_REASON_STATE(id)           /* not translated yet */
+#define APR_AR_ERR_REASON_NOT_FOUND(id)       /* not translated yet */
+#define APR_AR_ERR_REASON_UNSUPPORTED(id)     /* not translated yet */
+#define APR_AR_ERR_REASON_TIMEOUT(id)         /* not translated yet */
+#define APR_AR_ERR_REASON_OVERRUN(id)         /* not translated yet */
+#define APR_AR_ERR_REASON_IO(id)              /* not translated yet */
+#define APR_AR_ERR_REASON_BUSY(id)            /* not translated yet */
+#define APR_AR_ERR_REASON_TOO_MANY_SOURCES(id) /* not translated yet */
+#define APR_AR_ERR_REASON_TOO_MANY_BUSES(id)  /* not translated yet */
+#define APR_AR_ERR_REASON_BUS_FULL_SOURCES(id) /* not translated yet */
+#define APR_AR_ERR_REASON_BUS_FULL_OUTPUTS(id) /* not translated yet */
+#define APR_AR_ERR_REASON_RATE_MISMATCH(id)   /* not translated yet */
+#define APR_AR_ERR_REASON_ALREADY_ON_BUS(id)  /* not translated yet */
+#define APR_AR_ERR_REASON_NOT_ON_BUS(id)      /* not translated yet */
+#define APR_AR_ERR_REASON_NAME_NEEDED(id)     /* not translated yet */
+
 
 #define APR_AR_ENTRY(name, id)      APR_AR_##name(id)
 #define APR_AR_PENTRY(name, base)   APR_AR_P_##name(base)

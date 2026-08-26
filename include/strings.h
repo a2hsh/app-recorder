@@ -112,12 +112,14 @@
  * plural occupies base+0 .. base+5, one per CLDR category); the UI shell's own
  * ids sit at 1300+ and the canvas's own at 1400+, so that the CLI block, the
  * plural bases, the UI shell and the canvas can each grow without four agents
- * renumbering each other. Keep every id inside
- * [APR_STR_ID_MIN, APR_STR_ID_MAX).
+ * renumbering each other. Error reasons -- the sentences errmsg.h resolves an
+ * AprErr into -- sit at 1800+ (one per hand-tabled WASAPI code) and 1850+
+ * (one per error kind, plus the refusals a raise site names for itself).
+ * Keep every id inside [APR_STR_ID_MIN, APR_STR_ID_MAX).
  * ------------------------------------------------------------------------- */
 
 #define APR_STR_ID_MIN 1000
-#define APR_STR_ID_MAX 1800
+#define APR_STR_ID_MAX 2000
 
 /* X(NAME, id) -- a plain string. Referenced in C as APR_S_NAME. */
 
@@ -685,6 +687,112 @@
     X(UI_TRAY_INFO_ARM_FAILED,      1766)                                 \
     X(UI_TRAY_INFO_OUTPUT_RENAMED,  1767)
 
+/* ---- WHY SOMETHING FAILED, in the user's language.
+ *
+ * These are the `%2!s!` of "Could not open %1!s! for writing: %2!s!" and of
+ * every other frame that reports a failure. They used to be English prose in
+ * a hand-written table in src/platform/err.c, handed straight into a
+ * translated frame -- so the moment Arabic ships, every failure sentence
+ * would have been half Arabic and half English (BUGS.md M11). The author is
+ * blind; this is the sentence he hears when something has gone wrong.
+ *
+ * A REASON IS AN INSERT, NOT A SUFFIX GLUED IN C, and that is the same
+ * licence APR_STR_LIST_UI_TREE's state phrases take: each entry is a complete
+ * clause occupying one positional insert, so a translator may move it
+ * anywhere in the frame sentence. What it must never be is a fragment the
+ * code concatenates.
+ *
+ * ONE ENTRY PER HAND-TABLED WASAPI CODE. Windows ships no message resource
+ * for facility 0x889, so these are the sentences apprecorder writes itself --
+ * which is exactly why they need to be here rather than in a .c file.
+ * Ordinary HRESULTs and Win32 codes are NOT tabled: FormatMessageW already
+ * describes those in the user's own language, and errmsg.h asks it for the
+ * language apprecorder is displaying in. src/platform/err.c owns the mapping
+ * from code to id; test_strings.c fails if a tabled code has no id, and
+ * test_err.c fails if the English text here and the table's own English text
+ * ever drift apart. ---- */
+#define APR_STR_LIST_ERR_HR(X)                                          \
+    X(ERR_HR_E_NOT_INITIALIZED,           1800)                           \
+    X(ERR_HR_E_ALREADY_INITIALIZED,       1801)                           \
+    X(ERR_HR_E_WRONG_ENDPOINT_TYPE,       1802)                           \
+    X(ERR_HR_E_DEVICE_INVALIDATED,        1803)                           \
+    X(ERR_HR_E_NOT_STOPPED,               1804)                           \
+    X(ERR_HR_E_BUFFER_TOO_LARGE,          1805)                           \
+    X(ERR_HR_E_OUT_OF_ORDER,              1806)                           \
+    X(ERR_HR_E_UNSUPPORTED_FORMAT,        1807)                           \
+    X(ERR_HR_E_INVALID_SIZE,              1808)                           \
+    X(ERR_HR_E_DEVICE_IN_USE,             1809)                           \
+    X(ERR_HR_E_BUFFER_OPERATION_PENDING,  1810)                           \
+    X(ERR_HR_E_THREAD_NOT_REGISTERED,     1811)                           \
+    X(ERR_HR_E_EXCLUSIVE_MODE_NOT_ALLOWED,1812)                           \
+    X(ERR_HR_E_ENDPOINT_CREATE_FAILED,    1813)                           \
+    X(ERR_HR_E_SERVICE_NOT_RUNNING,       1814)                           \
+    X(ERR_HR_E_EVENTHANDLE_NOT_EXPECTED,  1815)                           \
+    X(ERR_HR_E_EXCLUSIVE_MODE_ONLY,       1816)                           \
+    X(ERR_HR_E_BUFDURATION_PERIOD_NOT_EQUAL, 1817)                        \
+    X(ERR_HR_E_EVENTHANDLE_NOT_SET,       1818)                           \
+    X(ERR_HR_E_INCORRECT_BUFFER_SIZE,     1819)                           \
+    X(ERR_HR_E_BUFFER_SIZE_ERROR,         1820)                           \
+    X(ERR_HR_E_CPUUSAGE_EXCEEDED,         1821)                           \
+    X(ERR_HR_E_BUFFER_ERROR,              1822)                           \
+    X(ERR_HR_E_BUFFER_SIZE_NOT_ALIGNED,   1823)                           \
+    X(ERR_HR_E_INVALID_DEVICE_PERIOD,     1824)                           \
+    X(ERR_HR_E_INVALID_STREAM_FLAG,       1825)                           \
+    X(ERR_HR_E_ENDPOINT_OFFLOAD_NOT_CAPABLE, 1826)                        \
+    X(ERR_HR_E_OUT_OF_OFFLOAD_RESOURCES,  1827)                           \
+    X(ERR_HR_E_OFFLOAD_MODE_ONLY,         1828)                           \
+    X(ERR_HR_E_NONOFFLOAD_MODE_ONLY,      1829)                           \
+    X(ERR_HR_E_RESOURCES_INVALIDATED,     1830)                           \
+    X(ERR_HR_E_RAW_MODE_UNSUPPORTED,      1831)                           \
+    X(ERR_HR_E_ENGINE_PERIODICITY_LOCKED, 1832)                           \
+    X(ERR_HR_E_ENGINE_FORMAT_LOCKED,      1833)                           \
+    X(ERR_HR_E_HEADTRACKING_ENABLED,      1834)                           \
+    X(ERR_HR_E_HEADTRACKING_UNSUPPORTED,  1835)                           \
+    X(ERR_HR_E_EFFECT_NOT_AVAILABLE,      1836)                           \
+    X(ERR_HR_E_EFFECT_STATE_READ_ONLY,    1837)                           \
+    X(ERR_HR_S_BUFFER_EMPTY,              1838)                           \
+    X(ERR_HR_S_THREAD_ALREADY_REGISTERED, 1839)                           \
+    X(ERR_HR_S_POSITION_STALLED,          1840)
+
+/* ---- the same job for errors that carry no WASAPI code.
+ *
+ * The first block is one sentence per AprErrKind, and it is the floor: every
+ * error that reaches a user resolves to SOMETHING here, so no failure can
+ * fall through to an English literal. ERR_REASON_HRESULT / _WIN32 / _ERRNO
+ * are the last resort for a numeric code Windows would not describe in the
+ * display language -- they keep the code, as an identifier, rather than
+ * swallowing it.
+ *
+ * The second block is for refusals where the KIND IS TOO COARSE TO BE USEFUL.
+ * "That is not possible in the state this session is in" is true of a full
+ * bus and of six other things; "that bus already holds as many sources as it
+ * can mix" is the one the user can act on. A raise site names one of these
+ * with APR_ERR_SAY, which costs one integer store and is therefore still safe
+ * on a capture pump. Most raise sites should NOT name one: their text is
+ * diagnostic, it goes to the log, and a user never sees it. ---- */
+#define APR_STR_LIST_ERR_REASON(X)                                      \
+    X(ERR_REASON_UNKNOWN,           1850)                                 \
+    X(ERR_REASON_HRESULT,           1851)                                 \
+    X(ERR_REASON_WIN32,             1852)                                 \
+    X(ERR_REASON_ERRNO,             1853)                                 \
+    X(ERR_REASON_INVALID_ARG,       1854)                                 \
+    X(ERR_REASON_NO_MEMORY,         1855)                                 \
+    X(ERR_REASON_STATE,             1856)                                 \
+    X(ERR_REASON_NOT_FOUND,         1857)                                 \
+    X(ERR_REASON_UNSUPPORTED,       1858)                                 \
+    X(ERR_REASON_TIMEOUT,           1859)                                 \
+    X(ERR_REASON_OVERRUN,           1860)                                 \
+    X(ERR_REASON_IO,                1861)                                 \
+    X(ERR_REASON_BUSY,              1862)                                 \
+    X(ERR_REASON_TOO_MANY_SOURCES,  1870)                                 \
+    X(ERR_REASON_TOO_MANY_BUSES,    1871)                                 \
+    X(ERR_REASON_BUS_FULL_SOURCES,  1872)                                 \
+    X(ERR_REASON_BUS_FULL_OUTPUTS,  1873)                                 \
+    X(ERR_REASON_RATE_MISMATCH,     1874)                                 \
+    X(ERR_REASON_ALREADY_ON_BUS,    1875)                                 \
+    X(ERR_REASON_NOT_ON_BUS,        1876)                                 \
+    X(ERR_REASON_NAME_NEEDED,       1877)
+
 /* Every plain string, in declaration order. This is what C, the generated
  * enum and tests/test_strings.c walk; the groups above exist only so that
  * res/strings.rc can emit them in rc.exe-sized pieces. */
@@ -700,7 +808,9 @@
     APR_STR_LIST_SESSION(X)                                                    \
     APR_STR_LIST_UI_REC(X)                                                     \
     APR_STR_LIST_UI_DLG(X)                                                     \
-    APR_STR_LIST_UI_TRAY(X)
+    APR_STR_LIST_UI_TRAY(X)                                                    \
+    APR_STR_LIST_ERR_HR(X)                                                     \
+    APR_STR_LIST_ERR_REASON(X)
 
 
 /* X(NAME, base) -- a plural string. Referenced in C as APR_S_NAME, which is

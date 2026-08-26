@@ -11,6 +11,7 @@
 #include "log.h"
 #include "mix.h"
 #include "outpath.h"
+#include "strings.h"
 
 typedef struct BusEdge {
     AprSource       *src;
@@ -210,16 +211,19 @@ AprErr apr_bus_add_source(AprBus *b, AprSource *s, float gain)
     if (apr_source_rate(s) != b->rate) {
         /* Sources are opened at the session rate; a mismatch means the graph
          * was built wrong, and silently resampling it would hide that. */
-        return APR_ERR(APR_E_UNSUPPORTED, L"source %u is %u Hz, bus is %u Hz",
-                       apr_source_id(s), apr_source_rate(s), b->rate);
+        return APR_ERR_SAY(APR_E_UNSUPPORTED, APR_S_ERR_REASON_RATE_MISMATCH,
+                           L"source %u is %u Hz, bus is %u Hz",
+                           apr_source_id(s), apr_source_rate(s), b->rate);
     }
     if (find_edge(b, apr_source_id(s)) != (size_t)-1) {
-        return APR_ERR(APR_E_STATE, L"source %u already feeds bus %u",
-                       apr_source_id(s), b->id);
+        return APR_ERR_SAY(APR_E_STATE, APR_S_ERR_REASON_ALREADY_ON_BUS,
+                           L"source %u already feeds bus %u",
+                           apr_source_id(s), b->id);
     }
     if (b->edge_count >= APR_MAX_SOURCES_PER_BUS) {
-        return APR_ERR(APR_E_STATE, L"bus %u already has %d sources",
-                       b->id, APR_MAX_SOURCES_PER_BUS);
+        return APR_ERR_SAY(APR_E_STATE, APR_S_ERR_REASON_BUS_FULL_SOURCES,
+                           L"bus %u already has %d sources",
+                           b->id, APR_MAX_SOURCES_PER_BUS);
     }
 
     /* Target backlog IS the lookbehind: see the header. */
@@ -245,7 +249,8 @@ AprErr apr_bus_remove_source(AprBus *b, AprSourceId id)
     }
     i = find_edge(b, id);
     if (i == (size_t)-1) {
-        return APR_ERR(APR_E_NOT_FOUND, L"source %u does not feed bus %u", id, b->id);
+        return APR_ERR_SAY(APR_E_NOT_FOUND, APR_S_ERR_REASON_NOT_ON_BUS,
+                           L"source %u does not feed bus %u", id, b->id);
     }
     apr_source_reader_close(b->edges[i].rd);   /* lowers the source's refcount */
     for (; i + 1 < b->edge_count; i++) b->edges[i] = b->edges[i + 1];
@@ -290,7 +295,8 @@ AprErr apr_bus_set_gain(AprBus *b, AprSourceId id, float gain)
     }
     i = find_edge(b, id);
     if (i == (size_t)-1) {
-        return APR_ERR(APR_E_NOT_FOUND, L"source %u does not feed bus %u", id, b->id);
+        return APR_ERR_SAY(APR_E_NOT_FOUND, APR_S_ERR_REASON_NOT_ON_BUS,
+                           L"source %u does not feed bus %u", id, b->id);
     }
     b->edges[i].gain = gain;
     return apr_ok();
@@ -328,8 +334,9 @@ AprErr apr_bus_add_action(AprBus *b, const AprActionVTable *vt,
 
     if (!b || !vt || !cfg) return APR_ERR(APR_E_INVALID_ARG, L"bus, action or config is null");
     if (b->action_count >= APR_MAX_ACTIONS_PER_BUS) {
-        return APR_ERR(APR_E_STATE, L"bus %u already has %d actions",
-                       b->id, APR_MAX_ACTIONS_PER_BUS);
+        return APR_ERR_SAY(APR_E_STATE, APR_S_ERR_REASON_BUS_FULL_OUTPUTS,
+                           L"bus %u already has %d actions",
+                           b->id, APR_MAX_ACTIONS_PER_BUS);
     }
     if (b->running) {
         /* Adding an output halfway through would produce a file that starts in
@@ -342,8 +349,10 @@ AprErr apr_bus_add_action(AprBus *b, const AprActionVTable *vt,
         AprErr        e;
 
         if (!cfg->out_path || !cfg->out_path[0]) {
-            return APR_ERR(APR_E_INVALID_ARG, L"the \"%hs\" output needs a name",
-                           vt->id ? vt->id : "(null)");
+            return APR_ERR_SAY(APR_E_INVALID_ARG,
+                               APR_S_ERR_REASON_NAME_NEEDED,
+                               L"the \"%hs\" output needs a name",
+                               vt->id ? vt->id : "(null)");
         }
         if (wcslen(cfg->out_path) + 1 > APR_OUT_PATH_CCH) {
             return APR_ERR(APR_E_INVALID_ARG,

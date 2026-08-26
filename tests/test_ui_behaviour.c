@@ -61,6 +61,7 @@
 #include "action.h"
 #include "bus.h"
 #include "capture.h"
+#include "errmsg.h"
 #include "graph.h"
 #include "outpath.h"
 #include "strings.h"
@@ -2180,9 +2181,19 @@ TEST(an_edit_the_model_refuses_is_announced_with_the_reason_the_model_gave)
     {
         const wchar_t *args[1];
         wchar_t why[512];
-        apr_err_format(&e, why, 512);
+        /* apr_err_reason, NOT apr_err_format: the frame is a catalog sentence
+         * and so is the reason it carries, or the announcement is half
+         * translated the day Arabic ships (BUGS.md M11). This expectation used
+         * to be built from apr_err_format and therefore asserted the bug --
+         * "bus 1 already has 32 sources: APR_E_STATE at bus.c(226) in
+         * apr_bus_add_source", read out loud, to a blind user. */
+        apr_err_reason(&e, why, 512);
         args[0] = why;
         apr_str_format(APR_S_UI_ANN_EDIT_FAILED, want, 512, args, 1);
+
+        /* And the reason really is the catalog's, not err.c's. */
+        ASSERT_NULL(wcsstr(want, L"bus.c"));
+        ASSERT_NULL(wcsstr(want, L"APR_E_"));
     }
 
     si = node_index(&f.h, APR_NODE_SOURCE, extra, 0);
@@ -2200,6 +2211,60 @@ TEST(an_edit_the_model_refuses_is_announced_with_the_reason_the_model_gave)
     printf("      said:   \"%ls\"\n", said(&f.h, got, 512));
     printf("      wanted: \"%ls\"\n", want);
     ASSERT_WSTR_EQ(want, got);
+
+    fix_down(&f);
+}
+
+TEST(a_refusal_from_the_controller_is_a_catalog_sentence_end_to_end)
+{
+    /* THE OTHER DISPLAY SITE. The canvas has its own frame
+     * (UI_ANN_EDIT_FAILED); the controller has report_failure(), which is what
+     * every dialog route and every session route lands on, and it fed the same
+     * English prose into UI_DLG_ADD_FAILED. Same bug, second door.
+     *
+     * The graph holds APR_MAX_SOURCES; the one after that is refused, and
+     * graph.c names the sentence for it (APR_ERR_SAY) because "wrong state" is
+     * true of a full graph and of six other things. */
+    Fix f;
+    AprCaptureConfig cfg;
+    wchar_t got[512], want[512], reason[512];
+    const wchar_t *args[1];
+    size_t i;
+    AprErr e = apr_ok();
+
+    if (!fix_up(&f, 0, 0, 0, 0)) { fix_down(&f); return; }
+
+    memset(&cfg, 0, sizeof cfg);
+    cfg.kind = APR_SRC_FAKE;
+    cfg.fake.tone_hz   = 440;
+    cfg.fake.amplitude = 0.25f;
+
+    for (i = 0; i < APR_MAX_SOURCES + 1; ++i) {
+        wchar_t name[APR_NAME_CCH];
+        _snwprintf_s(name, APR_NAME_CCH, _TRUNCATE, L"Source %d", (int)i);
+        e = apr_controller_add_source(f.h.ctl, name, &cfg);
+        if (apr_failed(&e)) break;
+    }
+    if (!apr_failed(&e)) {
+        printf("      SKIPPED: this build accepts more than %d sources\n",
+               (int)APR_MAX_SOURCES);
+        fix_down(&f);
+        return;
+    }
+
+    /* The sentence the user got, and the sentence the catalog says they
+     * should have got. Every character of both comes out of the .rc. */
+    apr_str_probe(MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US),
+                  APR_S_ERR_REASON_TOO_MANY_SOURCES, reason, 512);
+    args[0] = reason;
+    apr_str_format(APR_S_UI_DLG_ADD_FAILED, want, 512, args, 1);
+
+    printf("      said:   \"%ls\"\n", said(&f.h, got, 512));
+    ASSERT_WSTR_EQ(want, got);
+
+    /* Not the raise site, not the internal count, not the enum name. */
+    ASSERT_NULL(wcsstr(got, L"graph.c"));
+    ASSERT_NULL(wcsstr(got, L"APR_E_"));
 
     fix_down(&f);
 }

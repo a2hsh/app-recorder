@@ -350,6 +350,11 @@ static AprErr proc_open(AprCapture *c, const AprCaptureConfig *cfg, RingBuf *rb)
     apr_wasapi_stream_init(&p->s, rb, &p->st, cfg->sample_rate, cfg->channels,
                            0 /* not device_mode: no drift correction here */,
                            proc_tick, p);
+    /* AFTER stream_init, which zeroes the stream. A non-zero resume anchor
+     * means this tap is replacing one whose target exited: its first frame
+     * belongs at the absolute index that anchor implies, not at the ring's
+     * current write position (capture.h). */
+    apr_capresume_init(&p->s.resume, cfg);
 
     e = apr_wasapi_thread_start(&p->s);
     if (apr_failed(&e)) return e;

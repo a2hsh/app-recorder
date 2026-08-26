@@ -121,6 +121,13 @@ typedef struct AprWasapiStream {
     AprWasapiTick tick;
     void         *tick_user;
 
+    /* Rejoining a timeline that was already running -- this capture replaced
+     * one that died on a source that has been recording for a while. Set by
+     * the implementation's open() with apr_capresume_init(&s->resume, cfg),
+     * AFTER apr_wasapi_stream_init (which zeroes this struct); the pump acts
+     * on it once, immediately before the first frame it writes. */
+    AprCapResume resume;
+
     volatile LONG running;        /* 1 between start and stop */
     int      pump_stuck;          /* the pump would not join; do not free under it */
     uint64_t frames;              /* pump-thread private copy of the counter */

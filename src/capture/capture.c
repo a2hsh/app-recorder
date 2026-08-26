@@ -17,6 +17,7 @@
 #include <stdlib.h>
 
 #include "capture_internal.h"
+#include "clock.h"
 #include "log.h"
 #include "ringbuf.h"
 
@@ -70,6 +71,52 @@ void apr_capstat_read(const AprCapStatus *s, AprCaptureStatus *out)
         MemoryBarrier();
         if (!(a & 1) && a == s->err_seq) return;
     }
+}
+
+/* ---------------------------------------------------------------------------
+ * Rejoining a running timeline. See capture_internal.h.
+ * ------------------------------------------------------------------------- */
+
+void apr_capresume_init(AprCapResume *r, const AprCaptureConfig *cfg)
+{
+    ZeroMemory(r, sizeof(*r));
+    if (!cfg) return;
+    r->anchor_ticks = cfg->resume_anchor_ticks;
+    r->sample_rate  = cfg->sample_rate;
+    r->done         = (cfg->resume_anchor_ticks == 0);
+}
+
+uint64_t apr_capresume_fill(AprCapResume *r, RingBuf *rb,
+                            uint64_t first_frame_ticks)
+{
+    uint64_t want, have, pad;
+
+    if (!r || r->done || !rb) return 0;
+    r->done = 1;                       /* once, whatever the answer is */
+
+    if (first_frame_ticks <= r->anchor_ticks) return 0;
+
+    /* Where this frame belongs, measured from the timeline's OWN anchor and
+     * not from anything this capture has done. Floor, exactly like every other
+     * tick-to-frame conversion in the system (clock.h). */
+    want = apr_mul_div_u64(first_frame_ticks - r->anchor_ticks,
+                           r->sample_rate, apr_qpc_freq(), NULL);
+    have = rb_write_pos(rb);
+    if (want <= have) return 0;        /* somebody already padded this far */
+
+    pad = want - have;
+
+    /* rb_write_silence is O(ring), not O(pad): a write longer than the ring
+     * keeps the newest capacity frames and advances the cursor by the full
+     * count (ringbuf.h), which is precisely what a twenty-minute hole needs.
+     * Nothing here loops over the gap. */
+    rb_write_silence(rb, (size_t)pad);
+    r->padded = pad;
+
+    APR_DEBUG(L"rejoined a running timeline: %llu frames of silence before "
+              L"the first recovered frame, which lands at %llu",
+              (unsigned long long)pad, (unsigned long long)want);
+    return pad;
 }
 
 /* ---------------------------------------------------------------------------

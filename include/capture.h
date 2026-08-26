@@ -62,6 +62,30 @@ typedef struct AprCaptureConfig {
     uint32_t      sample_rate;   /* session rate; process taps cannot negotiate */
     uint16_t      channels;
 
+    /* ===================================================================
+     * REJOINING A TIMELINE THAT IS ALREADY RUNNING.
+     *
+     * 0 -- the normal case: this capture starts a timeline of its own and
+     * its first frame is ring index 0.
+     *
+     * Non-zero -- this capture is REPLACING one that died on a source that
+     * has been recording for a while (source.h, apr_source_reattach). The
+     * value is the QPC tick of that source's ORIGINAL frame 0, and it means:
+     * your first frame does not belong at the ring's current write position,
+     * it belongs at the absolute frame index this anchor implies.
+     *
+     * The implementation pads the ring with exactly that many silent frames
+     * IMMEDIATELY BEFORE ITS FIRST WRITE, on its own pump thread, at the
+     * instant it learns the QPC of its own first frame -- which is the only
+     * moment at which the answer is exact. Padding earlier, from the thread
+     * that reattached, would leave the whole recovered stream one packet
+     * early for ever, and a fixed offset on one source is a permanent desync
+     * of every bus that source feeds, not a dropout. Design 3.1's rule for a
+     * loss is alignment over content, and this is that rule applied to the
+     * largest loss there is: the source went away entirely.
+     * =================================================================== */
+    uint64_t      resume_anchor_ticks;
+
     union {
         struct {
             uint32_t pid;
@@ -103,11 +127,29 @@ typedef struct AprCaptureConfig {
              * the confusing behaviour rather than a tidied version of it,
              * because the confusion is the thing under test.
              *
-             * Death is one-way. mute_at_frame == unmute_at_frame is refused
-             * rather than silently resolved. */
+             * DEATH IS ONE-WAY UNLESS A REVIVAL IS SCHEDULED, and that is the
+             * half this file used to be missing. A target that exits and is
+             * started again is the ordinary case for a recording that runs for
+             * hours -- the author closes Teams and reopens it -- and with no
+             * way to express it, every test above this file agreed that a
+             * source which dies stays dead, which is exactly the behaviour
+             * apprecorder is trying to stop having. revive_at_frame is the
+             * index of the first frame that is alive again: the source stops
+             * emitting silence, resumes its tone AT THE PHASE THE ABSOLUTE
+             * FRAME INDEX IMPLIES (never at "the beginning again"), and clears
+             * its error. It is the mirror of unmute_at_frame in every respect.
+             *
+             * It is a C-level knob only, like apr_capture_fake_wedge(): no
+             * session key and no command-line spelling, because nothing a user
+             * can type should be able to script a resurrection.
+             *
+             * mute_at_frame == unmute_at_frame and die_at_frame ==
+             * revive_at_frame are both refused rather than silently
+             * resolved. */
             uint64_t mute_at_frame;
             uint64_t unmute_at_frame;
             uint64_t die_at_frame;
+            uint64_t revive_at_frame;
             int      start_muted;
             int      start_dead;
         } fake;

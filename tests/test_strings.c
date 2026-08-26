@@ -19,6 +19,7 @@
  */
 #include "test_runner.h"
 
+#include "errmsg.h"
 #include "strings.h"
 
 #define EN MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US)
@@ -154,6 +155,106 @@ TEST(every_id_resolves_in_every_complete_language)
     ASSERT_EQ_INT(0, missing);
 }
 
+/* Nonzero when `id` is a plain (non-plural) entry declared in the catalog. */
+static int is_declared(AprStrId id)
+{
+    int ci;
+    for (ci = 0; ci < apr_str_catalog_count(); ci++) {
+        const AprStrEntry *e = apr_str_catalog_at(ci);
+        if (!e->is_plural && e->id == id) return 1;
+    }
+    return 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * The same completeness question, asked of FAILURES
+ *
+ * The check above proves every declared id has text. This one proves the
+ * other direction for the one place the catalog can be bypassed: an error.
+ * Every AprErr that reaches a user has to name a DECLARED id, or the sentence
+ * a screen reader reads falls back to a literal in C -- which is BUGS.md M11,
+ * and which no amount of .rc completeness would catch.
+ * ------------------------------------------------------------------------- */
+
+TEST(every_error_kind_names_a_declared_catalog_sentence)
+{
+    int      k, bad = 0;
+    wchar_t  buf[BUF];
+
+    apr_str_set_language(EN);
+
+    /* Every value of the enum, plus one past it: an AprErrKind that nobody
+     * has written a sentence for must still resolve, or a future kind ships
+     * with nothing to say. */
+    for (k = APR_OK; k <= (int)APR_E_BUSY + 1; k++) {
+        AprErr   e;
+        AprStrId id;
+
+        memset(&e, 0, sizeof e);
+        e.kind = (AprErrKind)k;
+        e.line = __LINE__;
+        e.file = __FILE__;
+        e.func = __func__;
+
+        id = apr_err_reason_id(&e);
+
+        if (k == APR_OK) {
+            /* Success is not a reason and must never render as one. */
+            if (id != APR_S__NONE) {
+                printf("      APR_OK resolved to id %d\n", (int)id);
+                bad++;
+            }
+            if (apr_err_reason(&e, buf, BUF) != 0) bad++;
+            continue;
+        }
+
+        if (!is_declared(id)) {
+            printf("      kind %ls resolves to id %d, which is not "
+                   "declared in the catalog\n",
+                   apr_err_kind_name((AprErrKind)k), (int)id);
+            bad++;
+            continue;
+        }
+        if (apr_str_probe(EN, id, buf, BUF) < 1) {
+            printf("      kind %ls resolves to id %d, which has no English "
+                   "text\n", apr_err_kind_name((AprErrKind)k), (int)id);
+            bad++;
+        }
+    }
+    ASSERT_EQ_INT(0, bad);
+}
+
+TEST(every_hand_tabled_wasapi_code_names_a_declared_catalog_sentence)
+{
+    int i, bad = 0;
+    wchar_t buf[BUF];
+
+    apr_str_set_language(EN);
+
+    /* Windows ships no message resource for facility 0x889, so these are the
+     * only failure sentences apprecorder writes itself -- and therefore the
+     * only ones that can be left behind in English. A row added to err.c's
+     * table without a catalog id fails HERE, at build time, rather than in an
+     * Arabic UI. */
+    ASSERT_GT_INT(30, apr_err_hr_table_count());
+
+    for (i = 0; i < apr_err_hr_table_count(); i++) {
+        const AprErrHrEntry *row = apr_err_hr_table_at(i);
+        ASSERT_NOT_NULL(row);
+        if (!is_declared(row->reason)) {
+            printf("      %ls has no catalog id\n", row->name);
+            bad++;
+            continue;
+        }
+        if (apr_str_probe(EN, row->reason, buf, BUF) < 1) {
+            printf("      %ls resolves to id %d, which has no English text\n",
+                   row->name, (int)row->reason);
+            bad++;
+        }
+    }
+    ASSERT_EQ_INT(0, bad);
+}
+
 TEST(a_partial_language_declares_exactly_what_it_has)
 {
     /* Arabic is deliberately incomplete: the mechanism is wired, the copy is
@@ -175,11 +276,20 @@ TEST(a_partial_language_declares_exactly_what_it_has)
     printf("      ar-SA: %d translated, %d awaiting translation\n",
            present, absent);
 
-    /* APP_NAME plus all six forms of N_SOURCES. */
-    ASSERT_EQ_INT(7, present);
+    /* APP_NAME, all six forms of N_SOURCES, and one error reason.
+     *
+     * The third marker is ERR_HR_E_DEVICE_INVALIDATED, and it earns its place
+     * the same way the other two do: it is the only way to prove that an
+     * error raised on a capture pump, travelling as an identity, comes out of
+     * the catalog block for the language actually in effect. Without it the
+     * whole M11 mechanism is untestable in a non-English locale, because an
+     * untranslated Arabic entry falls back to English and passes. */
+    ASSERT_EQ_INT(8, present);
     ASSERT_GT_INT(0, absent);
 
     ASSERT_GE_INT(1, apr_str_probe(AR, APR_S_APP_NAME, buf, BUF));
+    ASSERT_GE_INT(1, apr_str_probe(AR, APR_S_ERR_HR_E_DEVICE_INVALIDATED,
+                                   buf, BUF));
     ASSERT_EQ_INT(-1, apr_str_probe(AR, APR_S_APP_TAGLINE, buf, BUF));
     ASSERT_EQ_INT(-1, apr_str_probe(AR, APR_S_ERR_FILE_OPEN, buf, BUF));
 }
@@ -592,7 +702,7 @@ TEST(an_out_of_range_id_is_safe)
     s = apr_str((AprStrId)(APR_STR_ID_MAX - 1));
     ASSERT_NOT_NULL(s);
     ASSERT_GT_INT(0, (int)wcslen(s));
-    ASSERT_WSTR_EQ(L"!!apr_str 1799 missing!!", s);
+    ASSERT_WSTR_EQ(L"!!apr_str 1999 missing!!", s);
 
     /* And the same through the formatting and probing entry points. */
     ASSERT_EQ_INT(-1, apr_str_probe(EN, (AprStrId)0x7fffffff, buf, BUF));

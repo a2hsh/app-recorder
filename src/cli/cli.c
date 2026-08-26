@@ -56,6 +56,7 @@
 #include "action.h"
 #include "clock.h"
 #include "discover.h"
+#include "errmsg.h"
 #include "graph.h"
 #include "log.h"
 #include "outpath.h"
@@ -170,9 +171,22 @@ static const wchar_t *fixed(NumBuf *b, int64_t scaled, int decimals)
     return b->s;
 }
 
+/* THE REASON A USER HEARS, NOT THE ONE A DEVELOPER READS.
+ *
+ * Every call below feeds a %2!s! in a catalog sentence -- ERR_FILE_OPEN,
+ * ERR_CAPTURE_START, ERR_OUTPUT_NOT_WRITABLE and the rest -- so whatever this
+ * returns is read out in whatever language the user chose. apr_err_format()
+ * cannot be that: it is English prose plus the raise site (BUGS.md M11), and
+ * "Could not open take.wav for writing: opening take.wav: Access is denied.
+ * (Win32 5) at outpath.c(512) in apr_out_open_new" is not a sentence anyone
+ * should have read to them.
+ *
+ * apr_err_reason() resolves from the catalog instead. The diagnostic half is
+ * not lost -- it goes to the log, which is where it was always for. */
 static const wchar_t *errtext(const AprErr *e, wchar_t *buf, size_t cch)
 {
-    return apr_err_format(e, buf, cch);
+    apr_err_reason(e, buf, cch);
+    return buf;
 }
 
 /* ---------------------------------------------------------------------------

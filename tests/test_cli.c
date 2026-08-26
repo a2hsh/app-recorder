@@ -531,6 +531,36 @@ TEST(an_output_path_that_cannot_be_written_is_its_own_exit_code)
     ASSERT_FALSE(file_exists(path));
 }
 
+TEST(the_reason_a_refusal_gives_is_the_catalogs_and_not_a_log_line)
+{
+    /* ERR_OUTPUT_NOT_WRITABLE is "Cannot write %1!s!: %2!s!" -- a catalog
+     * sentence whose second half used to be apr_err_format(), which is
+     * English prose plus the raise site (BUGS.md M11). The frame would have
+     * been Arabic and the reason English, and the reason would have named a
+     * file and a line number in apprecorder's own source.
+     *
+     * Asserted as an ABSENCE rather than against one expected string, because
+     * which Win32 code the file system produces for a missing directory is
+     * the file system's business; that none of apprecorder's internals are
+     * read out loud is ours. */
+    Cap c;
+    wchar_t dir[MAX_PATH], path[MAX_PATH];
+    DWORD   n = GetTempPathW(MAX_PATH, dir);
+    if (n == 0 || n >= MAX_PATH) wcscpy_s(dir, MAX_PATH, L".\\");
+    _snwprintf_s(path, MAX_PATH, _TRUNCATE,
+                 L"%lsapr_cli_no_such_directory_%lu\\y.wav", dir,
+                 GetCurrentProcessId());
+
+    ASSERT_EQ_INT(APR_CLI_OUTPUT, RUN(&c, L"--fake", L"440", L"--out", path,
+                                      L"--dry-run"));
+    printf("      said: %ls", c.err[0] ? c.err : c.out);
+
+    ASSERT_FALSE(said(&c, L".c("));       /* a raise site   */
+    ASSERT_FALSE(said(&c, L"APR_E_"));    /* a kind's name  */
+    ASSERT_FALSE(said(&c, L"outpath"));   /* a source file  */
+    ASSERT_FALSE(said(&c, L"Win32 "));    /* err.c's suffix */
+}
+
 /* ===========================================================================
  * --dry-run
  * ========================================================================= */

@@ -252,6 +252,16 @@ static int drain(AprWasapiStream *s)
         if (apr_clock_anchored(&s->clock) && s->st->anchor_ticks == 0)
             s->st->anchor_ticks = (LONG64)s->clock.anchor_ticks;
 
+        /* REJOINING A RUNNING TIMELINE, and this is the only correct place for
+         * it: before a single frame of this capture reaches the ring, and with
+         * the QPC of that frame -- s->clock's anchor, which is this packet's
+         * FIRST frame and not its arrival -- already in hand. A no-op for every
+         * capture that was not reattached (capture.h). */
+        if (!s->resume.done && apr_clock_anchored(&s->clock)) {
+            if (apr_capresume_fill(&s->resume, s->rb, s->clock.anchor_ticks))
+                s->st->frames_written = (LONG64)(s->frames + s->resume.padded);
+        }
+
         if (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) {
             s->discont++;
             s->st->discontinuities = (LONG64)s->discont;
@@ -280,7 +290,7 @@ static int drain(AprWasapiStream *s)
             if (fill > cap) fill = cap;
             rb_write_silence(s->rb, (size_t)fill);
             s->frames += fill;
-            s->st->frames_written = (LONG64)s->frames;
+            s->st->frames_written = (LONG64)(s->frames + s->resume.padded);
             APR_WARN(L"capture gap: filled %llu frames of silence",
                      (unsigned long long)fill);
         }
@@ -303,7 +313,7 @@ static int drain(AprWasapiStream *s)
                 rb_write_silence(s->rb, frames);
             }
             s->frames += frames;
-            s->st->frames_written = (LONG64)s->frames;
+            s->st->frames_written = (LONG64)(s->frames + s->resume.padded);
         }
 
         hr = IAudioCaptureClient_ReleaseBuffer(s->cc, frames);

@@ -9,6 +9,7 @@
 
 #include "log.h"
 #include "mix.h"
+#include "strings.h"
 
 struct AprGraph {
     uint32_t rate;
@@ -121,7 +122,12 @@ AprErr apr_graph_add_source(AprGraph *g, const wchar_t *name,
     e = refuse_while_running(g, L"a source cannot be added");
     if (apr_failed(&e)) return e;
     if (g->source_count >= APR_MAX_SOURCES) {
-        return APR_ERR(APR_E_STATE, L"graph already holds %d sources", APR_MAX_SOURCES);
+        /* A LIMIT IS ONE OF THE FEW REFUSALS A USER CAN ACT ON, so it names
+         * its own sentence rather than being flattened into "wrong state"
+         * at the point of display (err.h, APR_ERR_SAY). The format string
+         * stays what it was: diagnostic, English, for the log. */
+        return APR_ERR_SAY(APR_E_STATE, APR_S_ERR_REASON_TOO_MANY_SOURCES,
+                           L"graph already holds %d sources", APR_MAX_SOURCES);
     }
 
     /* Format is a session decision, not a per-source one: a process-loopback
@@ -210,7 +216,8 @@ AprErr apr_graph_add_bus(AprGraph *g, const wchar_t *name, AprBusId *out_id)
     e = refuse_while_running(g, L"a bus cannot be added");
     if (apr_failed(&e)) return e;
     if (g->bus_count >= APR_MAX_BUSES) {
-        return APR_ERR(APR_E_STATE, L"graph already holds %d buses", APR_MAX_BUSES);
+        return APR_ERR_SAY(APR_E_STATE, APR_S_ERR_REASON_TOO_MANY_BUSES,
+                           L"graph already holds %d buses", APR_MAX_BUSES);
     }
 
     e = apr_bus_create(g->next_bus_id, name, g->rate, g->channels, &b);

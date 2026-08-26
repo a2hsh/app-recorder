@@ -18,6 +18,26 @@
  *   without leaving the real-time path. (Emitting it to a log still goes
  *   through log.h, which has its own rules.)
  *
+ * ENGLISH IN HERE, TRANSLATED AT THE POINT OF DISPLAY -- READ THIS BEFORE
+ * WRITING A MESSAGE
+ *
+ *   `context` is DIAGNOSTIC. It is written at the raise site, in English, it
+ *   names functions, thresholds and internal ids, and it exists for the log.
+ *   It MUST NOT reach a user: AGENTS.md rule 6 puts text a screen reader
+ *   reads in the catalog, and a raise site on a capture pump cannot put it
+ *   there -- apr_str() locks and may allocate.
+ *
+ *   So an error travels as an IDENTITY and becomes words only where it is
+ *   displayed. The identity is (`kind`, `code`) plus, where those are too
+ *   coarse to answer the question the user is actually asking, `reason`: the
+ *   catalog id of the sentence a person should hear. Setting it is one
+ *   integer store -- still allocation-free, still lock-free, still safe on an
+ *   audio thread.
+ *
+ *   include/errmsg.h turns that identity into the user's language, and
+ *   nothing else may. apr_err_format() below stays exactly what it is:
+ *   English, allocation-free, callable anywhere, and FOR THE LOG ONLY.
+ *
  * CONVENTION
  *
  *   Functions that can fail return AprErr by value and take out-parameters for
@@ -61,10 +81,20 @@ typedef enum AprErrKind {
 typedef struct AprErr {
     AprErrKind  kind;
     long        code;                        /* HRESULT / DWORD / errno, else 0 */
+
+    /* The catalog id of the sentence a USER should hear for this failure, or
+     * 0 when (kind, code) already carries everything a user can act on.
+     *
+     * Typed `int` and not `AprStrId` deliberately: strings.h includes THIS
+     * header, so the dependency cannot run both ways. errmsg.h has the typed
+     * accessor and is the only thing that should read this field. */
+    int         reason;
+
     const char *func;                        /* static; __func__ at the raise site */
     const char *file;                        /* static; __FILE__ at the raise site */
     int         line;
-    wchar_t     context[APR_ERR_CONTEXT_CCH];/* human "what were we doing" */
+    wchar_t     context[APR_ERR_CONTEXT_CCH];/* human "what were we doing";
+                                              * DIAGNOSTIC, English, log only */
 } AprErr;
 
 /* ---------------------------------------------------------------------------
@@ -79,6 +109,13 @@ typedef struct AprErr {
 AprErr apr_err_make(AprErrKind kind, long code,
                     const char *func, const char *file, int line,
                     _In_z_ _Printf_format_string_ const wchar_t *fmt, ...);
+
+/* As apr_err_make, and additionally names the catalog sentence a user should
+ * hear (`reason`, an AprStrId value; 0 for none). Identical guarantees: never
+ * fails, never allocates, takes no lock, safe on a capture thread. */
+AprErr apr_err_make_r(AprErrKind kind, long code, int reason,
+                      const char *func, const char *file, int line,
+                      _In_z_ _Printf_format_string_ const wchar_t *fmt, ...);
 
 /* A success value. Thread-safe, allocation-free. */
 AprErr apr_ok(void);
@@ -106,6 +143,34 @@ int apr_failed(const AprErr *e);
 /* Raise from a C runtime errno. */
 #define APR_ERR_ERRNO(en, ...) \
     apr_err_make(APR_E_ERRNO, (long)(en), __func__, __FILE__, __LINE__, __VA_ARGS__)
+
+/* ---------------------------------------------------------------------------
+ * ...and the same raises, naming the sentence a USER hears.
+ *
+ * `reason` is an APR_S_* id from strings.h. Reach for these ONLY where a user
+ * is the audience AND (kind, code) is too coarse to answer the question they
+ * are asking. "That bus already holds as many sources as it can mix" is worth
+ * saying; "graph.c was handed a null pointer" is not, and its kind already
+ * covers it. The format string stays English diagnostic text for the log
+ * either way -- these macros add a sentence, they do not translate one.
+ * ------------------------------------------------------------------------- */
+
+#define APR_ERR_SAY(kind, reason, ...) \
+    apr_err_make_r((kind), 0, (int)(reason), __func__, __FILE__, __LINE__, \
+                   __VA_ARGS__)
+
+#define APR_ERR_HR_SAY(hr, reason, ...) \
+    apr_err_make_r(APR_E_HRESULT, (long)(hr), (int)(reason), \
+                   __func__, __FILE__, __LINE__, __VA_ARGS__)
+
+#define APR_ERR_WIN32_SAY(dw, reason, ...) \
+    apr_err_make_r(APR_E_WIN32, (long)(dw), (int)(reason), \
+                   __func__, __FILE__, __LINE__, __VA_ARGS__)
+
+/* Snapshot GetLastError() first, exactly as APR_ERR_LAST does. */
+#define APR_ERR_LAST_SAY(reason, ...) \
+    apr_err_make_r(APR_E_WIN32, (long)GetLastError(), (int)(reason), \
+                   __func__, __FILE__, __LINE__, __VA_ARGS__)
 
 /* ---------------------------------------------------------------------------
  * Rendering
@@ -137,7 +202,12 @@ const wchar_t *apr_err_kind_name(AprErrKind kind);
  * decoded system message, the symbolic name and numeric code, and the raise
  * site. Returns `buf`, always NUL-terminated, truncated if short. A success
  * value renders as "no error". `e` and `buf` must not be NULL.
- * Allocation-free and thread-safe. */
+ * Allocation-free and thread-safe.
+ *
+ * THIS IS THE LOG'S RENDERING AND IT IS ENGLISH. apr_log_err() calls it on
+ * whatever thread raised the error, capture pumps included, which is exactly
+ * why it may not touch the string catalog. Never show its output to a user;
+ * apr_err_reason() in errmsg.h is that path. */
 const wchar_t *apr_err_format(const AprErr *e, wchar_t *buf, size_t cch);
 
 #endif /* APPRECORDER_ERR_H */

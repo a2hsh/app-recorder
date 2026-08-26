@@ -19,6 +19,12 @@ was deleted; one finding (M5) is marked confirmed against a real file rather
 than taken on the sweep's word, and one fix (M13) names a residual that belongs
 to a file this pass does not own.
 
+**2026-08-26, err.c / i18n pass:** M11 is fixed as a mechanism — an `AprErr`
+now travels as an identity and becomes words only at the point of display, so
+no failure sentence can be half translated. The entry says what shape was
+chosen, where the diagnostic-versus-user line was drawn, what was decided about
+`FormatMessageW`, and which part of the entry's own framing was generous.
+
 **2026-08-26, core / capture pass:** the root pattern below is fixed as a
 mechanism, and C1, C4 (model half), M3, M6, m12, m26, m27 and m28 are fixed on
 top of it — each with a test that was watched go red with the fix reverted, and
@@ -673,7 +679,7 @@ Pinned by `hiding_the_window_is_refused_when_there_is_no_icon_to_hide_into`,
 which is free: `APPRECORDER_NO_TRAY` puts every test permanently in exactly
 that state.
 
-### M11 — Every error "reason" is untranslatable English prose
+### M11 — Every error "reason" is untranslatable English prose — **FIXED 2026-08-26**
 `src/platform/err.c` (table ~:33, `apr_err_format` :264) → `controller.c:309`,
 `1077` and the CLI's `%2` inserts
 
@@ -683,6 +689,125 @@ English prose wrapped in a translated frame.
 **Failure:** when Arabic ships, **every failure sentence is half Arabic, half
 English.** This is a mechanism gap, and the design says retrofitting i18n is
 exactly the expensive kind. Cheaper now than after forty more accrete.
+
+**FIXED (err.c pass, 2026-08-26).**
+
+**The shape.** An `AprErr` is constructed on audio and capture threads, where
+`apr_str()` is forbidden, so it cannot carry resolved text — **it travels as an
+identity and becomes words only at the point of display.** Most of that
+identity was already there: `(kind, code)`. What was missing was (a) a mapping
+from identity to catalog id, and (b) somewhere for a raise site to say which
+sentence it means when the kind is too coarse. So `AprErr` gained exactly one
+field, `int reason` — an `AprStrId`, typed `int` because `strings.h` includes
+`err.h` and the dependency cannot run both ways — set by `APR_ERR_SAY` and its
+three siblings. One integer store: still allocation-free, still lock-free,
+still legal on a capture pump.
+
+`include/errmsg.h` declares the display half (`apr_err_reason_id`,
+`apr_err_reason`); the implementation stays in `platform/err.c`, which rule 3
+names the sole owner of code-to-message. `apr_err_format()` is **unchanged and
+stays English** — `apr_log_err()` calls it on whatever thread raised the error,
+so it may never touch the string catalog. Two renderings, and the header says
+which is which.
+
+Resolution order: the raise site's own id, then a hand-tabled WASAPI code, then
+`FormatMessageW`, then the kind's sentence. The last one is a floor — every
+failure resolves to a declared catalog id, so nothing can fall through to a
+literal in C.
+
+**Where the diagnostic/user line was drawn.** `AprErr.context` — the
+`L"m4a: encoder thread did not finish closing \"%s\" within %d s"` literals —
+is **diagnostic and never reaches a user at all now.** It names functions,
+thresholds and internal ids; it is formatted at raise time, so a translator
+could not reach it even in principle. It goes to the log, which is what it was
+always for. What the user loses is "which of our operations failed", and they
+do not lose it: **the frame already names the operation**, in the catalog
+(`ERR_FILE_OPEN`, `ERR_CAPTURE_START`, `UI_ANN_ACTION_FAILED`,
+`UI_DLG_ADD_FAILED`). The frame is the operation; the reason is why.
+
+So a raise site gets a `reason` id **only** where the raising code knows
+something `(kind, code)` cannot express *and* a user can act on it. In practice
+that is a small set, all in `core/`: the four limits (graph sources, graph
+buses, bus sources, bus outputs), the rate mismatch, on/not-on-bus, and "the
+output has no name". Everything in `capture/` and in the actions already
+carries an HRESULT or a Win32 code and needs nothing. Every other
+`APR_ERR(...)` in the tree was left exactly as it was — a user never sees it,
+and giving it a sentence would be forty catalog entries nobody reads.
+
+**On `FormatMessageW`: kept, with one change.** It genuinely is localized by
+Windows, it covers thousands of ordinary HRESULT and Win32 codes — access
+denied, disk full, sharing violation, the ones a user actually hits — and that
+space is open-ended, so tabling it is not something anyone finishes. The change
+is the language: `apr_hresult_message()` asks for `LANG_NEUTRAL`, which is the
+*thread's* language, i.e. the machine's. A user running `--lang ar-SA` on an
+English Windows would have been handed English prose inside an Arabic sentence
+— M11 arriving through a different door. `apr_err_reason()` asks for
+`apr_str_language()` instead, and when that language has no text (MUI not
+installed, or the code is not in the system table) it does **not** silently
+accept another language's: it falls back to a catalog sentence that keeps the
+number. The diagnostic path keeps `LANG_NEUTRAL`, which is right for a log.
+
+**The ~41 `AUDCLNT_*` codes: all of them got ids, and this is the one place
+the entry's framing was arguably generous.** They are tabled precisely because
+Windows ships no message resource for facility 0x889, so they are the only
+failure sentences apprecorder writes itself — which makes them the only ones
+that *can* be left behind in English, so completeness was the cheap answer.
+The cost is real and worth naming: the table now carries two spellings of each
+sentence (English for the log, an id for the user), because the log's copy has
+to be reachable without touching the string layer. That duplication is
+**pinned, not trusted** — `the_log_and_the_user_are_told_the_same_thing_in_english`
+compares all 41 pairs character for character, so editing one and forgetting
+the other fails the build. Several of those 41 (`E_OUT_OF_ORDER`,
+`E_INCORRECT_BUFFER_SIZE`, `E_EVENTHANDLE_NOT_SET`) describe defects in
+apprecorder rather than anything a user can act on, and a translator will find
+them puzzling; they were still given ids rather than a judgement call about
+reachability that would be wrong the first time one of them escaped.
+
+**Converted:** `cli.c`'s `errtext()` (all fifteen call sites, one function),
+`controller.c`'s `report_failure()` (nine call sites) and its
+`APR_RUN_EV_ACTION_FAILED` arm, and `canvas.c`'s `say_edit_failed()`. That is
+every place an `AprErr` reaches a user; `log.c` is the only remaining caller of
+`apr_err_format()` in `src/`.
+
+**Catalog:** `APR_STR_LIST_ERR_HR` (41) and `APR_STR_LIST_ERR_REASON` (21).
+`APR_STR_ID_MAX` moved 1800 → 2000 to make room, which moved the undeclared-id
+canary in `test_strings.c` with it.
+
+**Tests, each watched go red with the fix reverted:**
+
+- `a_failure_a_user_hears_is_the_catalogs_and_not_err_cs` (test_err.c) — the
+  case the entry is about. A WASAPI failure raised with an English diagnostic
+  context reaches an Arabic reader as the **Arabic** catalog entry, asserted by
+  exact code points, with err.c's prose, the context, the raise site and the
+  symbol all absent. Red when `apr_err_reason` is made to return the table's
+  English text.
+- `the_reason_a_refusal_gives_is_the_catalogs_and_not_a_log_line` (test_cli.c),
+  `an_edit_the_model_refuses_is_announced_with_the_reason_the_model_gave` and
+  `a_refusal_from_the_controller_is_a_catalog_sentence_end_to_end`
+  (test_ui_behaviour.c) — the three display sites. All three red with the sites
+  put back on `apr_err_format()`.
+- `every_error_kind_names_a_declared_catalog_sentence` and
+  `every_hand_tabled_wasapi_code_names_a_declared_catalog_sentence`
+  (test_strings.c) — the completeness gate, extended. The existing check proves
+  every declared id has text; these prove the other direction for the one place
+  the catalog can be bypassed. A kind or a table row with no id fails the build.
+- `the_log_and_the_user_are_told_the_same_thing_in_english` (test_err.c) — the
+  anti-drift pin described above.
+
+**One test asserted the bug and was changed.**
+`an_edit_the_model_refuses_is_announced_with_the_reason_the_model_gave` built
+its expectation from `apr_err_format()`, so it was pinning *"That change was
+refused: bus 1 already has 32 sources: APR_E_STATE at bus.c(226) in
+apr_bus_add_source"* — read out loud, to a blind user — as correct. It now
+builds it from `apr_err_reason()` and additionally asserts the sentence carries
+no file name and no kind name.
+
+**Residue, honestly:** the Arabic block gains exactly **one** entry,
+`ERR_HR_E_DEVICE_INVALIDATED`, as a marker — the same role `APP_NAME` plays.
+Without it the mechanism is untestable in a non-English locale, because an
+untranslated Arabic entry falls back to English and every assertion passes on
+the bug. No Arabic copy was written; the other 61 new entries are declared
+untranslated like everything else.
 
 ### M12 — Cancelling a session load is announced as a failure, in English
 `src/ui/controller.c:692-704,740-750`
@@ -705,8 +830,9 @@ the whole File > Open route, picker included. That needed one more seam,
 owned by the thread that opened it, so File > Open and File > Save As were
 routes no test could enter at all -- and the sentences live BELOW the picker.
 
-M11 is the general form of the untranslatable-reason half and is NOT fixed
-here; it is a `platform/err.c` change and belongs to whoever owns that file.
+M11 is the general form of the untranslatable-reason half and was NOT fixed
+here; it is a `platform/err.c` change and belonged to whoever owned that file.
+(It was, later the same day — see M11.)
 
 ### M13 — `CREATE_ALWAYS` after a separate `exists()` check — **FIXED 2026-08-26**
 `src/platform/outpath.c:508-541` vs `action_wav.c:637`, `action_mp3.c:699`,
@@ -941,12 +1067,12 @@ can trust:**
   does not exist -- design decisions, not defects -- and this pass left them
   alone rather than inventing a use for them.
 
-- **M11 is NOT fixed.** Error reasons are still English prose in a translated
-  frame. The change belongs in `platform/err.c`, which this pass does not own.
-  m4 and M12 remove the two worst UI symptoms of it (a real reason now reaches
-  the user instead of "not available yet"; a cancel no longer quotes an
-  internal literal back at the person who chose it), but the mechanism gap is
-  untouched.
+- **M11 was NOT fixed by that pass**, correctly: the change belongs in
+  `platform/err.c`, which the UI pass did not own. m4 and M12 removed the two
+  worst UI symptoms of it (a real reason now reaches the user instead of "not
+  available yet"; a cancel no longer quotes an internal literal back at the
+  person who chose it), and the mechanism gap was closed separately on
+  2026-08-26 — see the M11 entry above.
 
 **New test seams, each the smallest thing that made an unassertable property
 assertable:** `apr_controller_last_balloon()` / `apr_controller_balloon_count()`

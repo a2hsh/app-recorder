@@ -67,6 +67,7 @@
 #include <string.h>
 
 #include "bus.h"
+#include "errmsg.h"
 #include "log.h"
 #include "source.h"
 #include "ui_node.h"
@@ -388,13 +389,20 @@ static int canvas_busy(CanvasState *st)
 /* The reason the model gave, in the catalog's frame. NEVER "that is not
  * available yet" -- that sentence describes a feature nobody has written, and
  * using it for a real refusal told the user the wrong thing about their own
- * session while throwing the only diagnostic away. */
+ * session while throwing the only diagnostic away.
+ *
+ * AND THE REASON ITSELF COMES OUT OF THE CATALOG TOO. It used to be
+ * apr_err_format()'s English -- "source 3 already feeds bus 1 at bus.c(217)
+ * in apr_bus_add_source" -- which is a log line, not a sentence: it names
+ * apprecorder's internal ids and it would have stayed English in an Arabic
+ * UI. The refusals a person can act on name their own catalog entry at the
+ * raise site (APR_ERR_SAY in err.h); the rest resolve from their kind. */
 static void say_edit_failed(CanvasState *st, const AprErr *e)
 {
     const wchar_t *args[1];
     wchar_t why[512];
 
-    apr_err_format(e, why, 512);
+    apr_err_reason(e, why, 512);
     args[0] = why;
     say(st, APR_S_UI_ANN_EDIT_FAILED, args, 1);
 }

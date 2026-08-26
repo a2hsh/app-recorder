@@ -149,6 +149,11 @@ static AprErr dev_open(AprCapture *c, const AprCaptureConfig *cfg, RingBuf *rb)
     apr_wasapi_stream_init(&d->s, rb, &d->st, cfg->sample_rate, cfg->channels,
                            1 /* device_mode: real drift, real dropouts */,
                            NULL, NULL);
+    /* AFTER stream_init, which zeroes the stream. A non-zero resume anchor
+     * means this capture is replacing one whose endpoint was invalidated --
+     * unplugged, or a driver restart -- and its first frame belongs at the
+     * absolute index that anchor implies (capture.h). */
+    apr_capresume_init(&d->s.resume, cfg);
 
     e = apr_wasapi_thread_start(&d->s);
     if (apr_failed(&e)) return e;

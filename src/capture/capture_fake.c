@@ -80,9 +80,13 @@ typedef struct FakeImpl {
     uint64_t num, den;       /* frames = elapsed * num / den, exactly */
 
     /* Health schedule (capture.h). Frame indices; 0 means never. */
-    uint64_t mute_at, unmute_at, die_at;
+    uint64_t mute_at, unmute_at, die_at, revive_at;
     int      muted;          /* current, mirrors st.muted */
-    int      dead;           /* current, mirrors !st.alive. One-way. */
+    int      dead;           /* current, mirrors !st.alive */
+
+    /* Rejoining a timeline that was already running -- this capture replaced
+     * one that died on a source that has been recording for a while. */
+    AprCapResume resume;
 
     int      anchored;
     uint64_t anchor_ticks;
@@ -146,15 +150,28 @@ static int muted_at(const FakeImpl *f, uint64_t n)
     return f->start_muted;
 }
 
+/* The mirror image of muted_at, and deliberately written the same way rather
+ * than as a special case: a target that exits and is started again is the
+ * ordinary case for a recording that runs for hours, and modelling death as
+ * permanent is what made every test above this file agree that a source which
+ * dies stays dead. */
 static int dead_at(const FakeImpl *f, uint64_t n)
 {
-    if (f->start_dead) return 1;
-    return f->die_at != 0 && n >= f->die_at;
+    int hit_die    = f->die_at    != 0 && n >= f->die_at;
+    int hit_revive = f->revive_at != 0 && n >= f->revive_at;
+
+    /* Both crossed: the later event is the one in force. They cannot be equal
+     * -- fake_open refuses that rather than picking a winner here. */
+    if (hit_die && hit_revive) return f->revive_at > f->die_at ? 0 : 1;
+    if (hit_die)    return 1;
+    if (hit_revive) return 0;
+    return f->start_dead;
 }
 
 static void publish_health(FakeImpl *f, uint64_t n)
 {
     int muted = muted_at(f, n);
+    int dead  = dead_at(f, n);
 
     if (muted != f->muted) {
         f->muted = muted;
@@ -162,7 +179,7 @@ static void publish_health(FakeImpl *f, uint64_t n)
         APR_DEBUG(L"fake source: %s at frame %llu",
                   muted ? L"muted" : L"unmuted", (unsigned long long)n);
     }
-    if (!f->dead && dead_at(f, n)) {
+    if (dead && !f->dead) {
         /* Same shape as capture_process.c's real detector, and for the same
          * reason: the error is what tells the owner this source failed, and
          * the capture deliberately keeps running (design section 10 -- one
@@ -174,6 +191,17 @@ static void publish_health(FakeImpl *f, uint64_t n)
         f->dead = 1;
         apr_capstat_set_error(&f->st, &e);
         apr_capstat_set_alive(&f->st, 0);
+    } else if (!dead && f->dead) {
+        /* THE OTHER HALF, and it is the one that is easy to leave out. The
+         * error is cleared as well as the flag: a source that is producing
+         * audio again while still carrying the sentence that says it exited
+         * is a status line that lies, and the front ends read exactly these
+         * two fields to decide what to announce. */
+        f->dead = 0;
+        apr_capstat_set_alive(&f->st, 1);
+        apr_capstat_clear_error(&f->st);
+        APR_DEBUG(L"fake source: alive again at frame %llu",
+                  (unsigned long long)n);
     }
 }
 
@@ -181,14 +209,15 @@ static void publish_health(FakeImpl *f, uint64_t n)
  * health transition. 0 when no transition is ahead. */
 static uint64_t frames_to_next_event(const FakeImpl *f, uint64_t from)
 {
-    static const size_t k = 3;
-    uint64_t ev[3];
+    static const size_t k = 4;
+    uint64_t ev[4];
     uint64_t best = 0;
     size_t   i;
 
     ev[0] = f->mute_at;
     ev[1] = f->unmute_at;
     ev[2] = f->die_at;
+    ev[3] = f->revive_at;
 
     for (i = 0; i < k; i++) {
         if (ev[i] != 0 && ev[i] > from && (best == 0 || ev[i] < best))
@@ -218,7 +247,12 @@ static void generate_to(FakeImpl *f, uint64_t target_frames)
         f->frames += n;
         publish_health(f, f->frames);
     }
-    f->st.frames_written = (LONG64)f->frames;
+    /* The rejoin pad is counted too: these are frames this capture really did
+     * put into the ring, and a consumer reasoning about the ring's index space
+     * needs them included or the two numbers disagree by exactly the size of
+     * the hole. `f->frames` stays this instance's own count, because that is
+     * what the health schedule and the rate error are measured against. */
+    f->st.frames_written = (LONG64)(f->frames + f->resume.padded);
 }
 
 /* Frames this source should have produced by `now_ticks`. Exact, absolute,
@@ -236,6 +270,14 @@ static void advance_locked(FakeImpl *f, uint64_t now_ticks)
         f->anchor_ticks = now_ticks;
         f->last_ticks   = now_ticks;
         f->st.anchor_ticks = (LONG64)now_ticks;
+
+        /* This capture's frame 0 is AT the anchor -- unlike a WASAPI packet,
+         * whose first frame precedes its arrival -- so this is the exact
+         * instant the rejoin arithmetic wants, and it is before a single
+         * frame has been written. Nothing at all happens for a source that
+         * is not rejoining anything. */
+        (void)apr_capresume_fill(&f->resume, f->rb, now_ticks);
+        f->st.frames_written = (LONG64)f->resume.padded;
         return;
     }
     if (now_ticks < f->last_ticks) return;
@@ -297,6 +339,11 @@ static AprErr fake_open(AprCapture *c, const AprCaptureConfig *cfg, RingBuf *rb)
         return APR_ERR(APR_E_INVALID_ARG,
                        L"mute_at_frame and unmute_at_frame are both %llu",
                        (unsigned long long)cfg->fake.mute_at_frame);
+    if (cfg->fake.die_at_frame != 0 &&
+        cfg->fake.die_at_frame == cfg->fake.revive_at_frame)
+        return APR_ERR(APR_E_INVALID_ARG,
+                       L"die_at_frame and revive_at_frame are both %llu",
+                       (unsigned long long)cfg->fake.die_at_frame);
 
     f = (FakeImpl *)calloc(1, sizeof(*f));
     if (!f) return APR_ERR(APR_E_NO_MEMORY, L"fake capture");
@@ -312,9 +359,11 @@ static AprErr fake_open(AprCapture *c, const AprCaptureConfig *cfg, RingBuf *rb)
     f->mute_at     = cfg->fake.mute_at_frame;
     f->unmute_at   = cfg->fake.unmute_at_frame;
     f->die_at      = cfg->fake.die_at_frame;
+    f->revive_at   = cfg->fake.revive_at_frame;
     f->start_muted = cfg->fake.start_muted ? 1 : 0;
     f->start_dead  = cfg->fake.start_dead ? 1 : 0;
     f->tick_rate   = apr_qpc_freq();
+    apr_capresume_init(&f->resume, cfg);
 
     /* Published before a single frame exists: an app that was already muted,
      * or had already exited, when the session was armed is a normal outcome
@@ -348,12 +397,14 @@ static AprErr fake_open(AprCapture *c, const AprCaptureConfig *cfg, RingBuf *rb)
     if (!f->stop_ev) return APR_ERR_LAST(L"CreateEvent for the fake source");
 
     APR_DEBUG(L"fake source: %u Hz / %u ch, %+d ppm, %u Hz tone at %.6f, "
-              L"mute@%llu unmute@%llu die@%llu%s%s",
+              L"mute@%llu unmute@%llu die@%llu revive@%llu resume@%llu%s%s",
               f->sample_rate, (unsigned)f->channels, f->ppm, f->tone_hz,
               (double)f->amplitude,
               (unsigned long long)f->mute_at,
               (unsigned long long)f->unmute_at,
               (unsigned long long)f->die_at,
+              (unsigned long long)f->revive_at,
+              (unsigned long long)f->resume.anchor_ticks,
               f->start_muted ? L" start-muted" : L"",
               f->start_dead  ? L" start-dead"  : L"");
     return apr_ok();

@@ -45,6 +45,7 @@ struct AprSource {
     int              started;
     int              refcount;
     int              is_reference;
+    uint32_t         generation;   /* captures this source has had; 1 at birth */
 
     /* What this source was asked to capture, kept so a session can be written
      * down later. The endpoint id is copied into `endpoint` and cfg.device
@@ -81,6 +82,31 @@ static void copy_name(wchar_t *dst, const wchar_t *src)
     dst[i] = L'\0';
 }
 
+/* Keep what this source was asked to capture, so a session can be written down
+ * later (source.h). The endpoint id in `cfg` is borrowed for the length of the
+ * call, so it is COPIED and the retained config points at the copy -- otherwise
+ * a session saved an hour later would write down a dangling pointer's worth of
+ * nothing.
+ *
+ * resume_anchor_ticks is deliberately NOT retained: it is how a replacement
+ * capture is told where to land, not part of what this source IS, and a
+ * "record pid 8412 as of tick 91827364" identity would be nonsense the moment
+ * it was written to a file. */
+static void adopt_config(AprSource *s, const AprCaptureConfig *cfg)
+{
+    s->cfg = *cfg;
+    s->cfg.resume_anchor_ticks = 0;
+
+    if (cfg->kind == APR_SRC_DEVICE && cfg->device.endpoint_id) {
+        size_t i = 0;
+        for (; i + 1 < APR_DISC_ENDPOINT_CCH_LOCAL && cfg->device.endpoint_id[i]; i++) {
+            s->endpoint[i] = cfg->device.endpoint_id[i];
+        }
+        s->endpoint[i] = L'\0';
+        s->cfg.device.endpoint_id = s->endpoint;
+    }
+}
+
 AprErr apr_source_create(AprSourceId id, const wchar_t *name,
                          const AprCaptureConfig *cfg, AprSource **out)
 {
@@ -112,15 +138,7 @@ AprErr apr_source_create(AprSourceId id, const wchar_t *name,
      * for the length of this call, so it is COPIED and the retained config
      * points at the copy -- otherwise a session saved an hour later would
      * write down a dangling pointer's worth of nothing. */
-    s->cfg = *cfg;
-    if (cfg->kind == APR_SRC_DEVICE && cfg->device.endpoint_id) {
-        size_t i = 0;
-        for (; i + 1 < APR_DISC_ENDPOINT_CCH_LOCAL && cfg->device.endpoint_id[i]; i++) {
-            s->endpoint[i] = cfg->device.endpoint_id[i];
-        }
-        s->endpoint[i] = L'\0';
-        s->cfg.device.endpoint_id = s->endpoint;
-    }
+    adopt_config(s, cfg);
 
     /* 250 ms: mixer jitter only. Disk stalls are absorbed inside each action,
      * because a slow encoder must never back-pressure a ring every other bus
@@ -144,6 +162,7 @@ AprErr apr_source_create(AprSourceId id, const wchar_t *name,
         return e;
     }
 
+    s->generation = 1;
     *out = s;
     return apr_ok();
 }
@@ -181,6 +200,10 @@ AprErr apr_source_start(AprSource *s)
 
     if (!s) return APR_ERR(APR_E_INVALID_ARG, L"start of a null source");
     if (s->started) return apr_ok();
+    if (!s->cap)
+        return APR_ERR(APR_E_STATE,
+                       L"source %u has no capture attached; it is waiting to "
+                       L"be reconnected", s->id);
     e = s->cap->vt->start(s->cap);
     if (apr_failed(&e)) return e;
     s->started = 1;
@@ -190,8 +213,135 @@ AprErr apr_source_start(AprSource *s)
 void apr_source_stop(AprSource *s)
 {
     if (!s || !s->started) return;
-    s->cap->vt->stop(s->cap);
+    if (s->cap) s->cap->vt->stop(s->cap);
     s->started = 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * Reconnection. See the long note in source.h.
+ * ------------------------------------------------------------------------- */
+
+int apr_source_attached(const AprSource *s) { return s && s->cap != NULL; }
+
+uint32_t apr_source_generation(const AprSource *s)
+{
+    return s ? s->generation : 0;
+}
+
+AprErr apr_source_detach(AprSource *s)
+{
+    AprErr e;
+
+    if (!s) return APR_ERR(APR_E_INVALID_ARG, L"detach of a null source");
+    if (!s->cap) return apr_ok();
+
+    /* The same bounded join apr_source_destroy makes, and the same answer when
+     * it fails: that thread is still writing into this ring, so it keeps the
+     * capture -- and a caller that ignored this and reattached anyway would
+     * have TWO producers on one single-producer ring. */
+    e = apr_capture_destroy(s->cap);   /* implies stop */
+    if (apr_failed(&e)) {
+        APR_LOG_ERR(APR_LOG_ERROR, &e);
+        APR_WARN(L"source %u kept its capture: it could not be retired, so "
+                 L"nothing may attach to that ring yet", s->id);
+        return e;
+    }
+
+    s->cap = NULL;
+    /* `started` is the source's INTENTION and survives on purpose: it is what
+     * tells a later reattach to arm the replacement rather than leave it
+     * sitting there open and silent. */
+    s->st.alive = 0;
+    return apr_ok();
+}
+
+uint64_t apr_source_pad_to(AprSource *s, uint64_t now_ticks)
+{
+    int64_t  due;
+    uint64_t have, pad;
+
+    if (!s || s->cap) return 0;             /* the capture is the producer */
+    if (!s->clock.anchored) return 0;       /* no timeline to hold a place in */
+
+    due = apr_clock_expected_frames(&s->clock, now_ticks);
+    if (due <= 0) return 0;
+
+    have = rb_write_pos(s->rb);
+    if ((uint64_t)due <= have) return 0;
+
+    pad = (uint64_t)due - have;
+    /* One call however long the absence: a write longer than the ring keeps
+     * the newest capacity frames and still advances the cursor by the full
+     * count (ringbuf.h). Twenty minutes of silence costs one memset of 250 ms. */
+    rb_write_silence(s->rb, (size_t)pad);
+    return pad;
+}
+
+AprErr apr_source_reattach(AprSource *s, const AprCaptureConfig *cfg)
+{
+    AprCaptureConfig use;
+    AprCapture      *cap = NULL;
+    AprErr           e;
+
+    if (!s)   return APR_ERR(APR_E_INVALID_ARG, L"reattach of a null source");
+    if (!cfg) return APR_ERR(APR_E_INVALID_ARG, L"reattach with no config");
+
+    /* The ring was built for this frame size and every reader's cursor counts
+     * in it. A replacement at another rate or width is not the same source. */
+    if (cfg->sample_rate != s->rate || cfg->channels != s->channels) {
+        return APR_ERR(APR_E_INVALID_ARG,
+                       L"source %u is %u Hz / %u ch; the replacement is "
+                       L"%u Hz / %u ch", s->id, s->rate, (unsigned)s->channels,
+                       cfg->sample_rate, (unsigned)cfg->channels);
+    }
+
+    e = apr_source_detach(s);
+    if (apr_failed(&e)) return e;
+
+    use = *cfg;
+    /* WHERE THE RECOVERED AUDIO LANDS. The replacement is told this source's
+     * ORIGINAL frame 0, so its own first frame goes to the absolute index that
+     * implies and the hole in between is filled with exactly the silence that
+     * belongs there -- on its own pump thread, at the only instant the answer
+     * is exact (capture.h). An unanchored source has no timeline yet, so its
+     * replacement simply starts one. */
+    use.resume_anchor_ticks = s->clock.anchored ? s->clock.anchor_ticks : 0;
+
+    e = apr_capture_create(&use, s->rb, &cap);
+    if (apr_failed(&e)) {
+        /* capture.h: a non-NULL capture after a FAILED create is a half-open
+         * one that could not be retired and is STILL WRITING INTO THIS RING.
+         * Keeping it is the only safe answer -- the source stays "attached" to
+         * a capture that does nothing useful, which stops anything else being
+         * attached to the ring underneath it. */
+        if (cap) {
+            s->cap = cap;
+            APR_WARN(L"source %u could not be reconnected and its half-open "
+                     L"capture could not be retired either; that ring is not "
+                     L"free", s->id);
+        }
+        return e;
+    }
+
+    s->cap = cap;
+    adopt_config(s, cfg);
+    s->generation++;
+
+    /* Said before the pump runs, so nothing can read "dead" off a source that
+     * has already been given a live capture. The real status arrives at the
+     * next apr_source_poll. */
+    s->st.alive      = 1;
+    s->st.last_error = apr_ok();
+
+    if (s->started) {
+        s->started = 0;                 /* start() is a no-op while it is set */
+        e = apr_source_start(s);
+        if (apr_failed(&e)) return e;   /* attached but not pumping; say so */
+    }
+
+    APR_DEBUG(L"source %u reconnected (generation %u) at absolute frame %llu",
+              s->id, s->generation, (unsigned long long)rb_write_pos(s->rb));
+    return apr_ok();
 }
 
 /* ---------------------------------------------------------------------------
@@ -232,6 +382,11 @@ void apr_source_set_reference(AprSource *s, int is_reference)
 void apr_source_poll(AprSource *s, AprCaptureStatus *out)
 {
     if (!s) { if (out) memset(out, 0, sizeof *out); return; }
+
+    /* A detached source has no capture to ask. The health it published when it
+     * was detached stands -- it is not alive, and saying so every tick is the
+     * whole point (source.h). */
+    if (!s->cap) { if (out) *out = s->st; return; }
 
     s->cap->vt->status(s->cap, &s->st);
     if (!s->clock.anchored && s->st.anchor_ticks != 0) {

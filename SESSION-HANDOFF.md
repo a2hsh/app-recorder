@@ -5260,3 +5260,110 @@ future change that removed it would fail loudly rather than start notifying the
 author again. Three cases call `ShowWindow(SW_SHOWNOACTIVATE)` because focus
 cannot enter a pane of a window that was never shown; `NOACTIVATE` means the
 foreground is never taken from whoever is at the machine.
+
+---
+
+## 2026-08-26 — M11: an error becomes words only at the point of display
+
+**The last tracker item, and the one that had to land before Arabic.**
+`src/platform/err.c` carried full English prose in a hand-written table and
+`apr_err_format()` handed it straight into translated catalog frames, so every
+failure sentence would have shipped half Arabic and half English. The author is
+blind; this is the sentence he hears when something has gone wrong.
+
+### The shape chosen
+
+**The error travels as an identity and becomes words only where it is
+displayed.** `(kind, code)` already was that identity; `AprErr` gained one more
+field, `int reason` — an `AprStrId`, typed `int` because `strings.h` includes
+`err.h` and the dependency cannot run both ways — set by `APR_ERR_SAY` /
+`APR_ERR_HR_SAY` / `APR_ERR_WIN32_SAY` / `APR_ERR_LAST_SAY`. One integer store:
+allocation-free, lock-free, legal on a capture pump.
+
+- **`include/errmsg.h`** (new) declares the display half: `apr_err_reason_id()`
+  and `apr_err_reason()`. Implementation stays in `platform/err.c` — AGENTS.md
+  rule 3 names it the sole owner of code-to-message, and a declaration's home is
+  not a second owner.
+- **`apr_err_format()` is unchanged and stays English.** `apr_log_err()` calls
+  it on whatever thread raised the error, so it may never touch the catalog.
+  Two renderings, and both headers say which is which.
+- Resolution order: raise site's own id -> hand-tabled WASAPI code -> Windows'
+  `FormatMessageW` -> the kind's own sentence. The last is a **floor**: every
+  failure resolves to a declared catalog id, so nothing falls through to a C
+  literal.
+
+### The diagnostic / user line
+
+`AprErr.context` is diagnostic and now reaches no user at all. It names
+functions, thresholds and internal ids, it is formatted at raise time, and a
+translator could never reach it. **The frame already names the operation** —
+`ERR_FILE_OPEN`, `ERR_CAPTURE_START`, `UI_ANN_ACTION_FAILED`,
+`UI_DLG_ADD_FAILED` — so the frame is the operation and the reason is why.
+
+A raise site gets a `reason` id only where it knows something `(kind, code)`
+cannot express *and* a user can act on it: the four limits, the rate mismatch,
+on/not-on-bus, and "the output has no name" — all in `core/`. Everything in
+`capture/` and the actions already carries an HRESULT or Win32 code. Every other
+`APR_ERR(...)` in the tree is untouched.
+
+### `FormatMessageW`: kept, in the display language
+
+It is genuinely localized by Windows and covers an open-ended space of ordinary
+codes. The change is the language: `apr_hresult_message()` asks `LANG_NEUTRAL`
+(the *thread's* language, i.e. the machine's), which would hand English to a
+user running `--lang ar-SA`. `apr_err_reason()` asks for `apr_str_language()`,
+and when that language has no text it falls back to a catalog sentence that
+keeps the number rather than accepting another language's prose.
+
+### Catalog
+
+`APR_STR_LIST_ERR_HR` (41, one per tabled WASAPI code) and
+`APR_STR_LIST_ERR_REASON` (21: one per `AprErrKind`, plus the named refusals).
+`APR_STR_ID_MAX` 1800 -> 2000. **No Arabic written** beyond a single marker on
+`ERR_HR_E_DEVICE_INVALIDATED`, which plays the same role `APP_NAME`'s marker
+does: without it the mechanism is untestable in a non-English locale, because an
+untranslated entry falls back to English and every assertion passes on the bug.
+
+### Converted call sites
+
+`cli.c` `errtext()` (15 uses, one function), `controller.c` `report_failure()`
+(9 uses) and its `APR_RUN_EV_ACTION_FAILED` arm, `canvas.c` `say_edit_failed()`.
+`log.c` is now the only caller of `apr_err_format()` in `src/`.
+
+### Tests
+
+New: `a_failure_a_user_hears_is_the_catalogs_and_not_err_cs`,
+`the_same_failure_in_english_is_the_english_catalog_entry`,
+`the_log_and_the_user_are_told_the_same_thing_in_english`,
+`a_raise_site_may_name_the_sentence_a_user_hears`,
+`a_code_nobody_can_describe_keeps_its_number_inside_a_catalog_sentence`,
+`a_success_value_has_no_reason_at_all`,
+`no_reason_in_any_language_carries_the_raise_site`,
+`a_reason_never_overruns_a_short_buffer` (test_err.c);
+`every_error_kind_names_a_declared_catalog_sentence`,
+`every_hand_tabled_wasapi_code_names_a_declared_catalog_sentence`
+(test_strings.c, extending the completeness gate);
+`the_reason_a_refusal_gives_is_the_catalogs_and_not_a_log_line` (test_cli.c);
+`a_refusal_from_the_controller_is_a_catalog_sentence_end_to_end`
+(test_ui_behaviour.c).
+
+Watched go red: the three display-site tests with the sites put back on
+`apr_err_format()`, and the Arabic case with `apr_err_reason` made to return the
+table's English text.
+
+**One test asserted the bug and was changed:**
+`an_edit_the_model_refuses_is_announced_with_the_reason_the_model_gave` built
+its expectation from `apr_err_format()`, pinning *"That change was refused: bus
+1 already has 32 sources: APR_E_STATE at bus.c(226) in apr_bus_add_source"* as
+correct.
+
+### Build and test
+
+`build.cmd Debug test` and `build.cmd Release test`: 33 of 33 suites, 100%, no
+warnings under /W4 /WX.
+
+**Safety (AGENTS.md rule 1):** nothing was rendered to any audio device;
+nothing in this pass touches capture. Tray registration stays suppressed by
+`APPRECORDER_NO_TRAY` in CMake. One mistake worth recording: a UI test
+executable was run directly once, outside ctest, so it did NOT have
+`APPRECORDER_NO_TRAY` set — do not do that; run UI suites through ctest.
