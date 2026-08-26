@@ -4346,3 +4346,225 @@ application"*. Spec §4.1.1 says never to word it as "everything except X",
 because the mode **walks the process tree** — excluding a launcher excludes
 everything it spawned. Needs checking against whatever detail the dialog shows
 after selection.
+
+---
+
+## 2026-08-26 (later) — "Add Source" from the GUI: the capture layer now owns its apartment
+
+### The defect
+
+Adding any source from the windowed front end failed:
+
+```
+ERROR controller.c do_add_source: process loopback requires the MTA;
+      this thread is an STA: APR_E_STATE at capture_process.c(240) in proc_open
+```
+
+A collision between two individually correct requirements on one thread:
+
+- `src/uiapp/main.c` calls `CoInitializeEx(NULL, COINIT_APARTMENTTHREADED)`
+  **deliberately** — `IAccPropServices`, which supplies every control's
+  accessible name, is created in that apartment and is valid only on the thread
+  that created it. Getting it wrong does not crash; it silently loses every
+  accessible name. **The UI thread must stay an STA.**
+- WASAPI process loopback requires the **MTA** (spec 4.1 note 7).
+
+`capture_process.c` and `capture_device.c` both called
+`CoInitializeEx(NULL, COINIT_MULTITHREADED)` **on the caller's thread** and
+returned `APR_E_STATE` on `RPC_E_CHANGED_MODE`. The CLI never noticed (its
+thread is not in an STA); the GUI could not add one source.
+
+### The fix — in the capture layer, not the caller
+
+Making the controller hop to a worker thread was explicitly rejected: it pushes
+a COM constraint onto every present and future caller.
+
+**A capture already owns a thread; it now owns its apartment too.**
+`src/capture/wasapi_common.c` gained a capture thread that calls
+`CoInitializeEx(MTA)` once and then *is* both the job queue and the pump:
+
+| new API | does |
+|---|---|
+| `apr_wasapi_thread_start(s)` | creates the thread, waits for it to enter the MTA |
+| `apr_wasapi_call(s, job, user)` | runs `job` on it and waits; callable from any apartment |
+| `apr_wasapi_start/stop` | marshal `IAudioClient::Start` / the pump handover |
+| `apr_wasapi_close(s, teardown, user)` | runs the impl's COM teardown **on that thread**, then releases this layer's objects, retires the thread |
+
+`open()`/`close()` in both WASAPI kinds split into a plain half (validate,
+calloc, `apr_wasapi_stream_init`, `apr_wasapi_thread_start`) and a
+`*_open_com` / `*_close_com` job that runs inside the apartment. The old pump
+thread is gone as a separate thread — it is the same thread — so this costs
+nothing.
+
+**`apr_capture_create()` is now callable from an STA, the MTA, or a thread with
+no apartment at all**, and the old constraint *"`open()`/`close()` must share a
+thread for the WASAPI kinds"* **is gone**, not merely hidden: the
+`CoInitializeEx` reference it protected is no longer on the caller's thread.
+Stated as a contract at the top of `include/capture.h` and in spec **§4.2.1**
+(new) with a note in **§4.3**.
+
+### `capture_device.c` — asked, and answered
+
+**It had the identical refusal.** Not by necessity: `IMMDeviceEnumerator` is
+perfectly happy in an STA, so the device path did not *need* the MTA the way
+process loopback does — it demanded it in sympathy, with the same
+`RPC_E_CHANGED_MODE` return. So "Add Source → a microphone" from the GUI failed
+for the same reason. Fixed the same way rather than by relaxing the check,
+because the objects created there are used by the pump and belong in the pump's
+apartment.
+
+### Latent bug fixed on the way
+
+`proc_close`/`dev_close` called `free(impl)` **even when `s.pump_stuck` was
+set** — i.e. even when `wasapi_common.c` had just decided the pump was wedged
+and deliberately declined to free anything under it. The stream struct is
+embedded in that allocation, so that was the exact use-after-free the
+`pump_stuck` path exists to avoid. Both now leak the impl and say so, which is
+the survivable half. `wasapi_common.h` states the rule for any future kind.
+
+### Tests — the asymmetry was the real defect
+
+26 suites passed while the product could not add a source, because **every test
+ran from an MTA or uninitialised thread**. Two new suites, 28 total:
+
+- **`tests/test_capture_apartment.c`** (6 cases) — `apr_capture_create` +
+  `start` + `stop` from a genuine `COINIT_APARTMENTTHREADED` worker, from an
+  explicit MTA worker, and from an uninitialised worker. Fake source
+  unconditionally; a real process tap on this test's own PID; a device source
+  opened and **never started**.
+- **`tests/test_ui_add_source.c`** (3 cases) — a real frame + real
+  `AprController` on a real STA, adding a fake source and a real process source
+  through `apr_graph_add_source` on the window's own thread. That is
+  `do_add_source()` minus only the modal chooser.
+
+**Both were verified to FAIL against the old behaviour** before the fix was
+kept: a temporary probe reinstating the `RPC_E_CHANGED_MODE` refusal made
+`a_process_tap_opens_and_runs_from_an_sta_thread`,
+`a_process_tap_stopped_and_closed_from_an_sta_thread_leaves_nothing_behind` and
+`a_process_source_can_be_added_from_the_window_thread` fail with the user's
+exact message. Probe removed afterwards.
+
+**Trap worth remembering:** the first draft of the second case established "no
+audio engine here" *from the STA thread itself*, so the apartment refusal
+presented as a SKIP and passed silently — the exact shape of the original miss.
+A skip predicate must be evaluated from a **non**-STA thread.
+
+### Green
+
+- `build.cmd Debug test` → **28/28 suites, 0 failures**
+- `build.cmd Release test` → **28/28 suites, 0 failures**
+- `/W4 /WX` clean in both.
+
+**Pre-existing intermittent, NOT from this change:** Release `test_ui_tree`
+failed twice across six full `ctest` runs and was green in the other four, in
+twelve consecutive isolated runs of that suite alone, and in four consecutive
+full Release suites afterwards. It never failed in Debug. That suite builds its
+graph from `APR_SRC_FAKE` only, and `capture_fake.c` was not touched here, so
+the capture-apartment work cannot reach it; it looks like UIA contention with
+the author's own live window / screen reader. Worth chasing separately.
+
+### Build note for the author
+
+`build\Release\apprecorder_ui_app.exe` was **locked by your running instance**
+(PID 48448, started 10:20:44), so `link.exe` failed with LNK1104. Rather than
+kill it, the old binary was renamed to
+`build\Release\apprecorder_ui_app.inuse-20260826.exe` (Windows allows renaming a
+running image) and the fresh one linked in its place. **The copy you are running
+is the pre-fix build.** Close it and relaunch `build\Release\apprecorder_ui_app.exe`
+to get the fix; the `.inuse-20260826.exe` file can be deleted once nothing holds
+it.
+
+### AGENTS.md rule 1 disclosure
+
+**Nothing was rendered to any output device. No audio was played at all.** No
+device source was ever `start()`ed, no microphone was opened for reading, and
+`spike_silentplayer` was not needed or run. The process taps target this
+machine's own test/UI processes, whose trees render nothing, so the only thing
+captured was the audio engine's own digital silence — in memory, into a ring
+buffer, never to a file. No audio file was written or left behind.
+
+### Still open (unchanged by this work)
+
+- Device capture is still opened and closed but **never started** by any test —
+  starting it records the author's microphone. Its pump, gap-fill and
+  discontinuity handling still have no hardware coverage. Needs a manual pass
+  with the author consenting.
+- Mute polling still inspects only the named PID's session.
+
+---
+
+## 2026-08-26 — COM APARTMENT BUG: the GUI could not add any source
+
+**28/28 suites green, Debug and Release.** Verified live: adding `nvda.exe`
+now logs `added id=1; graph now holds 1 sources` and the node appears in both
+the canvas and the tree.
+
+### What was wrong
+
+`capture_process.c` **and** `capture_device.c` each called
+`CoInitializeEx(NULL, COINIT_MULTITHREADED)` **on the caller's thread** in
+`open()`, returning `APR_E_STATE` on `RPC_E_CHANGED_MODE`.
+
+- The **CLI's** thread had no apartment, so it silently joined the MTA and
+  everything worked.
+- The **GUI's** thread is a deliberate **STA** — `IAccPropServices`, which
+  supplies every control's accessible name, is only valid on the thread that
+  created it — so **every source failed**.
+
+**That asymmetry is the whole lesson: 26 suites passed while the GUI could not
+add a single source, because nothing tested the capture layer from an STA
+caller.** The non-default side of an environment split is the side that needs
+the test.
+
+### The fix — in the capture layer, not the caller
+
+A capture already owned a thread; **it now owns its apartment too.** The pump
+thread became a long-lived *capture* thread: `CoInitializeEx(MTA)` once, then it
+alternates between servicing marshalled jobs and being the pump. Not an extra
+thread — the same one.
+
+`apr_wasapi_thread_start()` / `apr_wasapi_call()` / `apr_wasapi_close()`;
+`open`/`start`/`stop`/`close` marshal and wait. Each kind's open/close split into
+a plain half and a `*_open_com` / `*_close_com` job that runs inside the
+apartment — **including every `Release`, which was also happening in the wrong
+apartment before.**
+
+Fixing this in the controller would have pushed a COM constraint onto every
+present and future caller. **The handoff's old constraint — "open()/close() must
+share a thread" — is now gone rather than hidden**, because the `CoInitializeEx`
+reference they balanced is no longer on the caller's thread at all.
+
+`capture_device.c` **had the identical refusal but not the identical need**:
+`IMMDeviceEnumerator` is happy in an STA, and the device path demanded MTA in
+sympathy. Fixed the same way rather than relaxing the check, since the objects
+it creates are used by the pump and belong in the pump's apartment.
+
+### Latent use-after-free fixed on the way
+
+`proc_close`/`dev_close` called `free(impl)` **even when `pump_stuck` was set** —
+exactly when `wasapi_common.c` had just declined to free anything because the
+pump was wedged. The stream is embedded in that allocation, so this was the very
+use-after-free the `pump_stuck` path exists to prevent. Both now leak and log.
+
+### Tests — 26 → 28 suites
+
+- `tests/test_capture_apartment.c` — create/start/stop from a genuine STA
+  worker, an explicit MTA worker, and an uninitialised worker.
+- `tests/test_ui_add_source.c` — a real frame, a real controller, on a real STA,
+  adding sources through the graph on the window's own thread. That is
+  `do_add_source()` minus only the modal chooser.
+
+**Both were verified to fail against the old behaviour** by temporarily
+reinstating the refusal.
+
+**Sharpest observation from the agent:** its first draft established "no audio
+engine here" *from the STA thread itself*, so the apartment refusal presented as
+a **SKIP and passed silently — the same shape as the original miss.** A skip
+predicate must be evaluated from a non-STA thread. Both files now do.
+
+### Known flake to chase separately
+
+Release `test_ui_tree` failed twice across six early ctest runs, green in the
+other four, in 12 consecutive isolated runs, and in both final runs. It builds
+only from `APR_SRC_FAKE` and `capture_fake.c` was untouched — looks like UIA
+contention with a live window.

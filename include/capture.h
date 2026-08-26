@@ -9,6 +9,33 @@
  * into a RingBuf it does not own, and publishes status atomically. Consumers
  * read through their own RingReader. The ring stays pure PCM; everything a
  * consumer needs to reason about time or health comes from AprCaptureStatus.
+ *
+ * ===========================================================================
+ * APARTMENTS: THE CAPTURE OWNS ITS OWN. YOU MAY CALL FROM ANY.
+ *
+ *   apr_capture_create(), open(), start(), stop(), status() and close() are
+ *   callable from an STA, from the MTA, and from a thread that has never called
+ *   CoInitializeEx at all. They neither require nor change the caller's
+ *   apartment, and none of them has to be called from the same thread as any
+ *   other -- stop() has always said so, and now the rest do too.
+ *
+ *   A capture owns a thread, so it owns its apartment as well: WASAPI process
+ *   loopback requires the MTA (design 4.1 note 7), so the implementation makes
+ *   one on its own thread and performs every COM call there -- activation,
+ *   IAudioClient setup, the pump, the mute poll, and every Release.
+ *
+ *   THIS IS A PROMISE, NOT AN IMPLEMENTATION DETAIL, and it was learned the
+ *   hard way. An earlier version called CoInitializeEx(MTA) on the caller's
+ *   thread, which meant every source failed with RPC_E_CHANGED_MODE for any
+ *   caller already in an STA. The command line never noticed because its thread
+ *   is MTA; the windowed front end could not add a single source, because its
+ *   thread MUST be an STA (IAccPropServices, which supplies every control's
+ *   accessible name, is valid only on the thread that created it). A library
+ *   that pushes a COM constraint onto its callers has moved the problem, not
+ *   solved it -- and the next caller falls into the same trap.
+ *
+ *   tests/test_capture_apartment.c holds this to it from a genuine STA thread.
+ * ===========================================================================
  */
 #ifndef APR_CAPTURE_H
 #define APR_CAPTURE_H
@@ -111,21 +138,28 @@ typedef struct AprCaptureStatus {
 
 typedef struct AprCapture AprCapture;
 
+/* Every entry point below is callable from any thread and any apartment; see
+ * the apartment note at the top of this file. */
 typedef struct AprCaptureVTable {
     const char *kind_name;
 
-    /* Acquires the OS resources. rb is borrowed and must outlive the capture. */
+    /* Acquires the OS resources, including the capture's own thread and the
+     * apartment that thread lives in. rb is borrowed and must outlive the
+     * capture. */
     AprErr (*open)(AprCapture *c, const AprCaptureConfig *cfg, RingBuf *rb);
 
-    /* Spawns the capture thread. Frames begin arriving in rb. */
+    /* Hands the capture thread to the pump. Frames begin arriving in rb. */
     AprErr (*start)(AprCapture *c);
 
-    /* Idempotent. Joins the capture thread. Safe to call from any thread. */
+    /* Idempotent. Returns once the pump has stopped. Safe to call from any
+     * thread, including from inside the capture's own callbacks. */
     void (*stop)(AprCapture *c);
 
+    /* Never blocks and never allocates -- safe on a mixer tick. */
     void (*status)(const AprCapture *c, AprCaptureStatus *out);
 
-    /* Implies stop(). Does not free the RingBuf. */
+    /* Implies stop(), then retires the capture thread. Does not free the
+     * RingBuf. Need not be called from the thread that called open(). */
     void (*close)(AprCapture *c);
 } AprCaptureVTable;
 

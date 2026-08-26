@@ -46,7 +46,12 @@ typedef struct DevImpl {
 
     IMMDeviceEnumerator *enu;
     IMMDevice           *dev;
-    int                  com_owned;
+
+    /* Borrowed for the length of open() only, which is exactly how long the
+     * endpoint id inside it is valid (capture.h). The COM half of open runs on
+     * the capture thread while this call is still on the stack, so passing the
+     * pointer across is safe -- and nothing keeps it afterwards. */
+    const AprCaptureConfig *cfg;
 } DevImpl;
 
 /* Fetch a fresh IAudioClient. A failed Initialize leaves the old one unusable,
@@ -63,32 +68,20 @@ static AprErr activate_client(DevImpl *d, IAudioClient **out)
     return apr_ok();
 }
 
-static AprErr dev_open(AprCapture *c, const AprCaptureConfig *cfg, RingBuf *rb)
+/* The half of open() that touches COM. Runs on the capture's own thread, in the
+ * MTA it owns. This path did NOT need the MTA as badly as the process tap does
+ * -- IMMDeviceEnumerator is happy in an STA -- but it demanded it all the same,
+ * with the identical RPC_E_CHANGED_MODE refusal, so "Add Source > a microphone"
+ * failed from the windowed front end for exactly the same reason. It is fixed
+ * the same way rather than by relaxing the check, because the objects created
+ * here are used by the pump and belong in the pump's apartment. */
+static AprErr dev_open_com(void *user)
 {
-    DevImpl *d;
+    DevImpl *d = (DevImpl *)user;
+    const AprCaptureConfig *cfg = d->cfg;
     IAudioClient *ac = NULL;
-    HRESULT hr_com, hr;
+    HRESULT hr;
     AprErr e;
-
-    e = apr_capture_check_common(cfg, rb);
-    if (apr_failed(&e)) return e;
-    if (cfg->kind != APR_SRC_DEVICE)
-        return APR_ERR(APR_E_INVALID_ARG, L"not a device source");
-
-    d = (DevImpl *)calloc(1, sizeof(*d));
-    if (!d) return APR_ERR(APR_E_NO_MEMORY, L"device capture");
-    c->impl = d;
-    apr_capstat_init(&d->st);
-
-    /* MTA, for the same reason as the process tap: the pump thread and the
-     * opener must agree, and everything in this codebase is free-threaded.
-     * open() and close() must run on the same thread. */
-    hr_com = CoInitializeEx(NULL, COINIT_MULTITHREADED);
-    if (hr_com == RPC_E_CHANGED_MODE)
-        return APR_ERR(APR_E_STATE,
-                       L"device capture requires the MTA; this thread is an STA");
-    if (FAILED(hr_com)) return APR_ERR_HR(hr_com, L"CoInitializeEx(MTA)");
-    d->com_owned = 1;
 
     hr = CoCreateInstance(&apr_clsid_MMDeviceEnumerator, NULL, CLSCTX_ALL,
                           &apr_iid_IMMDeviceEnumerator, (void **)&d->enu);
@@ -106,10 +99,6 @@ static AprErr dev_open(AprCapture *c, const AprCaptureConfig *cfg, RingBuf *rb)
         if (FAILED(hr))
             return APR_ERR_HR(hr, L"no default capture endpoint");
     }
-
-    apr_wasapi_stream_init(&d->s, rb, &d->st, cfg->sample_rate, cfg->channels,
-                           1 /* device_mode: real drift, real dropouts */,
-                           NULL, NULL);
 
     e = activate_client(d, &ac);
     if (apr_failed(&e)) return e;
@@ -139,6 +128,36 @@ static AprErr dev_open(AprCapture *c, const AprCaptureConfig *cfg, RingBuf *rb)
     return apr_ok();
 }
 
+/* Callable from ANY apartment -- see capture.h and wasapi_common.h. */
+static AprErr dev_open(AprCapture *c, const AprCaptureConfig *cfg, RingBuf *rb)
+{
+    DevImpl *d;
+    AprErr e;
+
+    e = apr_capture_check_common(cfg, rb);
+    if (apr_failed(&e)) return e;
+    if (cfg->kind != APR_SRC_DEVICE)
+        return APR_ERR(APR_E_INVALID_ARG, L"not a device source");
+
+    d = (DevImpl *)calloc(1, sizeof(*d));
+    if (!d) return APR_ERR(APR_E_NO_MEMORY, L"device capture");
+    c->impl = d;
+    apr_capstat_init(&d->st);
+    d->cfg = cfg;
+
+    /* Must precede the thread: it zeroes the stream, handles and all. */
+    apr_wasapi_stream_init(&d->s, rb, &d->st, cfg->sample_rate, cfg->channels,
+                           1 /* device_mode: real drift, real dropouts */,
+                           NULL, NULL);
+
+    e = apr_wasapi_thread_start(&d->s);
+    if (apr_failed(&e)) return e;
+
+    e = apr_wasapi_call(&d->s, dev_open_com, d);
+    d->cfg = NULL;   /* borrowed only for the length of this call */
+    return e;
+}
+
 static AprErr dev_start(AprCapture *c)
 {
     DevImpl *d = (DevImpl *)c->impl;
@@ -160,16 +179,28 @@ static void dev_status(const AprCapture *c, AprCaptureStatus *out)
     apr_capstat_read(&d->st, out);
 }
 
+/* The half of close() that touches COM: released on the capture thread, in the
+ * apartment these objects were created in. */
+static AprErr dev_close_com(void *user)
+{
+    DevImpl *d = (DevImpl *)user;
+    if (d->dev) { IMMDevice_Release(d->dev); d->dev = NULL; }
+    if (d->enu) { IMMDeviceEnumerator_Release(d->enu); d->enu = NULL; }
+    return apr_ok();
+}
+
 static void dev_close(AprCapture *c)
 {
     DevImpl *d = (DevImpl *)c->impl;
     if (!d) return;
 
-    apr_wasapi_close(&d->s);
+    apr_wasapi_close(&d->s, dev_close_com, d);
 
-    if (d->dev) { IMMDevice_Release(d->dev); d->dev = NULL; }
-    if (d->enu) { IMMDeviceEnumerator_Release(d->enu); d->enu = NULL; }
-    if (d->com_owned) { CoUninitialize(); d->com_owned = 0; }
+    if (d->s.pump_stuck) {
+        /* wasapi_common.h: the pump is still running on &d->s. */
+        c->impl = NULL;
+        return;
+    }
 
     c->impl = NULL;
     free(d);

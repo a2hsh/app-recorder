@@ -41,6 +41,12 @@
  * (MTA, nested initialisation is fine). None of them opens an IAudioClient, so
  * none of them starts a capture or touches an audio device's stream -- which
  * is what lets --dry-run validate a whole configuration without recording.
+ *
+ * APARTMENT: any. An STA caller is served without being made to change
+ * apartment -- src/capture/discover.c asks for the MTA and treats
+ * RPC_E_CHANGED_MODE as "fine, query from here", because everything it calls is
+ * free-threaded. Same promise capture.h makes, for the same reason: the
+ * windowed front end's thread is an STA and must stay one.
  */
 #ifndef APPRECORDER_DISCOVER_H
 #define APPRECORDER_DISCOVER_H

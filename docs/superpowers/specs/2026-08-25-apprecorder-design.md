@@ -310,6 +310,52 @@ Note for the author's own rig: the microphone should be taken from the mixer's
 process-loopback tap captures app audio *pre*-hardware-processing, which is
 correct for apps and wrong for a voice.
 
+### 4.2.1 The capture owns its apartment — the caller's is never its business
+
+**`apr_capture_create()`, `open`, `start`, `stop`, `status` and `close` are
+callable from an STA, from the MTA, and from a thread that has never called
+`CoInitializeEx` at all.** They neither require nor change the caller's
+apartment, and none of them has to be called from the same thread as any other.
+This is part of the contract in `include/capture.h`, not an implementation
+detail.
+
+**A capture already owns a thread, so it owns its apartment too.** That thread
+calls `CoInitializeEx(NULL, COINIT_MULTITHREADED)` once and performs every COM
+call the capture ever makes — the async activation, `IAudioClient::Initialize`,
+the pump, the session-volume poll, and every `Release`. `open`/`start`/`stop`/
+`close` marshal onto it and wait. It is the same thread the pump runs on, so
+this costs no extra thread.
+
+**Learned the hard way, recorded so it is not relitigated.** The first
+implementation called `CoInitializeEx(MTA)` on whichever thread invoked
+`open()`. Both WASAPI kinds then failed with `RPC_E_CHANGED_MODE` for any caller
+already in an STA — the process tap because 4.1 note 7 genuinely needs the MTA,
+and the *device* path because it asked for the MTA in sympathy even though
+`IMMDeviceEnumerator` is perfectly happy in an STA. The CLI never noticed: its
+thread is MTA. The windowed front end could not add a single source, because its
+thread **must** be an STA (6.1: `IAccPropServices` supplies every control's
+accessible name and is valid only on the thread that created it).
+
+Two consequences worth stating flatly:
+
+- **Fixing this in the caller would have been the wrong fix.** Making the
+  controller hop to a worker thread pushes a COM constraint onto every present
+  and future caller, and the next one falls into the same trap. A library owes
+  its callers apartment independence.
+- **The old "`open()` and `close()` must run on the same thread" constraint is
+  gone**, because the `CoInitializeEx` reference it protected is no longer on
+  the caller's thread at all. The constraint became internal and invisible,
+  which is what it should always have been.
+
+The reason a 26-suite green run coexisted with a front end that could not add a
+source is that **every test ran from an MTA or uninitialised thread**.
+`tests/test_capture_apartment.c` and `tests/test_ui_add_source.c` close that
+hole: the first drives `apr_capture_create` + `start` + `stop` from a genuine
+STA worker, the second adds a real process source on a real window's own thread.
+A test that establishes "there is no audio engine here" must do so from a
+**non**-STA thread, or an apartment refusal presents itself as a skip and passes
+silently — which is the exact shape of the original miss.
+
 ### 4.3 Testability boundary
 
 `capture_*.c` implement one internal interface. A **fake source** driven by a
@@ -317,6 +363,16 @@ synthetic clock implements the same interface, so the entire core — mixing, dr
 correction, actions — is testable **without audio hardware**. This is a hard
 architectural requirement, not a convenience: CI and agent-driven development
 cannot rely on a GoXLR being plugged in.
+
+**Hardware is not the only environmental axis.** "No audio hardware present" was
+the only one this section originally named, and the capture layer shipped
+working from an MTA and broken from an STA with a fully green suite — because
+every test happened to run in the same apartment. **The caller's COM apartment
+is part of the environment a capture must be portable across**, so the interface
+promises apartment independence (4.2.1) and the suite exercises both sides of it
+rather than whichever one the test runner happens to be in. Any future
+environmental assumption belongs in the same place: stated in `capture.h`,
+tested from the side that is *not* the default.
 
 ---
 

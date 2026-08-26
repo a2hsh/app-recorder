@@ -58,8 +58,6 @@ typedef struct ProcImpl {
     uint64_t next_death_ticks;
     uint64_t next_mute_ticks;
     uint64_t next_search_ticks;
-
-    int      com_owned;            /* this source called CoInitializeEx */
 } ProcImpl;
 
 static uint64_t ticks_for_ms(uint64_t ms)
@@ -204,42 +202,15 @@ static void proc_tick(void *user)
  * VTable
  * ------------------------------------------------------------------------- */
 
-static AprErr proc_open(AprCapture *c, const AprCaptureConfig *cfg, RingBuf *rb)
+/* The half of open() that touches COM. Runs on the capture's own thread, in
+ * the MTA it owns -- design 4.1 note 7 requires the MTA for the activation
+ * callback, and requiring it of the CALLER is what stopped the windowed front
+ * end (an STA, necessarily) from adding a single source. See wasapi_common.h. */
+static AprErr proc_open_com(void *user)
 {
-    ProcImpl *p;
+    ProcImpl *p = (ProcImpl *)user;
     IAudioClient *ac = NULL;
-    HRESULT hr_com;
     AprErr e;
-
-    e = apr_capture_check_common(cfg, rb);
-    if (apr_failed(&e)) return e;
-    if (cfg->kind != APR_SRC_PROCESS)
-        return APR_ERR(APR_E_INVALID_ARG, L"not a process source");
-    if (cfg->process.pid == 0)
-        return APR_ERR(APR_E_INVALID_ARG, L"pid 0 cannot be captured");
-
-    p = (ProcImpl *)calloc(1, sizeof(*p));
-    if (!p) return APR_ERR(APR_E_NO_MEMORY, L"process capture");
-    c->impl = p;
-
-    apr_capstat_init(&p->st);
-    p->pid     = cfg->process.pid;
-    p->exclude = cfg->process.exclude ? 1 : 0;
-    p->ticks_per_death_poll = ticks_for_ms(PROC_DEATH_POLL_MS);
-    p->ticks_per_mute_poll  = ticks_for_ms(PROC_MUTE_POLL_MS);
-    p->ticks_per_search     = ticks_for_ms(PROC_SESSION_SEARCH_MS);
-
-    /* Design 4.1 note 7: the activation callback cannot be delivered to an STA,
-     * and IAgileObject on the handler does not rescue it. Fail with something
-     * readable rather than a bare HRESULT.
-     * NOTE: open() and close() must run on the same thread, because this
-     * reference is released there. */
-    hr_com = CoInitializeEx(NULL, COINIT_MULTITHREADED);
-    if (hr_com == RPC_E_CHANGED_MODE)
-        return APR_ERR(APR_E_STATE,
-                       L"process loopback requires the MTA; this thread is an STA");
-    if (FAILED(hr_com)) return APR_ERR_HR(hr_com, L"CoInitializeEx(MTA)");
-    p->com_owned = 1;
 
     if (p->exclude) {
         APR_WARN(L"process source pid %u opened in EXCLUDE mode: this records "
@@ -250,10 +221,6 @@ static AprErr proc_open(AprCapture *c, const AprCaptureConfig *cfg, RingBuf *rb)
     e = apr_com_activate_process_loopback(p->pid, p->exclude,
                                           PROC_ACTIVATE_TIMEOUT_MS, &ac);
     if (apr_failed(&e)) return e;
-
-    apr_wasapi_stream_init(&p->s, rb, &p->st, cfg->sample_rate, cfg->channels,
-                           0 /* not device_mode: no drift, no gaps */,
-                           proc_tick, p);
 
     /* GetMixFormat and GetDevicePeriod are both E_NOTIMPL here (design 4.1
      * note 1). There is nothing to negotiate: we supply the session format and
@@ -284,6 +251,43 @@ static AprErr proc_open(AprCapture *c, const AprCaptureConfig *cfg, RingBuf *rb)
     return apr_ok();
 }
 
+/* Callable from ANY apartment. Nothing here touches COM: it validates, builds
+ * the stream, gives the capture its own MTA thread, and then does the real work
+ * over there. capture.h states this as a guarantee. */
+static AprErr proc_open(AprCapture *c, const AprCaptureConfig *cfg, RingBuf *rb)
+{
+    ProcImpl *p;
+    AprErr e;
+
+    e = apr_capture_check_common(cfg, rb);
+    if (apr_failed(&e)) return e;
+    if (cfg->kind != APR_SRC_PROCESS)
+        return APR_ERR(APR_E_INVALID_ARG, L"not a process source");
+    if (cfg->process.pid == 0)
+        return APR_ERR(APR_E_INVALID_ARG, L"pid 0 cannot be captured");
+
+    p = (ProcImpl *)calloc(1, sizeof(*p));
+    if (!p) return APR_ERR(APR_E_NO_MEMORY, L"process capture");
+    c->impl = p;
+
+    apr_capstat_init(&p->st);
+    p->pid     = cfg->process.pid;
+    p->exclude = cfg->process.exclude ? 1 : 0;
+    p->ticks_per_death_poll = ticks_for_ms(PROC_DEATH_POLL_MS);
+    p->ticks_per_mute_poll  = ticks_for_ms(PROC_MUTE_POLL_MS);
+    p->ticks_per_search     = ticks_for_ms(PROC_SESSION_SEARCH_MS);
+
+    /* Must precede the thread: it zeroes the stream, handles and all. */
+    apr_wasapi_stream_init(&p->s, rb, &p->st, cfg->sample_rate, cfg->channels,
+                           0 /* not device_mode: no drift, no gaps */,
+                           proc_tick, p);
+
+    e = apr_wasapi_thread_start(&p->s);
+    if (apr_failed(&e)) return e;
+
+    return apr_wasapi_call(&p->s, proc_open_com, p);
+}
+
 static AprErr proc_start(AprCapture *c)
 {
     ProcImpl *p = (ProcImpl *)c->impl;
@@ -305,16 +309,31 @@ static void proc_status(const AprCapture *c, AprCaptureStatus *out)
     apr_capstat_read(&p->st, out);
 }
 
+/* The half of close() that touches COM. Runs on the capture thread, in the
+ * apartment the interface was created in -- releasing it anywhere else is the
+ * mirror image of the bug this file used to have on open(). */
+static AprErr proc_close_com(void *user)
+{
+    ProcImpl *p = (ProcImpl *)user;
+    if (p->vol) { ISimpleAudioVolume_Release(p->vol); p->vol = NULL; }
+    return apr_ok();
+}
+
 static void proc_close(AprCapture *c)
 {
     ProcImpl *p = (ProcImpl *)c->impl;
     if (!p) return;
 
-    apr_wasapi_close(&p->s);
+    apr_wasapi_close(&p->s, proc_close_com, p);
 
-    if (p->vol)   { ISimpleAudioVolume_Release(p->vol); p->vol = NULL; }
+    if (p->s.pump_stuck) {
+        /* wasapi_common.h: the pump is still running on &p->s. Freeing p would
+         * pull the struct out from under an audio thread. Leak it instead. */
+        c->impl = NULL;
+        return;
+    }
+
     if (p->hproc) { CloseHandle(p->hproc); p->hproc = NULL; }
-    if (p->com_owned) { CoUninitialize(); p->com_owned = 0; }
 
     c->impl = NULL;
     free(p);

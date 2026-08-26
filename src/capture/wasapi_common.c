@@ -4,6 +4,9 @@
  * Both real capture kinds run this loop. The differences between them are
  * confined to `device_mode` and the tick callback, so a fix to the drain path
  * lands on both at once.
+ *
+ * It also owns the capture's apartment -- see the long note in the header for
+ * why that is here and not in the caller.
  */
 #include "apr_winver.h"
 
@@ -261,18 +264,13 @@ static int drain(AprWasapiStream *s)
     return 1;
 }
 
-static DWORD WINAPI pump_thread(LPVOID param)
+/* The drain loop. Runs on the capture thread between start() and stop(); the
+ * same thread services jobs the rest of the time (see the header). */
+static void pump(AprWasapiStream *s)
 {
-    AprWasapiStream *s = (AprWasapiStream *)param;
-    HANDLE  waits[2];
-    HANDLE  mmcss;
-    DWORD   task = 0;
-    HRESULT hr_com;
-
-    /* The tick callback resolves audio sessions through COM (design section 10
-     * mute polling), so this thread needs an apartment of its own. MTA, for the
-     * same reason the opener needs one. */
-    hr_com = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    HANDLE waits[2];
+    HANDLE mmcss;
+    DWORD  task = 0;
 
     mmcss = AvSetMmThreadCharacteristicsW(L"Pro Audio", &task);
 
@@ -295,87 +293,253 @@ static DWORD WINAPI pump_thread(LPVOID param)
     (void)drain(s);
 
     if (mmcss) AvRevertMmThreadCharacteristics(mmcss);
-    if (SUCCEEDED(hr_com)) CoUninitialize();
+
+    /* Stopping the client is a COM call and belongs on this thread with every
+     * other one. */
+    if (s->ac) IAudioClient_Stop(s->ac);
+}
+
+/* ---------------------------------------------------------------------------
+ * The apartment
+ * ------------------------------------------------------------------------- */
+
+enum { APR_WJ_NONE = 0, APR_WJ_CALL, APR_WJ_RUN, APR_WJ_QUIT };
+
+static AprErr client_start(AprWasapiStream *s)
+{
+    HRESULT hr;
+    if (!s->ac || !s->cc) return APR_ERR(APR_E_STATE, L"stream is not prepared");
+    hr = IAudioClient_Start(s->ac);
+    if (FAILED(hr)) return APR_ERR_HR(hr, L"IAudioClient::Start");
+    return apr_ok();
+}
+
+static DWORD WINAPI capture_thread(LPVOID param)
+{
+    AprWasapiStream *s = (AprWasapiStream *)param;
+
+    /* The one CoInitializeEx in the capture layer. Everything COM the capture
+     * ever does happens on this thread, so no caller has to be in any
+     * particular apartment and nothing has to be marshalled between them. */
+    s->com_hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    SetEvent(s->ready_ev);
+    if (FAILED(s->com_hr)) return 0;
+
+    for (;;) {
+        if (WaitForSingleObject(s->job_ev, INFINITE) != WAIT_OBJECT_0) break;
+
+        if (s->job == APR_WJ_QUIT) { SetEvent(s->done_ev); break; }
+
+        if (s->job == APR_WJ_CALL) {
+            s->job_err = s->job_fn ? s->job_fn(s->job_user) : apr_ok();
+            SetEvent(s->done_ev);
+            continue;
+        }
+
+        /* APR_WJ_RUN: start the client, answer start() -- which must not block
+         * for the length of the recording -- and then BE the pump until stop.
+         * idle_ev is what stop() waits on, so it is set on both paths. */
+        s->job_err = client_start(s);
+        if (apr_failed(&s->job_err)) {
+            SetEvent(s->idle_ev);
+            SetEvent(s->done_ev);
+        } else {
+            SetEvent(s->done_ev);
+            pump(s);
+            SetEvent(s->idle_ev);
+        }
+    }
+
+    CoUninitialize();
     return 0;
+}
+
+/* Post a job and wait. The caller holds s->lock. Waiting on the thread handle
+ * as well means a capture thread that died (it cannot, but) surfaces as an
+ * error rather than as a hang. */
+static AprErr post(AprWasapiStream *s, int job)
+{
+    HANDLE w[2];
+
+    s->job = job;
+    w[0] = s->done_ev;
+    w[1] = s->thread;
+    SetEvent(s->job_ev);
+
+    if (WaitForMultipleObjects(2, w, FALSE, INFINITE) != WAIT_OBJECT_0) {
+        return APR_ERR(APR_E_STATE,
+                       L"the capture thread exited without answering");
+    }
+    return s->job_err;
+}
+
+static void close_handle(HANDLE *h)
+{
+    if (*h) { CloseHandle(*h); *h = NULL; }
+}
+
+AprErr apr_wasapi_thread_start(AprWasapiStream *s)
+{
+    s->ready_ev = CreateEventW(NULL, TRUE  /* manual */, FALSE, NULL);
+    s->job_ev   = CreateEventW(NULL, FALSE /* auto   */, FALSE, NULL);
+    s->done_ev  = CreateEventW(NULL, FALSE /* auto   */, FALSE, NULL);
+    s->idle_ev  = CreateEventW(NULL, TRUE  /* manual */, TRUE,  NULL);
+    s->stop_ev  = CreateEventW(NULL, TRUE  /* manual */, FALSE, NULL);
+    if (!s->ready_ev || !s->job_ev || !s->done_ev || !s->idle_ev || !s->stop_ev)
+        return APR_ERR_LAST(L"CreateEvent for the capture thread");
+
+    InitializeCriticalSection(&s->lock);
+    s->lock_init = 1;
+
+    s->thread = CreateThread(NULL, 0, capture_thread, s, 0, &s->thread_id);
+    if (!s->thread) return APR_ERR_LAST(L"CreateThread for the capture thread");
+
+    if (WaitForSingleObject(s->ready_ev, 10000) != WAIT_OBJECT_0)
+        return APR_ERR(APR_E_TIMEOUT, L"the capture thread did not start");
+    if (FAILED(s->com_hr))
+        return APR_ERR_HR(s->com_hr,
+                          L"CoInitializeEx(MTA) on the capture thread");
+    return apr_ok();
+}
+
+AprErr apr_wasapi_call(AprWasapiStream *s, AprWasapiJob job, void *user)
+{
+    AprErr e;
+
+    if (!s->thread || !s->lock_init)
+        return APR_ERR(APR_E_STATE, L"the capture has no thread");
+
+    /* Already inside the apartment -- a tick callback, most likely. The thread
+     * cannot post to itself, and it does not need to. */
+    if (GetCurrentThreadId() == s->thread_id)
+        return job ? job(user) : apr_ok();
+
+    /* Between start() and stop() the thread is the pump and is not reading the
+     * queue. Say so instead of blocking forever. */
+    if (InterlockedCompareExchange(&s->running, 0, 0) != 0)
+        return APR_ERR(APR_E_STATE, L"the capture thread is pumping");
+
+    EnterCriticalSection(&s->lock);
+    s->job_fn   = job;
+    s->job_user = user;
+    e = post(s, APR_WJ_CALL);
+    LeaveCriticalSection(&s->lock);
+    return e;
 }
 
 AprErr apr_wasapi_start(AprWasapiStream *s)
 {
-    HRESULT hr;
+    AprErr e;
 
+    if (!s->thread) return APR_ERR(APR_E_STATE, L"stream is not prepared");
     if (!s->ac || !s->cc) return APR_ERR(APR_E_STATE, L"stream is not prepared");
     if (InterlockedCompareExchange(&s->running, 1, 0) != 0) return apr_ok();
 
-    s->stop_ev = CreateEventW(NULL, TRUE /* manual reset */, FALSE, NULL);
-    if (!s->stop_ev) {
-        InterlockedExchange(&s->running, 0);
-        return APR_ERR_LAST(L"CreateEvent for the capture stop signal");
-    }
+    EnterCriticalSection(&s->lock);
+    ResetEvent(s->stop_ev);
+    ResetEvent(s->idle_ev);
+    e = post(s, APR_WJ_RUN);
+    LeaveCriticalSection(&s->lock);
 
-    hr = IAudioClient_Start(s->ac);
-    if (FAILED(hr)) {
-        CloseHandle(s->stop_ev);
-        s->stop_ev = NULL;
+    if (apr_failed(&e)) {
         InterlockedExchange(&s->running, 0);
-        return APR_ERR_HR(hr, L"IAudioClient::Start");
+        SetEvent(s->idle_ev);      /* harmless if the thread already did */
     }
-
-    s->thread = CreateThread(NULL, 0, pump_thread, s, 0, &s->thread_id);
-    if (!s->thread) {
-        AprErr e = APR_ERR_LAST(L"CreateThread for the capture pump");
-        IAudioClient_Stop(s->ac);
-        CloseHandle(s->stop_ev);
-        s->stop_ev = NULL;
-        InterlockedExchange(&s->running, 0);
-        return e;
-    }
-    return apr_ok();
+    return e;
 }
 
 void apr_wasapi_stop(AprWasapiStream *s)
 {
-    HANDLE th;
+    HANDLE w[2];
 
     InterlockedExchange(&s->running, 0);
     if (s->stop_ev) SetEvent(s->stop_ev);
 
+    if (!s->thread) return;
+
     /* stop() is documented safe from any thread, and the tick callback runs on
-     * the pump. Joining ourselves would deadlock, so the pump just unwinds. */
-    if (GetCurrentThreadId() == s->thread_id) {
-        if (s->ac) IAudioClient_Stop(s->ac);
-        return;
-    }
+     * the capture thread. Waiting for ourselves would deadlock, so the pump
+     * just unwinds. */
+    if (GetCurrentThreadId() == s->thread_id) return;
 
-    /* Exactly one caller gets the handle, so two concurrent stops cannot both
-     * join and close it. */
-    th = InterlockedExchangePointer((PVOID volatile *)&s->thread, NULL);
-    if (th) {
-        if (WaitForSingleObject(th, 5000) == WAIT_OBJECT_0) {
-            CloseHandle(th);
-            s->thread_id = 0;
-        } else {
-            /* A pump whose longest wait is 200 ms and that has not exited in
-             * 5 s is wedged inside WASAPI. Killing it mid-write would corrupt
-             * the ring, so mark the stream unfreeable instead: leaking a COM
-             * reference is survivable, a use-after-free under an audio thread
-             * is not. */
-            s->pump_stuck = 1;
-            APR_ERROR(L"capture pump did not exit within 5 s; leaking the "
-                      L"stream rather than freeing it under a live thread");
-        }
+    EnterCriticalSection(&s->lock);
+    w[0] = s->idle_ev;
+    w[1] = s->thread;
+    if (WaitForMultipleObjects(2, w, FALSE, 5000) == WAIT_TIMEOUT) {
+        /* A pump whose longest wait is 200 ms and that has not left the drain
+         * loop in 5 s is wedged inside WASAPI. Killing it mid-write would
+         * corrupt the ring, so mark the stream unfreeable instead: leaking a
+         * COM reference and a thread is survivable, a use-after-free under an
+         * audio thread is not. */
+        s->pump_stuck = 1;
+        APR_ERROR(L"capture pump did not exit within 5 s; leaking the "
+                  L"stream rather than freeing it under a live thread");
     }
-
-    if (s->ac) IAudioClient_Stop(s->ac);
+    LeaveCriticalSection(&s->lock);
 }
 
-void apr_wasapi_close(AprWasapiStream *s)
+/* Everything close() has to do inside the apartment, in one job: the
+ * implementation's own COM objects first, then this layer's. */
+static AprErr close_job(void *user)
+{
+    AprWasapiStream *s = (AprWasapiStream *)user;
+
+    if (s->teardown) {
+        (void)s->teardown(s->teardown_user);
+        s->teardown = NULL;
+    }
+    if (s->cc) { IAudioCaptureClient_Release(s->cc); s->cc = NULL; }
+    if (s->ac) { IAudioClient_Release(s->ac); s->ac = NULL; }
+    return apr_ok();
+}
+
+void apr_wasapi_close(AprWasapiStream *s, AprWasapiJob teardown, void *user)
 {
     apr_wasapi_stop(s);
 
-    if (s->pump_stuck || s->thread) return;   /* see apr_wasapi_stop */
+    if (s->pump_stuck) return;   /* see apr_wasapi_stop; nothing may be freed */
 
-    if (s->cc)      { IAudioCaptureClient_Release(s->cc); s->cc = NULL; }
-    if (s->ac)      { IAudioClient_Release(s->ac); s->ac = NULL; }
-    if (s->ev)      { CloseHandle(s->ev); s->ev = NULL; }
-    if (s->stop_ev) { CloseHandle(s->stop_ev); s->stop_ev = NULL; }
+    /* A capture cannot retire the thread it is running on. Nothing does this,
+     * but hanging is a worse way to find out than a log line is. */
+    if (s->thread && GetCurrentThreadId() == s->thread_id) {
+        s->pump_stuck = 1;
+        APR_ERROR(L"close() called from the capture's own thread; leaking the "
+                  L"stream rather than joining a thread with itself");
+        return;
+    }
+
+    if (s->thread) {
+        s->teardown      = teardown;
+        s->teardown_user = user;
+
+        EnterCriticalSection(&s->lock);
+        s->job_fn   = close_job;
+        s->job_user = s;
+        (void)post(s, APR_WJ_CALL);
+        (void)post(s, APR_WJ_QUIT);
+        LeaveCriticalSection(&s->lock);
+
+        if (WaitForSingleObject(s->thread, 5000) != WAIT_OBJECT_0) {
+            s->pump_stuck = 1;
+            APR_ERROR(L"capture thread did not exit within 5 s; leaking the "
+                      L"stream rather than freeing it under a live thread");
+            return;
+        }
+        close_handle(&s->thread);
+        s->thread_id = 0;
+    } else if (teardown) {
+        /* The thread was never created, so open() failed before it could make
+         * any COM object -- there is nothing to marshal and nothing to be in
+         * the wrong apartment for. */
+        (void)teardown(user);
+    }
+
+    if (s->lock_init) { DeleteCriticalSection(&s->lock); s->lock_init = 0; }
+
+    close_handle(&s->ev);
+    close_handle(&s->stop_ev);
+    close_handle(&s->ready_ev);
+    close_handle(&s->job_ev);
+    close_handle(&s->done_ev);
+    close_handle(&s->idle_ev);
 }
