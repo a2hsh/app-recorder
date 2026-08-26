@@ -3539,10 +3539,13 @@ outstanding count every run.
    `apr_str()` at the point of display (CLI, canvas, tree panel). The names live
    in `APR_STR_LIST_CORE` as `ACTION_NAME_WAV/MP3/OGG/NONE` (ids 1055-1058).
    Arabic placeholders added; **four more strings pending translation.**
-2. **`capture_fake` has no health knob**, so `apr_source_muted()` /
-   `apr_source_alive()` cannot be driven from a test. Blocks proper coverage of
-   the tree's two state clauses **and** the CLI's `WARN_SOURCE_MUTED` path. Small
-   fix, unlocks both.
+2. ~~**`capture_fake` has no health knob**~~ **FIXED 2026-08-26** — see the
+   entry at the bottom. `AprCaptureConfig.fake` now carries `mute_at_frame`,
+   `unmute_at_frame`, `die_at_frame`, `start_muted`, `start_dead`. The tree's
+   two state clauses are now driven through a real graph. **The CLI's
+   `WARN_SOURCE_MUTED` path is still uncovered** — reaching it needs a `--fake`
+   spec field, which is a cli.c edit and was left alone while an agent was
+   live there.
 3. ~~**`action_m4a.c` still scrubs non-finite values**~~ — moot: the file is
    gone.
 4. ~~**`--out x.ogg` needs an explicit `--format ogg`**~~ — **fixed
@@ -3642,3 +3645,136 @@ signature: **a suite failing differently each run during a parallel wave is
 contention, not a bug.**
 
 ### Remaining known defects: 2 (health knob, in flight), 5 (window-class move), 7 (UI, in flight)
+
+---
+
+## 2026-08-26 — `capture_fake` health knob (KNOWN DEFECT 2 closed)
+
+`build.cmd Debug test` and `build.cmd Release test`: **23/23 suites, 460 cases,
+0 failures**, `/W4 /WX` clean in both. Nothing committed. **No audio was
+rendered at any point** — this task needed none (AGENTS.md rule 1).
+
+### The contract change: `include/capture.h`
+
+**`include/capture.h` is a shared contract and it changed.** Five fields added
+to the `fake` arm of the config union, nothing else touched — no existing field
+moved, renamed or changed meaning, and the process/device arms are untouched:
+
+```c
+uint64_t mute_at_frame;    /* 0 = never */
+uint64_t unmute_at_frame;  /* 0 = never */
+uint64_t die_at_frame;     /* 0 = never */
+int      start_muted;      /* already muted when the session arms */
+int      start_dead;       /* already exited when the session arms */
+```
+
+Checked against every implementation and every caller: `capture_process.c` and
+`capture_device.c` never read the `fake` arm; `graph.c`, `cli.c` and all six
+test files that build a config `memset` it first, so a zero-initialised config
+is still a healthy source and nothing needed updating. The union grew from 12
+to 40 bytes, which no one depends on.
+
+**Frame indices, not ticks**, deliberately: exact, independent of QPF, and
+independent of `rate_error_ppm`, so a transition lands on the same sample
+however finely a caller steps the timeline. `0 = never` is what keeps a
+zero-initialised config healthy; `start_muted` / `start_dead` are how you ask
+for frame 0. `mute_at_frame == unmute_at_frame` is **refused** at open rather
+than resolved quietly.
+
+### The behaviour it models — deliberately the confusing one
+
+A muted or dead fake **keeps producing frames, at exactly the configured rate,
+and they are silent**. That is not a convenience: loopback is
+post-session-volume so a muted app records digital zeros, and after the target
+exits loopback keeps handing over zeros for ever with no error and no flag
+(design 4.1 #5/#6). Modelling death as "the source stops" would be tidier and
+would make every test built on it agree that the desync cannot happen. Death is
+one-way and raises `last_error` the same way `capture_process.c`'s real
+detector does, and deliberately does not stop the capture (section 10).
+
+### What the new tests prove
+
+- `tests/test_capture_fake.c` **23 -> 31 cases.** Mute/unmute/death are
+  sample-exact at the requested frame; a dead source still produces exactly the
+  frames the clock says are due, ten seconds past death, at 30 ppm, while
+  overrunning its ring; `frames_written == rb_write_pos` throughout; one leap
+  and a thousand steps over a mute + unmute + death schedule give
+  byte-identical audio and identical status.
+- `tests/test_sync.c` **15 -> 17 cases**, both driven through `core`:
+  a source that dies mid-session and one that goes muted mid-session, with the
+  status propagating capture -> `AprSource` -> `apr_source_alive/muted`, the
+  bus still producing every frame QPC asked for, and every reader's alignment
+  error under one sample. A second bus fed only by the failing source is what
+  makes the silence observable (`apr_bus_peak` exactly 0.0).
+- `tests/test_ui_tree.c` **11 -> 14 cases.** The two state clauses are now
+  selected through a real graph instead of being asserted to exist in the
+  catalog — including the both-at-once case, where **death must win over
+  muted** (unmuting a dead app fixes nothing).
+
+**Mutation-tested, both directions.** Removing `!f->dead` from the silence
+condition fails 4 cases; modelling death as "stop producing" fails the
+alignment assertion in `test_sync.c` and 4 more. The tests bite.
+
+### Section 10 held up
+
+Nothing in section 10 turned out to be wrong. Two things it says are now
+demonstrated rather than asserted: one source failing does not take the session
+down, and a muted source is genuinely indistinguishable from a dead one *in the
+audio* — the only difference is the status, which is exactly why the UI needs
+two separate clauses and why `alive` and `muted` are two fields and not one.
+
+### Left undone, on purpose
+
+- **The CLI's `WARN_SOURCE_MUTED` path is still uncovered.** `poll_sources()`
+  is a static in `cli.c` with no seam, and the only way in is a health field on
+  the `--fake` spec (`parse_fake`, `AprCliSource`, the config switch, and for
+  consistency the session save/load/compare). That is a `cli.c` edit and an
+  agent was live in that file. **The knob is ready; it is a ten-line CLI
+  change** — add a fourth `--fake` field and pass it into `cfg.fake`.
+- Not touched: `src/ui/tree_panel.c` (no change was needed — the tests reach it
+  through the public API) and `src/cli/cli.c`.
+
+### Process note
+
+Commit `65fbfa5` ("Delete M4A; make action display names catalog ids") landed at
+05:22 while this work was in flight and swept `include/capture.h`,
+`capture_fake.c` and the three test files into itself ("Tree also carries
+in-flight capture and UI work"). I did not commit anything. This is the same
+`git add -A`-mid-wave attribution problem already recorded twice in this file.
+Both configurations were rebuilt and re-run against the post-commit tree.
+
+### Orchestrator note on the health knob (defect 2 — fixed)
+
+Two things from that work worth not losing:
+
+**The fake models the confusing behaviour, not a tidy one.** A muted or dead fake
+**keeps producing frames at exactly the configured rate, and they are silent** —
+because that is what really happens: loopback is post-session-volume, and after
+the target exits it hands over zeros for ever with no error and no flag. A fake
+that "stopped" on death would have made the alignment bug untestable. Proven by
+mutation: modelling death as "the source stops" fails the alignment assertion in
+`test_sync.c` plus four more cases.
+
+**Why `alive` and `muted` are two fields.** A muted source is *genuinely
+indistinguishable from a dead one in the audio* — both are digital silence at the
+right rate. The only difference is the status. That is exactly why the UI needs
+two clauses and why neither can be inferred from the samples.
+
+Frame indices rather than ticks: exact, independent of QPF **and** of
+`rate_error_ppm`, so a transition lands on the same sample however finely a
+caller steps the timeline. `0 = never`, so a zero-initialised config is still a
+healthy source; `start_muted`/`start_dead` are how you ask for frame 0.
+
+**Residual gap (small):** the CLI's `WARN_SOURCE_MUTED` is still uncovered.
+`poll_sources()` is a static in `cli.c` with no seam; the way in is a health
+field on the `--fake` spec (`parse_fake`, `AprCliSource`, the config switch, and
+session save/load/compare for consistency). **~10 lines**, deferred only because
+an agent was live in `cli.c`.
+
+### Process failure — mine, third occurrence
+
+`git add -A` mid-wave swept this agent's in-flight work into commit `65fbfa5`
+("Delete M4A…"). **This is the third time**, having already been recorded twice
+in this file. Staging explicit paths is not optional during a parallel wave; the
+lesson clearly does not survive being written down, so: **when any agent is live,
+`git add <explicit paths>` only.**
