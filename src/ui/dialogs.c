@@ -160,16 +160,55 @@ static void dt_item(DlgBuf *b, DWORD style, DWORD ex, short x, short y,
     dt_w(b, 0xFFFF);
     dt_w(b, atom);
     dt_sz(b, text ? text : L"");
-    dt_align(b);
+    /* The creation-data WORD follows the title IMMEDIATELY. It must not be
+     * preceded by padding: Windows reads the very next word after the title as
+     * the creation-data count, so a pad here is read as that count, leaving the
+     * parser two bytes short and treating our creation word as the next item's
+     * style DWORD. The template is then garbage and DialogBoxIndirectParam
+     * fails outright.
+     *
+     * This was a real bug, and a nasty one: whether it fired depended on
+     * whether a title happened to end DWORD-aligned, so it worked for some
+     * strings and not others -- which makes it LANGUAGE-DEPENDENT. It would
+     * have broken differently in Arabic.
+     *
+     * Alignment for the next item belongs after this word, and dt_item's own
+     * leading dt_align() already does it. */
     dt_w(b, 0);            /* no creation data */
     b->items++;
 }
 
 static const DLGTEMPLATE *dt_end(DlgBuf *b)
 {
-    if (b->overflow) return NULL;
+    if (b->overflow) {
+        APR_WARN(L"dialog template overflowed its buffer; no dialog was built");
+        return NULL;
+    }
     memcpy(b->p + b->count_off, &b->items, sizeof b->items);
     return (const DLGTEMPLATE *)b->p;
+}
+
+/* DialogBoxIndirectParamW returns -1 when the dialog could not be created at
+ * all. Every caller here compares the result against IDOK, which quietly folds
+ * "the template was rejected" into "the user pressed Cancel" -- and that is
+ * exactly how a malformed template reaches a user as SILENCE: no window, no
+ * message, nothing to hear. It is how the creation-data alignment bug in
+ * dt_item() stayed invisible.
+ *
+ * The wrapper keeps each caller's contract and makes the failure loud. */
+static INT_PTR dlg_run(const DLGTEMPLATE *t, HWND owner, DLGPROC proc,
+                       LPARAM param)
+{
+    INT_PTR r;
+
+    SetLastError(0);
+    r = DialogBoxIndirectParamW(GetModuleHandleW(NULL), t, owner, proc, param);
+    if (r == -1) {
+        APR_WARN(L"dialog could not be created (GetLastError=%lu); the template "
+                 L"was rejected -- this is a bug, not a cancelled dialog",
+                 (unsigned long)GetLastError());
+    }
+    return r;
 }
 
 /* ==========================================================================
@@ -513,7 +552,7 @@ static int say_dialog(HWND owner, AprStrId title, const wchar_t *body,
     t = dt_end(&b);
     if (!t) return 0;
 
-    return (int)DialogBoxIndirectParamW(GetModuleHandleW(NULL), t, owner,
+    return (int)dlg_run(t, owner,
                                         say_proc, (LPARAM)&st);
 }
 
@@ -627,7 +666,7 @@ static int list_dialog(HWND owner, ListState *st)
 
     t = dt_end(&b);
     if (!t) return 0;
-    return (int)DialogBoxIndirectParamW(GetModuleHandleW(NULL), t, owner,
+    return (int)dlg_run(t, owner,
                                         list_proc, (LPARAM)st) == 1;
 }
 
@@ -848,7 +887,7 @@ static int ask_system_consent(HWND owner, uint32_t pid, const wchar_t *target)
 
     t = dt_end(&b);
     if (!t) return 0;
-    return (int)DialogBoxIndirectParamW(GetModuleHandleW(NULL), t, owner,
+    return (int)dlg_run(t, owner,
                                         consent_proc, (LPARAM)&cs) == 1;
 }
 
@@ -992,7 +1031,7 @@ int apr_dlg_add_source(HWND owner, AprDlgSource *out)
     t = dt_end(&b);
     if (!t) return 0;
 
-    if (DialogBoxIndirectParamW(GetModuleHandleW(NULL), t, owner,
+    if (dlg_run(t, owner,
                                 add_source_proc, (LPARAM)&st) != 1) {
         return 0;
     }
@@ -1079,7 +1118,7 @@ int apr_dlg_name_prompt(HWND owner, AprStrId title, AprStrId label,
 
     t = dt_end(&b);
     if (!t) return 0;
-    if (DialogBoxIndirectParamW(GetModuleHandleW(NULL), t, owner,
+    if (dlg_run(t, owner,
                                 name_proc, (LPARAM)&st) != 1) {
         return 0;
     }
@@ -1333,7 +1372,7 @@ int apr_dlg_add_output(HWND owner, const AprGraph *g, AprBusId prefer,
 
     t = dt_end(&b);
     if (!t) return 0;
-    if (DialogBoxIndirectParamW(GetModuleHandleW(NULL), t, owner,
+    if (dlg_run(t, owner,
                                 output_proc, (LPARAM)&st) != 1) {
         return 0;
     }
@@ -1539,7 +1578,7 @@ int apr_dlg_resolve_report(HWND owner, const AprSessionResolveReport *rep)
 
     t = dt_end(&b);
     if (!t) return 0;
-    return (int)DialogBoxIndirectParamW(GetModuleHandleW(NULL), t, owner,
+    return (int)dlg_run(t, owner,
                                         resolve_proc, (LPARAM)&st) == 1;
 }
 
@@ -1603,7 +1642,7 @@ void apr_dlg_keyboard_help(HWND owner)
 
     t = dt_end(&b);
     if (!t) return;
-    (void)DialogBoxIndirectParamW(GetModuleHandleW(NULL), t, owner,
+    (void)dlg_run(t, owner,
                                   help_proc, 0);
 }
 

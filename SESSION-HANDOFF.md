@@ -4287,3 +4287,62 @@ interning them would have silently dropped a bus's source.
   the app to get a true Release run.
 - Stale `build/*/test_action_m4a.exe` leftovers removed. ctest correctly reported
   26, but a glob of `test_*.exe` would find 27 and count 15 phantom cases.
+
+---
+
+## 2026-08-26 — BUG: every dialog failed to open, silently
+
+**Reported by the author on first real use:** *"ctrl+1 doesn't bring the source
+addition dialog"* … *"It's all Silence."*
+
+### Root cause: a two-byte misalignment in the dialog template builder
+
+`dt_item()` in `src/ui/dialogs.c` wrote the creation-data WORD **after** an
+alignment pad:
+
+```c
+dt_sz(b, text);   /* title */
+dt_align(b);      /* WRONG */
+dt_w(b, 0);       /* creation data */
+```
+
+Per `DLGITEMTEMPLATE`, the creation-data WORD follows the title **immediately**;
+alignment belongs *after* it (and `dt_item`'s own leading `dt_align()` already
+provides it). With the pad in front, Windows reads the pad as the creation-data
+count, lands two bytes short, and parses our creation word as the next item's
+style DWORD. Template garbage → `DialogBoxIndirectParamW` returns **−1**.
+
+**It only fired when a title did not happen to end DWORD-aligned — so it
+depended on string lengths, which makes it LANGUAGE-DEPENDENT.** It would have
+behaved differently again in Arabic. A dialog builder that works in English and
+fails in Arabic is exactly the class of bug §6.2 exists to prevent.
+
+### Why it reached the user as silence, and the second fix
+
+Every call site compared the result against `IDOK`, so **−1 ("template
+rejected") was folded into 0 ("user pressed Cancel")** — no window, no message,
+nothing to hear. All eight sites now go through `dlg_run()`, which logs the
+failure with `GetLastError` and says plainly that it is a bug rather than a
+cancellation. `dt_end()` also logs on overflow instead of returning NULL mutely.
+
+### Verified
+
+Frame goes modal, popup exists, and the dialog reads correctly end to end:
+title *"Add a source"*, then the three kind radios, the list, Refresh, the name
+field and OK/Cancel. **26/26 suites green.**
+
+### How it escaped the tests
+
+`test_ui_a11y.c` walks the **main window's** tree. **No test ever opened a
+modal dialog**, so the entire dialog layer had zero runtime coverage — it
+compiled, and that was all that was ever checked. Worth closing: a test that
+posts `WM_COMMAND` for each dialog command, asserts the frame goes modal, walks
+the dialog's own UIA tree for unnamed elements, and closes it.
+
+### Also spotted, not yet addressed
+
+The EXCLUDE radio reads *"Everything the machine plays, except one
+application"*. Spec §4.1.1 says never to word it as "everything except X",
+because the mode **walks the process tree** — excluding a launcher excludes
+everything it spawned. Needs checking against whatever detail the dialog shows
+after selection.
