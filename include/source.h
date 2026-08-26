@@ -249,6 +249,10 @@ int apr_source_is_reference(const AprSource *s);
 void apr_source_set_reference(AprSource *s, int is_reference);
 
 RingBuf    *apr_source_ring(AprSource *s);
+
+/* NULL while the source is DETACHED -- see apr_source_detach below. Every
+ * caller has to cope with that: a source waiting to be reconnected is a normal
+ * state that can last for the rest of a recording, not an error. */
 AprCapture *apr_source_capture(AprSource *s);
 
 /* Refresh the cached health snapshot from the capture and anchor the source's

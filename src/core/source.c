@@ -39,6 +39,33 @@ struct AprSource {
 
     RingBuf         *rb;
     AprCapture      *cap;
+
+    /* ===================================================================
+     * THE ONE THING TWO THREADS SHARE, AND THE CHEAPEST GATE THAT MAKES IT
+     * SAFE.
+     *
+     * apr_source_poll() runs on the bus/loop thread every tick; the reconnect
+     * worker (reconnect.h) swaps `cap` from ITS thread, which means freeing
+     * the very object the poller is about to ask for a status. A lock is out:
+     * source.h promises apr_source_pull takes none, and it means it.
+     *
+     * So `cap` is published with an interlocked exchange and readers announce
+     * themselves in `cap_users` around the dereference. The writer clears the
+     * pointer FIRST, then waits for the count to fall to zero: a reader that
+     * arrives after the clear sees NULL and touches nothing, and one that
+     * arrived before it holds a pointer that is not freed until it leaves.
+     * Two interlocked increments per source per tick -- not a lock, no
+     * allocation, and it never blocks the reader.
+     *
+     * The writer's wait is bounded by one status() call, which capture.h
+     * promises never blocks and never allocates.
+     *
+     * start(), stop() and destroy() are NOT gated, deliberately: they are the
+     * owner's calls, and the runner retires the reconnect worker before it
+     * makes any of them. Gating them would suggest they may be raced, which
+     * they may not.
+     * =================================================================== */
+    volatile LONG    cap_users;
     AprClock         clock;
     AprCaptureStatus st;
 
@@ -230,24 +257,32 @@ uint32_t apr_source_generation(const AprSource *s)
 
 AprErr apr_source_detach(AprSource *s)
 {
+    AprCapture *c;
     AprErr e;
 
     if (!s) return APR_ERR(APR_E_INVALID_ARG, L"detach of a null source");
     if (!s->cap) return apr_ok();
 
+    /* Unpublish, THEN wait for every poller that was already inside to leave,
+     * and only then retire. See the gate note on AprSource::cap_users. */
+    c = (AprCapture *)InterlockedExchangePointer((PVOID volatile *)&s->cap, NULL);
+    while (InterlockedCompareExchange(&s->cap_users, 0, 0) != 0) {
+        Sleep(0);   /* one status() call long; capture.h says it never blocks */
+    }
+
     /* The same bounded join apr_source_destroy makes, and the same answer when
      * it fails: that thread is still writing into this ring, so it keeps the
      * capture -- and a caller that ignored this and reattached anyway would
      * have TWO producers on one single-producer ring. */
-    e = apr_capture_destroy(s->cap);   /* implies stop */
+    e = apr_capture_destroy(c);        /* implies stop */
     if (apr_failed(&e)) {
         APR_LOG_ERR(APR_LOG_ERROR, &e);
         APR_WARN(L"source %u kept its capture: it could not be retired, so "
                  L"nothing may attach to that ring yet", s->id);
+        InterlockedExchangePointer((PVOID volatile *)&s->cap, c);
         return e;
     }
 
-    s->cap = NULL;
     /* `started` is the source's INTENTION and survives on purpose: it is what
      * tells a later reattach to arm the replacement rather than leave it
      * sitting there open and silent. */
@@ -315,7 +350,7 @@ AprErr apr_source_reattach(AprSource *s, const AprCaptureConfig *cfg)
          * a capture that does nothing useful, which stops anything else being
          * attached to the ring underneath it. */
         if (cap) {
-            s->cap = cap;
+            InterlockedExchangePointer((PVOID volatile *)&s->cap, cap);
             APR_WARN(L"source %u could not be reconnected and its half-open "
                      L"capture could not be retired either; that ring is not "
                      L"free", s->id);
@@ -323,7 +358,9 @@ AprErr apr_source_reattach(AprSource *s, const AprCaptureConfig *cfg)
         return e;
     }
 
-    s->cap = cap;
+    /* Published only once it is fully built: a poller that arrives at this
+     * instant either sees the old answer (none) or a complete capture. */
+    InterlockedExchangePointer((PVOID volatile *)&s->cap, cap);
     adopt_config(s, cfg);
     s->generation++;
 
@@ -383,12 +420,19 @@ void apr_source_poll(AprSource *s, AprCaptureStatus *out)
 {
     if (!s) { if (out) memset(out, 0, sizeof *out); return; }
 
-    /* A detached source has no capture to ask. The health it published when it
-     * was detached stands -- it is not alive, and saying so every tick is the
-     * whole point (source.h). */
-    if (!s->cap) { if (out) *out = s->st; return; }
+    {
+        AprCapture *c;
 
-    s->cap->vt->status(s->cap, &s->st);
+        InterlockedIncrement(&s->cap_users);
+        c = (AprCapture *)InterlockedCompareExchangePointer(
+                (PVOID volatile *)&s->cap, NULL, NULL);
+        /* A detached source has no capture to ask. The health it published
+         * when it was detached stands -- it is not alive, and saying so every
+         * tick is the whole point (source.h). */
+        if (c) c->vt->status(c, &s->st);
+        InterlockedDecrement(&s->cap_users);
+    }
+
     if (!s->clock.anchored && s->st.anchor_ticks != 0) {
         apr_clock_anchor(&s->clock, s->st.anchor_ticks);
     }

@@ -29,6 +29,7 @@
 #include "clock.h"
 #include "join.h"
 #include "log.h"
+#include "reconnect.h"
 #include "strings.h"
 
 /* How long apr_runner_destroy waits for a SYNCHRONOUS run to finish before it
@@ -50,6 +51,7 @@ typedef struct SourceSlot {
     volatile LONG64 frames;
     int          reported_dead;    /* loop thread only */
     int          reported_muted;   /* loop thread only */
+    int          reported_held;    /* loop thread only */
 } SourceSlot;
 
 typedef struct BusSlot {
@@ -87,6 +89,15 @@ struct AprRunner {
     volatile LONG in_run;     /* 1 while apr_runner_run() is on the stack */
 
     HANDLE thread;
+
+    /* THE SEARCH PARTY, and it runs on its own thread for the reason BUGS.md
+     * M3 established: re-resolving a source is COM enumeration with no bound
+     * on it, and this loop drives the mixer. Created with the runner so that
+     * every source's identity is captured while it is still running -- an
+     * image path cannot be read off a process that has already exited, which
+     * is exactly when it is wanted. Started after arming, retired before
+     * apr_graph_stop, so it never races a source being started or freed. */
+    AprReconnector *reconnect;
 
     volatile LONG   stop_requested;
     volatile LONG   running;
@@ -178,9 +189,43 @@ static void poll_sources(AprRunner *r)
          * exits and WASAPI never says so (design 4.1 #6). Without this a dead
          * application produces a file that looks like a success. */
         if (!alive && !r->source[i].reported_dead) {
-            r->source[i].reported_dead = 1;
-            InterlockedExchange(&r->incomplete, 1);
-            notice(r, APR_RUN_EV_SOURCE_DIED, i, SIZE_MAX, SIZE_MAX,
+            /* AN EXCLUSION THAT WENT STALE IS NOT A DEATH, and saying it was
+             * would be the wrong sentence about the wrong thing: this capture
+             * was healthy and has been deliberately held down so that the
+             * application the user excluded is not recorded under its new pid
+             * (reconnect.h). The user needs to hear THAT, not "it exited". */
+            if (apr_runner_source_link(r, i) == APR_LINK_HELD) {
+                if (!r->source[i].reported_held) {
+                    r->source[i].reported_held = 1;
+                    InterlockedExchange(&r->incomplete, 1);
+                    notice(r, APR_RUN_EV_EXCLUSION_HELD, i, SIZE_MAX, SIZE_MAX,
+                           r->source[i].name, NULL);
+                }
+            } else {
+                r->source[i].reported_dead = 1;
+                InterlockedExchange(&r->incomplete, 1);
+                notice(r, APR_RUN_EV_SOURCE_DIED, i, SIZE_MAX, SIZE_MAX,
+                       r->source[i].name, NULL);
+            }
+        }
+
+        /* THE HALF THAT IS EASY TO FORGET. Written as the exact mirror of the
+         * clause above -- one flag, both edges -- so that a source cannot be
+         * announced dead and then silently come back, which is the state the
+         * author would be left believing until he listened to the file.
+         *
+         * It does not care WHO revived the source: the reconnect worker
+         * reattaching to a new pid and a capture that recovered on its own
+         * both arrive here as the same flag going up, which is why this is
+         * three lines rather than a subscription to the reconnector.
+         *
+         * `incomplete` deliberately stays set: the hole is still in the file
+         * (runner.h). */
+        if (alive && (r->source[i].reported_dead || r->source[i].reported_held)) {
+            r->source[i].reported_dead  = 0;
+            r->source[i].reported_held  = 0;
+            r->source[i].reported_muted = 0;   /* say it again if it is again */
+            notice(r, APR_RUN_EV_SOURCE_RECOVERED, i, SIZE_MAX, SIZE_MAX,
                    r->source[i].name, NULL);
         }
         /* DEATH WINS. A source that has exited is not usefully described as
@@ -283,6 +328,19 @@ AprErr apr_runner_run(AprRunner *r)
         InterlockedExchange(&r->incomplete, 1);
         notice(r, APR_RUN_EV_ARM_FAILED, SIZE_MAX, SIZE_MAX, SIZE_MAX, NULL, &e);
     }
+    /* AFTER arming, so a source that never opened is not searched for, and
+     * before the first tick, so a target that exits in the first second is
+     * caught like any other. A no-op when there is nothing watchable. */
+    {
+        AprErr re = apr_reconnect_start(r->reconnect);
+        if (apr_failed(&re)) {
+            /* The recording is worth more than the safety net. Say so and go
+             * on: without the worker a dead source simply stays dead, which
+             * is what this program did until now. */
+            APR_LOG_ERR(APR_LOG_WARN, &re);
+        }
+    }
+
     start = apr_qpc_now();
 
     /* BEFORE "started", not after. The files exist by now -- apr_graph_start()
@@ -330,6 +388,13 @@ AprErr apr_runner_run(AprRunner *r)
     (void)apr_graph_tick(r->graph, apr_qpc_now());
 
     sample_bus_frames(r);
+
+    /* BEFORE apr_graph_stop, and this ordering is the whole of the worker's
+     * thread-safety story: it is the only other thing that touches a source's
+     * capture, and stopping it here means no source is ever started, stopped
+     * or freed while a search is in flight. Unbounded wait on purpose --
+     * see apr_reconnect_stop. */
+    apr_reconnect_stop(r->reconnect);
 
     notice(r, APR_RUN_EV_FINISHING, SIZE_MAX, SIZE_MAX, SIZE_MAX, NULL, NULL);
 
@@ -429,6 +494,25 @@ AprErr apr_runner_create(const AprRunnerConfig *cfg, AprRunner **out)
         r->bus_count++;
     }
 
+    /* HERE, not at run(): identity is read off processes that are still
+     * running, and a process that has exited has no image path left to read.
+     * The worker itself does not start until the graph is armed. */
+    {
+        AprReconnectOptions ro;
+        AprErr re;
+
+        memset(&ro, 0, sizeof ro);
+        ro.disabled = cfg->no_reconnect ? 1 : 0;
+        re = apr_reconnect_create(cfg->graph, &ro, &r->reconnect);
+        if (apr_failed(&re)) {
+            /* Never fatal. A recording without the safety net is still a
+             * recording; refusing to record because the net could not be
+             * strung up would be the worse failure. */
+            APR_LOG_ERR(APR_LOG_WARN, &re);
+            r->reconnect = NULL;
+        }
+    }
+
     *out = r;
     return apr_ok();
 }
@@ -470,6 +554,12 @@ AprErr apr_runner_destroy(AprRunner *r)
             return e;   /* free NOTHING: the loop still holds `r` */
         }
     }
+
+    /* After the loop is provably out of `r`, and therefore after the worker
+     * it started has been retired by that loop. Retiring it again here is
+     * idempotent and covers the runner that was created and never run. */
+    apr_reconnect_destroy(r->reconnect);
+    r->reconnect = NULL;
 
     if (r->stop_event && r->stop_event_owned) CloseHandle(r->stop_event);
     if (r->finished_event) CloseHandle(r->finished_event);
@@ -534,6 +624,18 @@ int apr_runner_source_state(const AprRunner *r, size_t index,
     out->muted  = load32(&r->source[index].muted);
     out->frames = (uint64_t)load64(&r->source[index].frames);
     return 1;
+}
+
+AprLinkState apr_runner_source_link(const AprRunner *r, size_t index)
+{
+    if (!r || index >= r->source_count || !r->reconnect) return APR_LINK_OFF;
+    return apr_reconnect_link(r->reconnect, r->source[index].id);
+}
+
+uint32_t apr_runner_source_recoveries(const AprRunner *r, size_t index)
+{
+    if (!r || index >= r->source_count || !r->reconnect) return 0;
+    return apr_reconnect_recoveries(r->reconnect, r->source[index].id);
 }
 
 size_t apr_runner_bus_count(const AprRunner *r)

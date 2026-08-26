@@ -83,7 +83,13 @@
  * loopback sits after the session volume, and WASAPI never reports the death
  * of the process being captured. See SESSION-HANDOFF.md. */
 #define APR_EN_WARN_SOURCE_MUTED         "%1!s! is muted in the Windows volume mixer, so it will record as silence."
-#define APR_EN_WARN_SOURCE_EXITED        "%1!s! has exited, so its recording ends here."
+#define APR_EN_WARN_SOURCE_EXITED        "%1!s! has exited. apprecorder is looking for it."
+/* THE OTHER HALF. Announcing only the loss leaves somebody who stepped away
+ * believing the take ended when the application closed. */
+#define APR_EN_WARN_SOURCE_RECOVERED     "%1!s! is back and is being recorded again. The time it was away is silence in the file."
+/* EXCLUDE mode, design 4.1.1: worded as a tree being held back, never as
+ * "everything except X". */
+#define APR_EN_WARN_EXCLUSION_HELD       "%1!s! has stopped recording, because the application it holds back has exited. Carrying on would record that application the moment it starts again."
 
 #define APR_EN_ERR_FILE_OPEN             "Could not open %1!s! for writing: %2!s!"
 #define APR_EN_ERR_UNKNOWN_FORMAT        "%1!s! is not a format this build can write."
@@ -564,6 +570,11 @@
  * had given up. */
 #define APR_EN_UI_ANN_CLOSE_TIMEOUT      "The files are taking longer than expected to close, so the window has stayed open. Try closing it again."
 #define APR_EN_UI_ANN_NO_TRAY            "There is no notification area icon, so hiding the window would leave nothing to reach it by. The window has stayed open."
+/* Both halves of a source going away and coming back. The recovery is the
+ * one that says the take is intact, so it is never left to a colour or an
+ * icon: it is a sentence, on whichever channel can reach the user. */
+#define APR_EN_UI_ANN_SOURCE_RECOVERED   "%1!s! is back and is being recorded again. The time it was away is silence in the file."
+#define APR_EN_UI_ANN_EXCLUSION_HELD     "%1!s! has stopped recording, because the application it holds back has exited. Carrying on would record that application the moment it starts again."
 
 /* ---- dialogs ---- */
 #define APR_EN_UI_DLG_OK                   "OK"
@@ -672,6 +683,8 @@
 #define APR_EN_UI_TRAY_INFO_MINIMIZED      "apprecorder is still running here. Press Windows+B and then the arrow keys to reach it."
 #define APR_EN_UI_TRAY_INFO_ARM_FAILED     "A source could not be started, so the recording is missing it."
 #define APR_EN_UI_TRAY_INFO_OUTPUT_RENAMED "That name was already a recording, so this take is being saved as %1!s! instead."
+#define APR_EN_UI_TRAY_INFO_SOURCE_RECOVERED "%1!s! is back and is being recorded again."
+#define APR_EN_UI_TRAY_INFO_EXCLUSION_HELD "%1!s! has stopped recording: the application it holds back has exited."
 
 #define APR_EN_UI_MENU_DISCONNECT           "&Disconnect\tCtrl+Shift+E"
 #define APR_EN_UI_MENU_RENAME_BUS           "Re&name this bus\tF2"
@@ -912,6 +925,8 @@ END
 #define APR_AR_STATUS_FINISHING(id)          /* not translated yet */
 #define APR_AR_WARN_SOURCE_MUTED(id)         /* not translated yet */
 #define APR_AR_WARN_SOURCE_EXITED(id)        /* not translated yet */
+#define APR_AR_WARN_SOURCE_RECOVERED(id)     /* not translated yet */
+#define APR_AR_WARN_EXCLUSION_HELD(id)       /* not translated yet */
 #define APR_AR_ERR_FILE_OPEN(id)             /* not translated yet */
 #define APR_AR_ERR_UNKNOWN_FORMAT(id)        /* not translated yet */
 #define APR_AR_ERR_NO_SOURCES(id)            /* not translated yet */
@@ -1236,6 +1251,8 @@ END
 #define APR_AR_UI_ANN_OUTPUT_RENAMED(id)        /* not translated yet */
 #define APR_AR_UI_ANN_CLOSE_TIMEOUT(id)         /* not translated yet */
 #define APR_AR_UI_ANN_NO_TRAY(id)               /* not translated yet */
+#define APR_AR_UI_ANN_SOURCE_RECOVERED(id)      /* not translated yet */
+#define APR_AR_UI_ANN_EXCLUSION_HELD(id)        /* not translated yet */
 
 #define APR_AR_UI_DLG_OK(id)                   /* not translated yet */
 #define APR_AR_UI_DLG_CANCEL(id)               /* not translated yet */
@@ -1341,6 +1358,8 @@ END
 #define APR_AR_UI_TRAY_INFO_MINIMIZED(id)      /* not translated yet */
 #define APR_AR_UI_TRAY_INFO_ARM_FAILED(id)     /* not translated yet */
 #define APR_AR_UI_TRAY_INFO_OUTPUT_RENAMED(id) /* not translated yet */
+#define APR_AR_UI_TRAY_INFO_SOURCE_RECOVERED(id) /* not translated yet */
+#define APR_AR_UI_TRAY_INFO_EXCLUSION_HELD(id) /* not translated yet */
 
 #define APR_AR_UI_MENU_DISCONNECT(id)       /* not translated yet */
 #define APR_AR_UI_MENU_RENAME_BUS(id)       /* not translated yet */

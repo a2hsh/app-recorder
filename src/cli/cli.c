@@ -2006,6 +2006,19 @@ static void cli_observer(void *user, const AprRunNotice *n)
         warn(o->cx, APR_S_WARN_SOURCE_MUTED, args, 1);
         break;
 
+    /* Both of these go out on the SAME channel as the loss they answer. A
+     * recovery printed somewhere quieter than the death it undoes is a
+     * transcript that reads as a lost recording. */
+    case APR_RUN_EV_SOURCE_RECOVERED:
+        args[0] = n->name;
+        warn(o->cx, APR_S_WARN_SOURCE_RECOVERED, args, 1);
+        break;
+
+    case APR_RUN_EV_EXCLUSION_HELD:
+        args[0] = n->name;
+        warn(o->cx, APR_S_WARN_EXCLUSION_HELD, args, 1);
+        break;
+
     case APR_RUN_EV_ACTION_FAILED:
         /* BEFORE "started" means the file never opened. apr_graph_start has
          * already run by then, so this is the create() that refused, and there

@@ -1259,6 +1259,25 @@ static void handle_notice(AprController *c, AprRunNotice *n)
         refresh_views(c);
         break;
 
+    /* THE RECOVERY GOES OUT ON EXACTLY THE CHANNELS THE LOSS DID. A recording
+     * started from the notification area runs with the window hidden by
+     * definition, which is where a status-bar live region reaches nobody --
+     * and a user who heard "Teams has exited" and never hears that it came
+     * back will believe the take ended there. */
+    case APR_RUN_EV_SOURCE_RECOVERED:
+        args[0] = n->name;
+        say_and_notify(c, APR_S_UI_ANN_SOURCE_RECOVERED,
+                       APR_S_UI_TRAY_INFO_SOURCE_RECOVERED, args, 1);
+        refresh_views(c);
+        break;
+
+    case APR_RUN_EV_EXCLUSION_HELD:
+        args[0] = n->name;
+        say_and_notify(c, APR_S_UI_ANN_EXCLUSION_HELD,
+                       APR_S_UI_TRAY_INFO_EXCLUSION_HELD, args, 1);
+        refresh_views(c);
+        break;
+
     case APR_RUN_EV_ACTION_FAILED:
         /* The reason travelled here from a writer thread as (kind, code) and
          * becomes words HERE, on the UI thread, where apr_str() is allowed --

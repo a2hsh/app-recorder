@@ -164,6 +164,8 @@
     X(STATUS_FINISHING,          1022)                                         \
     X(WARN_SOURCE_MUTED,         1030)                                         \
     X(WARN_SOURCE_EXITED,        1031)                                         \
+    X(WARN_SOURCE_RECOVERED,     1032)                                         \
+    X(WARN_EXCLUSION_HELD,       1033)                                         \
     X(ERR_FILE_OPEN,             1040)                                         \
     X(ERR_UNKNOWN_FORMAT,        1041)                                         \
     X(ERR_NO_SOURCES,            1042)                                         \
@@ -547,7 +549,9 @@
     X(UI_ANN_CLOSING_FILES,         1626)                                 \
     X(UI_ANN_OUTPUT_RENAMED,        1627)                                  \
     X(UI_ANN_CLOSE_TIMEOUT,         1628)                                  \
-    X(UI_ANN_NO_TRAY,               1629)
+    X(UI_ANN_NO_TRAY,               1629)                                  \
+    X(UI_ANN_SOURCE_RECOVERED,      1630)                                  \
+    X(UI_ANN_EXCLUSION_HELD,        1631)
 
 
 /* ---- the dialogs: the half of the product that turns "navigate a graph" into
@@ -685,7 +689,9 @@
     X(UI_TRAY_INFO_ACTION_FAILED,   1764)                                 \
     X(UI_TRAY_INFO_MINIMIZED,       1765)                                 \
     X(UI_TRAY_INFO_ARM_FAILED,      1766)                                 \
-    X(UI_TRAY_INFO_OUTPUT_RENAMED,  1767)
+    X(UI_TRAY_INFO_OUTPUT_RENAMED,  1767)                                 \
+    X(UI_TRAY_INFO_SOURCE_RECOVERED, 1768)                                \
+    X(UI_TRAY_INFO_EXCLUSION_HELD,  1769)
 
 /* ---- WHY SOMETHING FAILED, in the user's language.
  *

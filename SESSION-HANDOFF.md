@@ -5367,3 +5367,176 @@ nothing in this pass touches capture. Tray registration stays suppressed by
 `APPRECORDER_NO_TRAY` in CMake. One mistake worth recording: a UI test
 executable was run directly once, outside ctest, so it did NOT have
 `APPRECORDER_NO_TRAY` set — do not do that; run UI suites through ctest.
+
+---
+
+## 2026-08-26 — Reconnection: a source that dies can now come back
+
+### The problem this closes
+
+Close the target app mid-recording and process loopback kept handing over
+perfect silence for ever (design 4.1 #6). apprecorder detected it, said so
+once, and then did nothing: the rest of the take was silence even if the user
+reopened the app twenty seconds later. Unplug a capture device and it was
+worse — `AUDCLNT_E_DEVICE_INVALIDATED` killed the pump and plugging it back in
+changed nothing. There was **no reconnect / re-attach / recover path anywhere
+in the tree**. For a recorder meant to run for hours unattended, a USB blip
+cost the remainder of the recording.
+
+### What was built
+
+| Layer | Change |
+|---|---|
+| `capture.h` | `AprCaptureConfig::resume_anchor_ticks` — "you are replacing a capture on a timeline that is already running; your first frame belongs at the absolute index this anchor implies". |
+| `capture.h` | `fake.revive_at_frame` — the mirror of `unmute_at_frame`. Death is no longer one-way. C-level knob only: no session key, no CLI spelling. |
+| `capture.c` | `AprCapResume` + `apr_capresume_fill()` — one implementation of the rejoin arithmetic, called by the two producers (the shared WASAPI drain and the fake's generator) immediately before their first frame. |
+| `source.h/.c` | `apr_source_detach` / `apr_source_pad_to` / `apr_source_reattach` / `apr_source_attached` / `apr_source_generation`. A new capture on the SAME ring, with every reader's cursor, the clock anchor and the refcount untouched. |
+| `source.c` | A lock-free gate (`cap_users`) around the one field two threads share. |
+| `reconnect.h/.c` | **New module.** One worker thread for the whole graph: notices losses, keeps detached rings at the frame index that is due, re-resolves identity through `session.h`'s resolver, reattaches. |
+| `runner.h/.c` | Owns the worker. New events `APR_RUN_EV_SOURCE_RECOVERED` and `APR_RUN_EV_EXCLUSION_HELD`; `AprRunnerConfig::no_reconnect`; `apr_runner_source_link()` / `apr_runner_source_recoveries()`. |
+| `cli.c`, `controller.c`, strings | Both new events announced on the same channels their losses use. |
+
+### Where the reconnect thread lives, and why
+
+**`src/core/reconnect.c`, one worker for the whole graph.** Following BUGS.md
+M3 exactly: re-resolving a source is a machine-wide COM enumeration with no
+bound on it, M3 was that class of work sitting on a capture pump, and the fix
+there was a thread that owns its own MTA and its own objects rather than a
+timeout nobody can set on an RPC. Same lesson, one layer up — the mixer loop
+never waits for a search.
+
+It cannot live *in* the capture layer: re-resolving needs `session.h`'s
+identity rules, which sit above capture. It cannot live on the runner's tick
+loop: that loop drives the mixer, and a stall there overruns 250 ms rings.
+
+One thread, not one per source: the expensive half is a question about the
+machine, so N down sources cost one enumeration.
+
+### Retry policy
+
+- First search **500 ms** after the loss, then **doubling**, ceiling
+  **15 s** (`APR_RECONNECT_MAX_MS`).
+- **It never gives up.** A device that returns after twenty minutes of a
+  three-hour take is caught. Measured: 83 searches over 20 minutes.
+- **EXCLUDE ceiling is 2 s** (`APR_RECONNECT_MAX_HELD_MS`), because a held
+  EXCLUDE source is not costing one track, it is costing everything the machine
+  plays.
+- Waiting costs **silence, never alignment** — the hole is filled either way —
+  which is what makes a ceiling of seconds acceptable at all.
+- The backoff resets on recovery.
+- Ring padding runs on its own short cadence (`APR_RECONNECT_PAD_MS`, 25 ms),
+  unrelated to the retry schedule: one `rb_write_silence` of at most a ring.
+
+### EXCLUDE mode — the conclusion
+
+EXCLUDE names a **pid**. When that process exits and starts again under a new
+number, a capture still excluding the old one is **recording the application
+the user explicitly excluded**, silently. The capture never fails and WASAPI
+never reports it, so nothing in the interface would ever say so.
+
+Decided: **the exclusion follows the application, and while it cannot be
+honoured the capture is HELD DOWN rather than left running.** Holding costs the
+take the machine audio for a few seconds; not holding costs the user the one
+thing they asked for. `session.h` already made this exact call at load time —
+"dropping the target of an exclusion records MORE, so failing safe means
+failing loudly" — and this is that rule at run time.
+
+Consequences, all deliberate:
+
+- The hold is **not optional**. `no_reconnect` switches off ordinary
+  reattachment; it does not switch off a privacy guarantee.
+- An EXCLUDE source is watched even though its capture is healthy. Staleness is
+  a question about a pid (`apr_process_exists`) — no COM, no enumeration.
+- Its retry ceiling is 2 s rather than 15 s.
+- It gets its **own sentence** (`APR_RUN_EV_EXCLUSION_HELD`). Reporting it as
+  "the source died" would be the wrong sentence about the wrong thing.
+- The residual window — a successor that starts playing before the search finds
+  it — cannot be closed without a process-creation notification we do not have.
+  Held-and-searching makes it as small as the enumeration allows and fails
+  toward recording LESS.
+
+### Identity: reused, not forked
+
+`apr_session_describe_process` / `apr_session_describe_device` capture the
+identity **at `apr_runner_create`, while the source is still running** — an
+image path cannot be read off a process that has already exited. Searching goes
+through `apr_session_resolve_against`, so the rules stay image path → exe name →
+window class as the only tiebreaker, `pick_when_ambiguous = 0` (two instances
+and nothing to choose by leaves the source down: attaching to a *different*
+instance of the same app is worse than staying dead).
+
+**The stored pid is cleared before every search.** It is the identity of the
+instance that just died.
+
+**A device that returns with a new endpoint GUID but the same friendly name is
+accepted**, consistent with the session resolver: an endpoint id is a
+per-installation GUID pair that a different USB socket or a driver reinstall
+re-mints. Disagreeing would have meant a device that reopens a saved session
+fine but cannot be recovered mid-take. Two devices sharing a name is refused.
+
+### Where the recovered audio lands
+
+At the absolute frame it belongs at. Two mechanisms, same arithmetic:
+
+1. While detached, the worker pads the ring to the frame index the clock says
+   is due (`apr_source_pad_to`). One `rb_write_silence` however long the
+   absence — a write longer than the ring keeps the newest capacity frames and
+   still advances the cursor by the full count.
+2. The replacement capture closes the residue itself, **on its own pump
+   thread, at the instant it learns the QPC of its own first frame**
+   (`apr_capresume_fill`). Padding from the reattaching thread instead would
+   leave the recovered stream one packet early for ever.
+
+### Tests — `tests/test_reconnect.c`, 22 cases
+
+Hardware-free (`APR_SRC_FAKE` throughout; process and device cases go through
+the reconnector's supplied-machine seam). No real time except the three runner
+cases, which need a live loop to have notices to count.
+
+- The hole is exactly the right number of frames, and the tone after it is the
+  tone that belongs at those absolute indices.
+- A recovered source is **sample-identical** to a control source that never
+  died, from 400 frames after the recovery to the end — one frame of
+  misalignment and the waveforms diverge everywhere.
+- Both the loss and the recovery are announced, in that order, once each.
+- A source that never returns behaves exactly as it did.
+- The backoff doubles to its ceiling and never gives up; 20 minutes costs 83
+  searches, not one per 25 ms pass.
+- EXCLUDE: the exclusion moves to the new pid; a target that is gone holds the
+  capture; `no_reconnect` cannot switch the hold off.
+
+**Red runs watched:** `apr_capresume_fill` stubbed to return 0 →
+`a_reattached_source_resumes_at_its_absolute_frame_and_not_at_now` and
+`a_recovered_source_is_sample_identical_to_one_that_never_died` fail. The
+recovery `notice()` removed → `both_the_loss_and_the_recovery_are_announced_in_that_order`
+and `a_recovered_take_is_still_reported_as_incomplete` fail.
+
+### Build and test
+
+`build.cmd Debug test` and `build.cmd Release test`: **34 of 34 suites, 100%**,
+no warnings under `/W4 /WX`. (33 before; `test_reconnect` is the new one.)
+
+**Safety (AGENTS.md rule 1):** nothing was rendered to any audio device. Every
+source in the new suite is `APR_SRC_FAKE`; nothing here opens an audio endpoint
+or activates an `IAudioClient`. Tray registration stays suppressed by
+`APPRECORDER_NO_TRAY` in CMake, and `test_reconnect` builds no controller and no
+tray. No Arabic was written.
+
+### Left undone, deliberately
+
+- **No `--no-reconnect` CLI flag and no UI toggle.** The option exists on
+  `AprRunnerConfig` and is tested at the reconnector level; wiring it to a typed
+  flag means new catalog strings, parsing and `test_cli` coverage, which is
+  another agent's file this pass. Default is on for both front ends, which is
+  the behaviour 0.1.0 wants.
+- **A session-supplied identity is not plumbed through.**
+  `apr_reconnect_set_identity()` exists for it (a session file records identity
+  as it was at save time, which is stronger than anything read back later), but
+  neither front end calls it yet. Today's identity comes from the live machine
+  at runner-create.
+- **`revive_at_frame` has no session key.** Nothing a user can type should be
+  able to script a resurrection, and nothing can currently produce a session
+  containing one, so there is no round-trip to lose.
+- **`apr_session_resolve` uses `static` buffers**, so the live path is
+  single-caller. Pre-existing; the worker is the only caller during a run, but a
+  front end resolving a session concurrently with a recording would race it.

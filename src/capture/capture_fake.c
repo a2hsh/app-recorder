@@ -37,6 +37,19 @@
  *   silent. Modelling death as "the source stops" would be tidier and would
  *   make every test built on it agree that the desync cannot happen.
  *
+ *   AND IT COMES BACK. revive_at_frame is the mirror of unmute_at_frame, and
+ *   it exists because a target that exits and is started again is the ordinary
+ *   case for a recording that runs for hours. Without a way to express it,
+ *   every test above this file agreed that a source which dies stays dead --
+ *   which is the behaviour apprecorder now exists to stop having.
+ *
+ *   REJOINING. A capture built to REPLACE one that died (source.h,
+ *   apr_source_reattach) is told the timeline it is joining, and pads the ring
+ *   with exactly the silence that was missed before its first frame. Its tone
+ *   is then indexed by the ring's ABSOLUTE frame, so a recovered fake is
+ *   byte-identical to one that never died -- which is what lets a test tell a
+ *   correct recovery from one landing at the wrong frame.
+ *
  *   Health is a pure function of the absolute frame index, like the audio, so
  *   the transitions land on the same sample however finely a caller steps the
  *   timeline. Generation is clamped to the next transition so a chunk can
@@ -239,7 +252,16 @@ static void generate_to(FakeImpl *f, uint64_t target_frames)
         /* A muted app and a dead one BOTH record as pure silence. Measured,
          * not assumed -- see the header comment. */
         if (f->period && !f->muted && !f->dead) {
-            fill_chunk(f, f->frames, n);
+            /* THE TONE IS A PURE FUNCTION OF THE RING'S ABSOLUTE INDEX, not of
+             * this instance's own frame counter, and the `+ resume.padded` is
+             * what keeps that true across a reconnection. A capture that
+             * replaced a dead one starts its own counter at zero, so indexing
+             * the tone by that would restart the waveform at phase 0 in the
+             * middle of the file -- and a test comparing a recovered source
+             * against one that never died could then no longer tell a correct
+             * recovery from one landing at the wrong frame, which is the whole
+             * property being checked. */
+            fill_chunk(f, f->resume.padded + f->frames, n);
             rb_write(f->rb, f->chunk, n);
         } else {
             rb_write_silence(f->rb, n);

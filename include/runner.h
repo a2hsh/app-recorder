@@ -67,6 +67,7 @@
 #include "bus.h"
 #include "err.h"
 #include "graph.h"
+#include "reconnect.h"
 #include "source.h"
 
 #ifdef __cplusplus
@@ -91,8 +92,32 @@ typedef enum AprRunEvent {
      * arming, before the first tick. */
     APR_RUN_EV_STARTED,
 
-    /* The target process exited. Reported once per source. */
+    /* The target process exited. Reported once per source -- and reported
+     * AGAIN if the source comes back and dies a second time, because the
+     * second loss is a second hole in the file. */
     APR_RUN_EV_SOURCE_DIED,
+
+    /* THE OTHER HALF, AND IT IS THE ONE THAT IS EASY TO FORGET. The source is
+     * producing audio again -- the application was reopened and reattached, or
+     * the device was plugged back in (reconnect.h). The hole is filled with
+     * exactly the silence that was missed and everything after it is at its
+     * true absolute position, so this sentence is what tells the author his
+     * take is intact rather than half lost.
+     *
+     * Reported once per recovery. Announcing only the loss leaves somebody who
+     * stepped away believing a recording ended forty minutes before it did. */
+    APR_RUN_EV_SOURCE_RECOVERED,
+
+    /* AN EXCLUSION CANNOT BE HONOURED ANY MORE, so this source has been held
+     * down and is recording nothing until it can be.
+     *
+     * EXCLUDE mode records everything the machine plays except one process
+     * TREE, named by pid (design 4.1.1). When that process exits, the running
+     * capture goes on excluding a number that means nothing -- so if the user
+     * reopens the application it is now being recorded, silently, having been
+     * explicitly excluded. apprecorder holds the capture down rather than let
+     * that happen, and says so. Reported once per hold. */
+    APR_RUN_EV_EXCLUSION_HELD,
 
     /* Session volume is zero: this source is recording digital silence.
      * Reported once per source. */
@@ -170,6 +195,15 @@ typedef struct AprRunnerConfig {
     /* 0 = APR_RUNNER_TICK_MS. */
     unsigned tick_ms;
 
+    /* RECONNECTION IS ON BY DEFAULT, because nobody is watching. A source that
+     * dies is searched for and reattached at its true absolute position
+     * (reconnect.h), and both the loss and the recovery are announced.
+     *
+     * Setting this leaves an ordinary source dead once it dies, which is what
+     * this program used to do. It does NOT switch off the EXCLUDE hold: that
+     * one is a privacy guarantee, not a convenience. */
+    int no_reconnect;
+
     /* An EXISTING stop event to wait on, or NULL for the runner to make its
      * own. It is here for the CLI, whose console control handler is installed
      * before any runner exists and must be able to signal one that does not
@@ -233,7 +267,12 @@ int apr_runner_running(const AprRunner *r);
 
 /* Nonzero when the recording happened but is not what was asked for: a source
  * failed to arm, a source died mid-recording, or an action failed. Every file
- * is still playable. */
+ * is still playable.
+ *
+ * A RECOVERY DOES NOT CLEAR IT. The source came back and everything after the
+ * hole is at its true position, but the hole is still in the file, and a
+ * summary that said "complete" would be describing a recording that is not the
+ * one that was asked for. */
 int apr_runner_incomplete(const AprRunner *r);
 
 /* Wall-clock milliseconds since the buses were anchored. 0 before the run
@@ -255,6 +294,19 @@ typedef struct AprRunSourceState {
 size_t apr_runner_source_count(const AprRunner *r);
 int    apr_runner_source_state(const AprRunner *r, size_t index,
                                AprRunSourceState *out);
+
+/* Where this source stands with the thing it was recording, as the reconnect
+ * worker sees it (reconnect.h). APR_LINK_OFF when nothing is watching it --
+ * reconnection switched off, or a synthetic source.
+ *
+ * It is here rather than only on the reconnector because `alive == 0` has two
+ * quite different meanings now, and a status line that cannot tell "the app
+ * exited and we are looking for it" from "we are deliberately not recording,
+ * to keep an exclusion" would be reading out the wrong one half the time. */
+AprLinkState apr_runner_source_link(const AprRunner *r, size_t index);
+
+/* Times this source has been reattached to a live target during this run. */
+uint32_t apr_runner_source_recoveries(const AprRunner *r, size_t index);
 
 size_t   apr_runner_bus_count(const AprRunner *r);
 AprBusId apr_runner_bus_id_at(const AprRunner *r, size_t index);
