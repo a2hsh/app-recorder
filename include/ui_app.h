@@ -207,6 +207,9 @@ void apr_ui_set_accessible_role(HWND hwnd, long msaa_role);
 #define APR_CMD_ADD_ACTION      0x0203
 #define APR_CMD_CONNECT         0x0204
 #define APR_CMD_REMOVE          0x0205
+#define APR_CMD_RENAME_BUS      0x0206
+#define APR_CMD_REMOVE_OUTPUT   0x0207
+#define APR_CMD_DISCONNECT      0x0208
 
 #define APR_CMD_RECORD_START    0x0301
 #define APR_CMD_RECORD_STOP     0x0302
@@ -215,6 +218,12 @@ void apr_ui_set_accessible_role(HWND hwnd, long msaa_role);
 #define APR_CMD_VIEW_DARK       0x0402
 #define APR_CMD_NEXT_PANE       0x0403
 #define APR_CMD_PREV_PANE       0x0404
+
+/* Raised by the notification area, and by nothing else -- but handled by the
+ * frame's ordinary WM_COMMAND path so that the tray adds no second dispatch
+ * route. See ui_tray.h. */
+#define APR_CMD_SHOW_WINDOW     0x0405
+#define APR_CMD_HIDE_TO_TRAY    0x0406
 
 #define APR_CMD_HELP_KEYS       0x0501
 #define APR_CMD_HELP_ABOUT      0x0502
@@ -263,6 +272,45 @@ AprTheme *apr_ui_app_theme(AprUiApp *app);
 
 void apr_ui_app_set_command_handler(AprUiApp *app, AprUiCommandFn fn, void *user);
 
+/* ---------------------------------------------------------------------------
+ * Closing, and why it is a HANDLER rather than a WM_CLOSE the frame decides
+ *
+ * A recorder must never lose a recording to a window close. The frame owns no
+ * model, so it cannot know whether anything is being written; the controller
+ * does. So the frame ASKS, and the answer decides whether the window is
+ * destroyed, diverted to the notification area, or left alone.
+ *
+ * APR_UI_CLOSE_SESSION_END is not a question. Windows is shutting down and
+ * will terminate the process shortly after the handler returns, so the handler
+ * must finish closing every file BEFORE it returns -- exactly what the CLI's
+ * console control handler does for CTRL_CLOSE_EVENT. Its return value is
+ * ignored.
+ * ------------------------------------------------------------------------- */
+
+typedef enum AprUiCloseReason {
+    APR_UI_CLOSE_USER = 0,      /* WM_CLOSE; may be refused or diverted   */
+    APR_UI_CLOSE_SESSION_END    /* WM_ENDSESSION; finish before returning */
+} AprUiCloseReason;
+
+/* Return nonzero to let the window be destroyed. */
+typedef int (*AprUiCloseFn)(AprUiApp *app, AprUiCloseReason why, void *user);
+
+void apr_ui_app_set_close_handler(AprUiApp *app, AprUiCloseFn fn, void *user);
+
+/* ---------------------------------------------------------------------------
+ * Messages the frame does not own
+ *
+ * The notification area's callback, the shell's "TaskbarCreated" broadcast and
+ * the recording clock's timer all arrive at the frame and all belong to the
+ * controller. Rather than teach app.c about any of them, it forwards what it
+ * does not handle. Set *handled to nonzero to stop the frame's own processing.
+ * ------------------------------------------------------------------------- */
+
+typedef LRESULT (*AprUiMessageFn)(AprUiApp *app, UINT msg, WPARAM wp, LPARAM lp,
+                                  int *handled, void *user);
+
+void apr_ui_app_set_message_handler(AprUiApp *app, AprUiMessageFn fn, void *user);
+
 /* Enable or disable one command everywhere it appears -- menu and
  * accelerator. Disabled is not hidden, deliberately: see AprUiCommandFn. */
 void apr_ui_app_enable_command(AprUiApp *app, int command_id, int enabled);
@@ -272,6 +320,20 @@ void apr_ui_app_show(AprUiApp *app, int cmd_show);
 /* Put `id`'s text in the status bar. Status text is also announced, so it must
  * be a whole sentence from the catalog, never a fragment. */
 void apr_ui_app_set_status(AprUiApp *app, AprStrId id);
+
+/* The same, for a sentence that already contains user data -- an elapsed time,
+ * a file name. The caller built it from the catalog; this is not a licence to
+ * concatenate (strings.h).
+ *
+ * `announce` is the whole reason this takes a flag. The status bar is a live
+ * region, so a change to it can be spoken without focus moving -- which is
+ * right for "recording started" and intolerable for a clock that ticks once a
+ * second. Pass 1 for a state change and 0 for a refresh of the same state. */
+void apr_ui_app_set_status_text(AprUiApp *app, const wchar_t *text, int announce);
+
+/* The window caption -- the session's name, when there is one. It is also the
+ * frame's accessible name, so this is what a screen reader says on Alt+Tab. */
+void apr_ui_app_set_title_text(AprUiApp *app, const wchar_t *text);
 
 /* Re-run the layout. Called for you on WM_SIZE and WM_DPICHANGED; call it
  * yourself after showing or hiding a pane. */

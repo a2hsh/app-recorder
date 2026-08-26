@@ -781,3 +781,123 @@ TEST(the_structure_panel_moves_to_the_trailing_side_in_an_rtl_language)
     ui_stop(&h);
     (void)apr_str_set_language(MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US));
 }
+
+
+/* ==========================================================================
+ * The operations added when the UI stopped being read-only
+ *
+ * The window could navigate and rewire an existing graph and nothing else:
+ * add source, add bus and add output all announced "not available yet". The
+ * dialog layer, the recording controller and the notification area closed
+ * that. Every one of those operations has to arrive by the same route as the
+ * ones that were already here -- on the menu, named from the catalog, with a
+ * mnemonic -- because the menu bar is what makes an operation DISCOVERABLE
+ * without sight. An operation reachable only by a canvas gesture, or only by
+ * an accelerator somebody has to already know, does not exist.
+ * ======================================================================== */
+
+TEST(every_operation_that_builds_a_graph_is_on_the_menu_and_named)
+{
+    UiHost h;
+    HMENU  bar;
+    size_t i;
+
+    static const struct { int cmd; AprStrId label; } expect[] = {
+        { APR_CMD_ADD_SOURCE,    APR_S_UI_MENU_ADD_SOURCE },
+        { APR_CMD_ADD_BUS,       APR_S_UI_MENU_ADD_BUS },
+        { APR_CMD_ADD_ACTION,    APR_S_UI_MENU_ADD_ACTION },
+        { APR_CMD_CONNECT,       APR_S_UI_MENU_CONNECT },
+        { APR_CMD_DISCONNECT,    APR_S_UI_MENU_DISCONNECT },
+        { APR_CMD_RENAME_BUS,    APR_S_UI_MENU_RENAME_BUS },
+        { APR_CMD_REMOVE_OUTPUT, APR_S_UI_MENU_REMOVE_OUTPUT },
+        { APR_CMD_REMOVE,        APR_S_UI_MENU_REMOVE },
+        { APR_CMD_RECORD_START,  APR_S_UI_MENU_RECORD_START },
+        { APR_CMD_RECORD_STOP,   APR_S_UI_MENU_RECORD_STOP },
+        { APR_CMD_FILE_OPEN,     APR_S_UI_MENU_FILE_OPEN },
+        { APR_CMD_FILE_SAVE,     APR_S_UI_MENU_FILE_SAVE },
+        { APR_CMD_FILE_SAVE_AS,  APR_S_UI_MENU_FILE_SAVE_AS },
+        { APR_CMD_HIDE_TO_TRAY,  APR_S_UI_MENU_HIDE_TO_TRAY },
+        { APR_CMD_HELP_KEYS,     APR_S_UI_MENU_HELP_KEYS },
+        { APR_CMD_HELP_ABOUT,    APR_S_UI_MENU_HELP_ABOUT }
+    };
+
+    if (!ui_start(&h)) { printf("      SKIPPED: no window\n"); ui_stop(&h); return; }
+
+    bar = GetMenu(h.frame);
+    ASSERT_NOT_NULL(bar);
+
+    for (i = 0; i < sizeof expect / sizeof expect[0]; ++i) {
+        wchar_t label[192];
+        int len = GetMenuStringW(bar, (UINT)expect[i].cmd, label, 192, MF_BYCOMMAND);
+
+        if (len == 0) printf("      command 0x%04X is not on the menu\n", expect[i].cmd);
+        ASSERT_GT_INT(0, len);
+
+        /* From the catalog, not from a literal. This is the assertion that
+         * makes AGENTS.md rule 6 enforceable rather than aspirational: a
+         * hand-written English label here would fail even though it looked
+         * perfect on screen. */
+        ASSERT_WSTR_EQ(apr_str(expect[i].label), label);
+
+        /* And reachable by keyboard through the menu itself. */
+        ASSERT_NOT_NULL(wcschr(label, L'&'));
+    }
+    printf("      %u operations, all on the menu, all named, all mnemonic\n",
+           (unsigned)(sizeof expect / sizeof expect[0]));
+
+    ui_stop(&h);
+}
+
+/* Every operation that has an accelerator says so BESIDE the menu item.
+ *
+ * The tab-separated shortcut text is not decoration: it is how a keyboard user
+ * discovers the fast path, and a screen reader reads it as part of the item.
+ * An accelerator nobody is told about is an accelerator only its author uses.
+ * The pairing also cannot drift -- the text and the binding are asserted here
+ * against each other, not merely each against itself. */
+TEST(every_accelerated_operation_advertises_its_key_on_the_menu_item)
+{
+    UiHost h;
+    HMENU  bar;
+    size_t i;
+
+    static const struct { int cmd; const wchar_t *key; } expect[] = {
+        { APR_CMD_FILE_NEW,      L"Ctrl+N" },
+        { APR_CMD_FILE_OPEN,     L"Ctrl+O" },
+        { APR_CMD_FILE_SAVE,     L"Ctrl+S" },
+        { APR_CMD_ADD_SOURCE,    L"Ctrl+1" },
+        { APR_CMD_ADD_BUS,       L"Ctrl+2" },
+        { APR_CMD_ADD_ACTION,    L"Ctrl+3" },
+        { APR_CMD_CONNECT,       L"Ctrl+E" },
+        { APR_CMD_DISCONNECT,    L"Ctrl+Shift+E" },
+        { APR_CMD_REMOVE_OUTPUT, L"Ctrl+Shift+3" },
+        { APR_CMD_RENAME_BUS,    L"F2" },
+        { APR_CMD_HIDE_TO_TRAY,  L"Ctrl+Shift+H" },
+        { APR_CMD_RECORD_START,  L"Ctrl+R" },
+        { APR_CMD_REMOVE,        L"Delete" },
+        { APR_CMD_HELP_KEYS,     L"F1" }
+    };
+
+    if (!ui_start(&h)) { printf("      SKIPPED: no window\n"); ui_stop(&h); return; }
+
+    bar = GetMenu(h.frame);
+    ASSERT_NOT_NULL(bar);
+
+    for (i = 0; i < sizeof expect / sizeof expect[0]; ++i) {
+        wchar_t label[192];
+        const wchar_t *tab;
+
+        ASSERT_GT_INT(0, GetMenuStringW(bar, (UINT)expect[i].cmd, label, 192,
+                                        MF_BYCOMMAND));
+        tab = wcschr(label, L'\t');
+        if (!tab) printf("      no shortcut text on \"%ls\"\n", label);
+        ASSERT_NOT_NULL(tab);
+        if (wcscmp(tab + 1, expect[i].key) != 0) {
+            printf("      \"%ls\" advertises \"%ls\", expected \"%ls\"\n",
+                   label, tab + 1, expect[i].key);
+        }
+        ASSERT_WSTR_EQ(expect[i].key, tab + 1);
+    }
+
+    ui_stop(&h);
+}

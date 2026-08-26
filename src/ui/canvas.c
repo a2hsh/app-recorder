@@ -1169,9 +1169,28 @@ static int do_remove(CanvasState *st)
     }
 
     if (st->node[i].kind == APR_NODE_ACTION) {
-        /* bus.h has no "remove one action" and inventing one here would be a
-         * second owner of the bus's action list. Refused out loud. */
-        say(st, APR_S_UI_ANN_REMOVE_REFUSED, NULL, 0);
+        /* This used to be refused out loud, because bus.h had no "remove one
+         * action" and inventing one here would have made the canvas a second
+         * owner of the bus's action list. apr_bus_remove_action() now exists
+         * -- and it finalizes before it detaches, so removing an output still
+         * leaves a playable file (AGENTS.md rule 4). */
+        AprBus *b = apr_graph_bus(st->graph, st->node[i].model_id);
+        if (!b) {
+            say(st, APR_S_UI_ANN_REMOVE_REFUSED, NULL, 0);
+            return 1;
+        }
+        lstrcpynW(gone, node_display_name(st, i), APR_CANVAS_NAME_CCH);
+        e = apr_bus_remove_action(b, (size_t)st->node[i].sub_id);
+        if (apr_failed(&e)) {
+            APR_LOG_ERR(APR_LOG_WARN, &e);
+            say(st, APR_S_UI_ANN_REMOVE_REFUSED, NULL, 0);
+            return 1;
+        }
+        st->cur = -1;
+        apr_canvas_rebuild(st->hwnd);
+        args[0] = gone;
+        say(st, APR_S_UI_ANN_REMOVED, args, 1);
+        if (st->count > 0) focus_index(st, st->cur >= 0 ? st->cur : 0);
         return 1;
     }
 
@@ -1379,6 +1398,11 @@ int apr_canvas_command(HWND canvas, int command_id)
 
     switch (command_id) {
     case APR_CMD_CONNECT:    op = APR_CANVAS_OP_CONNECT;    break;
+    /* Disconnect is on the Edit menu but is NOT in the frame's accelerator
+     * table -- Ctrl+Shift+E still reaches this window as a keystroke through
+     * the binding table. The menu route lands here instead, and both run the
+     * same operation. */
+    case APR_CMD_DISCONNECT: op = APR_CANVAS_OP_DISCONNECT; break;
     case APR_CMD_REMOVE:     op = APR_CANVAS_OP_REMOVE;     break;
     case APR_CMD_ADD_SOURCE: op = APR_CANVAS_OP_ADD_SOURCE; break;
     case APR_CMD_ADD_BUS:    op = APR_CANVAS_OP_ADD_BUS;    break;

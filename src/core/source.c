@@ -24,6 +24,12 @@
 
 #define Q32_ONE 4294967296.0
 
+/* Long enough for an endpoint id, which is a pair of GUIDs in braces. Stated
+ * here rather than taken from discover.h so that source.h -- which every core
+ * file includes -- does not acquire a dependency on the discovery layer for
+ * one array bound. */
+#define APR_DISC_ENDPOINT_CCH_LOCAL 256
+
 struct AprSource {
     AprSourceId      id;
     wchar_t          name[APR_NAME_CCH];
@@ -39,6 +45,13 @@ struct AprSource {
     int              started;
     int              refcount;
     int              is_reference;
+
+    /* What this source was asked to capture, kept so a session can be written
+     * down later. The endpoint id is copied into `endpoint` and cfg.device
+     * points at that copy, because the caller's string was borrowed for the
+     * length of apr_source_create() only. */
+    AprCaptureConfig cfg;
+    wchar_t          endpoint[APR_DISC_ENDPOINT_CCH_LOCAL];
 };
 
 struct AprSourceReader {
@@ -95,6 +108,20 @@ AprErr apr_source_create(AprSourceId id, const wchar_t *name,
     s->st.alive      = 1;
     s->is_reference  = (cfg->kind == APR_SRC_PROCESS);
 
+    /* Keep what we were asked to capture. The endpoint id in `cfg` is borrowed
+     * for the length of this call, so it is COPIED and the retained config
+     * points at the copy -- otherwise a session saved an hour later would
+     * write down a dangling pointer's worth of nothing. */
+    s->cfg = *cfg;
+    if (cfg->kind == APR_SRC_DEVICE && cfg->device.endpoint_id) {
+        size_t i = 0;
+        for (; i + 1 < APR_DISC_ENDPOINT_CCH_LOCAL && cfg->device.endpoint_id[i]; i++) {
+            s->endpoint[i] = cfg->device.endpoint_id[i];
+        }
+        s->endpoint[i] = L'\0';
+        s->cfg.device.endpoint_id = s->endpoint;
+    }
+
     /* 250 ms: mixer jitter only. Disk stalls are absorbed inside each action,
      * because a slow encoder must never back-pressure a ring every other bus
      * is reading (design 3.1). */
@@ -150,6 +177,11 @@ const wchar_t *apr_source_name(const AprSource *s)     { return s ? s->name : L"
 uint32_t       apr_source_rate(const AprSource *s)     { return s ? s->rate : 0; }
 uint16_t       apr_source_channels(const AprSource *s) { return s ? s->channels : 0; }
 int            apr_source_refcount(const AprSource *s) { return s ? s->refcount : 0; }
+
+const AprCaptureConfig *apr_source_config(const AprSource *s)
+{
+    return s ? &s->cfg : NULL;
+}
 RingBuf       *apr_source_ring(AprSource *s)           { return s ? s->rb : NULL; }
 AprCapture    *apr_source_capture(AprSource *s)        { return s ? s->cap : NULL; }
 int            apr_source_alive(const AprSource *s)    { return s ? s->st.alive : 0; }

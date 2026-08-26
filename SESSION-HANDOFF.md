@@ -3558,10 +3558,11 @@ outstanding count every run.
 6. ~~**`CMakeLists.txt`'s `foreach(_uitest …)` list**~~ — **fixed 2026-08-26.**
    It now walks `TEST_SRC` and matches `^test_ui_`, so a new `tests/test_ui_*.c`
    links `apprecorder_ui` with no build-system edit.
-7. **No dialog layer**, so the canvas announces "not available yet" for add
-   source/bus/output. It can navigate and rewire an existing graph but cannot
-   build one from scratch. **This is the main gap between the UI and being
-   usable.**
+7. ~~**No dialog layer**, so the canvas announces "not available yet" for add
+   source/bus/output.~~ **CLOSED 2026-08-26** — `src/ui/dialogs.c`,
+   `src/ui/controller.c`, `src/ui/tray.c`, `src/core/runner.c` and
+   `src/uiapp/main.c`. The window can now build a graph from nothing, record,
+   and load and save sessions. See the entry at the bottom of this file.
 
 ## Process lessons worth keeping
 
@@ -3778,3 +3779,281 @@ an agent was live in `cli.c`.
 in this file. Staging explicit paths is not optional during a parallel wave; the
 lesson clearly does not survive being written down, so: **when any agent is live,
 `git add <explicit paths>` only.**
+
+---
+
+## 2026-08-26 — The UI can record, and can build a graph from nothing
+
+`build.cmd Debug test` and `build.cmd Release test`: **25 suites, 493 cases,
+0 failures**, `/W4 /WX` clean in both. Release `apprecorder_ui_app.exe` is
+849,408 bytes; `apprecorder.exe` (CLI) is 778,240.
+
+Closes START-HERE defect **7** ("no dialog layer, so the canvas announces 'not
+available yet'") and defect **1**'s consumer side, and uses defect **2**'s
+`capture_fake` health knob the moment it landed.
+
+### 1. The recording loop was EXTRACTED, not copied
+
+`include/runner.h` + `src/core/runner.c`. The twenty lines that turn a
+configured graph into a recording — arm, anchor at one QPC instant, tick, **wait
+out the mixer's lookbehind so the final block is not thrown away**, finalize on
+every exit path — used to live inside `src/cli/cli.c`. They are now shared and
+the CLI is one of two callers.
+
+**How the extraction was proved faithful: `tests/test_cli.c`, unchanged,
+45/45.** That suite drives the parser, the resolver, the dry run AND the record
+loop in-process with no output to scrape, so a change in what is printed, in
+what order, or in what the files contain fails it. The observer callback exists
+precisely so the CLI's sentences stay in the CLI: `APR_RUN_EV_STARTED` is where
+it prints "Recording to…", `APR_RUN_EV_FINISHING` is where it prints
+"Finishing…", and those fire at exactly the points the old inline code printed
+them.
+
+`tests/test_run_loop.c` (**10 cases, new**) covers the three properties the UI
+needs and the command line never exercises: the loop runs off the caller's
+thread and stops from another; the two health failures that look exactly like
+success are each reported **once**; and `apr_runner_destroy` on a running
+recorder **finalizes rather than abandons**.
+
+One deliberate design point worth not re-deriving: the runner treats its stop
+event **being signalled** as a stop, not merely as a wake-up. The CLI's console
+control handler is installed before any runner exists and signals a shared
+event rather than calling in, so a runner that trusted only its own flag would
+wait on an already-set manual-reset event and spin until the duration expired.
+
+### 2. What the UI now does
+
+| File | What it owns |
+|---|---|
+| `include/ui_controller.h`, `src/ui/controller.c` | the graph, the recording, the dialogs, the tray, and the close guard. **This is the piece that did not exist.** |
+| `include/ui_dialogs.h`, `src/ui/dialogs.c` | real Win32 dialogs built from `DLGTEMPLATE`s at runtime |
+| `include/ui_tray.h`, `src/ui/tray.c` | notification area: icon, context menu, live tooltip, balloons |
+| `src/uiapp/main.c` | `wWinMain`. The UI was a library with no way to run it. |
+
+**Dialogs are real dialogs with real controls**, and the templates are built in
+memory from catalog strings rather than living in the `.rc` — a dialog resource
+would carry English text in the binary (AGENTS.md rule 6) that existed only to
+be overwritten in `WM_INITDIALOG`. Pickers use a **LISTBOX, not a LISTVIEW**,
+because a listbox item's text IS its accessible name, so a row can be a whole
+sentence ("Chrome, process 8412, playing audio now") instead of four columns a
+reader has to be driven across.
+
+The dialogs get `WS_EX_LAYOUTRTL` and their children inherit it — which is
+right **here and only here** (ui_app.h convention 1): we paint nothing inside a
+dialog, so the mirrored DC has nothing of ours to mirror wrongly. Fonts are
+`DS_SHELLFONT` / "MS Shell Dlg", which sidesteps design 6.2's font-coverage trap
+by asking the system for the face it already uses rather than picking one and
+hoping it covers Arabic.
+
+### 3. Announcements: UIA and the shell, never TTS
+
+No SAPI, no `nvdaControllerClient`, no Tolk anywhere. Two channels:
+
+- **Live region on the status bar** while the window is in front —
+  `apr_ui_app_set_status_text(app, text, announce)`. The flag is load-bearing:
+  the one-second clock passes 0, because an elapsed time that spoke every
+  second would make the application unusable inside a minute.
+- **Notification-area balloons** for anything that happens while the window is
+  NOT in front, which is where this application spends its recordings. A
+  live-region change on an unfocused background window is not reliably
+  announced by any reader; balloons are.
+
+Recording announces: **started**, **stopped** (with the duration),
+**stopped-but-incomplete**, **a source exited**, **a source is muted**, **an
+output stopped writing**, **some sources could not be armed**, **nothing to
+record**, and **that cannot be changed while recording**. The last one matters:
+`graph.h` forbids changing the shape while a tick is in flight, so editing
+commands are greyed AND say why when invoked anyway — grey is not a message
+this application's first user receives.
+
+### 4. The tray is the primary surface during a session
+
+`Shell_NotifyIcon`, `NOTIFYICON_VERSION_4` (without which the keyboard's
+Applications key never reaches us), a real `HMENU` through `TrackPopupMenuEx`,
+and a **live tooltip that is a status readout**: "apprecorder — recording,
+01:12:30". Windows+B then the arrows reaches it, so the author can check a
+session from inside any other application without opening a window.
+
+Handled and easy to forget: the shell can restart, and an application that does
+not listen for the registered **"TaskbarCreated"** broadcast silently loses its
+icon for the rest of the session. For a recorder that runs for hours that is
+losing its only surface.
+
+**Close policy, decided and documented.** `WM_CLOSE` while recording asks a
+three-answer question: stop and close (finalize, then exit), leave it recording
+in the notification area, or do nothing. `WM_ENDSESSION` is **not** a question —
+Windows kills the process shortly after the handler returns, so the handler
+stops the runner and blocks until every file is closed, exactly as the CLI's
+console handler does for `CTRL_CLOSE_EVENT`.
+
+### 5. Small core additions, each with a caller that needed it
+
+- **`apr_bus_remove_action`** — bus.h genuinely lacked it, as suspected. It
+  **finalizes before it detaches**, so removing an output leaves a playable
+  file. The canvas's Delete on an output row used to refuse out loud because
+  this did not exist; that refusal, and the test asserting it, are gone.
+- **`apr_bus_action_path`** and **`apr_source_config`** — an action's config and
+  a source's config are borrowed for the length of `create()`, which is right
+  for opening a capture and useless for **writing one down**. Without them a
+  session saved from the window came back as named-but-empty. The alternative
+  was a parallel map inside the UI, i.e. a second owner of the same fact.
+- **`apr_bus_set_name`** — rename.
+- **`apr_ui_app_set_status_text` / `set_title_text` / close handler / message
+  handler** on the frame, so the controller can own the tray, the clock and the
+  close without app.c learning about any of them.
+
+### 6. Keyboard map (everything is reachable, nothing is mouse-only)
+
+New frame accelerators: **F2** rename bus, **Ctrl+Shift+3** remove an output
+(mirrors Ctrl+3 = add an output), **Ctrl+Shift+H** hide to the notification
+area. Disconnect is on the Edit menu but deliberately **not** in the
+accelerator table — the canvas claims Ctrl+Shift+E as a keystroke and
+accelerator matching is exact on modifiers, so adding it here would silently
+take disconnect away from the canvas's own binding table.
+
+`tests/test_ui_a11y.c` gained two cases that pin this: every operation that
+builds a graph is on the menu, named **from the catalog**, and carries a
+mnemonic; and every accelerated operation **advertises its key beside the menu
+item**, asserted against the actual binding rather than against itself.
+
+### 7. Two bugs found while building this, both silent
+
+- **A closed handle in the close path.** `wait_for_files` pumped messages while
+  waiting on the runner's finished event — but pumping lets the posted STOPPED
+  notice run, and handling it destroys the runner and closes that handle.
+  `MsgWaitForMultipleObjects` on a closed handle does not fail loudly; it
+  returns `WAIT_FAILED` for ever and the window hangs until the timeout. Now
+  polls `c->recording`, which has no handle to outlive.
+- **Adopting a graph from the wrong thread.** It builds the canvas's node
+  windows, and a window belongs to the thread that created it, so the frame
+  ends up holding children it cannot destroy — a close that never completes,
+  with no error anywhere. Caught because `test_ui_dialogs.c` printed
+  "UI thread did not exit". `apr_controller_set_graph` now marshals.
+
+### 8. Still open
+
+- **The modal dialogs are not driven live by a test.** A modal owns the thread
+  that opened it, so entering and answering one from the asserting thread is
+  not possible; driving it would mean a second thread posting synthetic
+  keystrokes, which tests the input queue more than the dialog. Their CONTENT
+  is covered through the pure row builders they are made of, and their
+  reachability through the menu and accelerator assertions.
+- **Arabic is still unwritten** — this wave added **~120 more English strings**
+  (three new groups: `APR_STR_LIST_UI_REC`, `_UI_DLG`, `_UI_TRAY`, ids 1600
+  onward, `APR_STR_ID_MAX` raised to 1800). Every one has an explicit
+  "not translated yet" Arabic entry, so the count the ship gate reports went up.
+- **Sessions save the graph, not the drift state**, and a saved fake source
+  round-trips its tone/ppm/amplitude but a saved process source depends on
+  `apr_session_describe_process` finding the pid still alive at save time.
+
+### 9. Design section 6 — what is now wrong in the spec
+
+- **6.1 says the accessibility tree is "30 elements".** Still true of the frame
+  alone; the dialogs and the tray add elements the spec does not describe at
+  all. Section 6 has no dialog layer in it, and it should: the decision that
+  templates are built at runtime from the catalog (rather than living in the
+  `.rc`) is a real i18n design point that is currently only in
+  `include/ui_dialogs.h`.
+- **6.1 does not mention the notification area.** It is now arguably the app's
+  primary surface during a session, and the reason balloons exist —
+  live regions do not carry from a background window — belongs in the spec
+  beside the live-region pattern, not only in `ui_tray.h`.
+- **Section 6 has nothing about where the RECORDING lives.** The spec describes
+  two views over a model and never says who owns the model or the run loop.
+  `core/runner.c` and `ui/controller.c` should be named in section 7's module
+  layout, which currently lists neither.
+- **6.3's "selection is `{kind, bus id, source id, action index}`"** is
+  implemented and correct, but the spec says "a controller wires the two
+  directions" without saying where that controller is. It is
+  `src/ui/controller.c` now.
+
+---
+
+## 2026-08-26 — UI INTERACTION LAYER complete. **The UI is usable.**
+
+**25 suites, 493 cases, 0 failures**, Debug and Release, `/W4 /WX` clean.
+`apprecorder_ui_app.exe` 829.5 KB · `apprecorder.exe` 760 KB.
+
+### The runner was extracted, and faithfulness was *proved*
+
+`include/runner.h` + `src/core/runner.c`. Arm → anchor at one QPC instant → tick
+→ wait out the lookbehind → finalize on every exit path. `cli.c`'s
+`record_loop()` is now 40 lines of observer callbacks and one
+`apr_runner_run()`.
+
+**The proof is `tests/test_cli.c`, unedited, 45/45.** That suite drives the
+parser, resolver, dry run *and* the record loop in-process, and fails on a change
+to what is printed, in what order, or what lands in the files. The observer
+pattern exists so the CLI's sentences stay in the CLI.
+
+Non-obvious: the runner treats its stop event **being signalled** as a stop, not
+a wake-up — the CLI's console handler is installed before any runner exists and
+signals a shared manual-reset event, so a runner trusting only its own flag would
+spin.
+
+`tests/test_run_loop.c` covers what the CLI never does: stopping from another
+thread; a muted or dead source reported **once**, not 40 times in a 400 ms run;
+and `apr_runner_destroy` on a running recorder **finalizing rather than
+abandoning**.
+
+### Two silent bugs it found
+
+1. **`wait_for_files` pumped messages while waiting on the runner's finished
+   event.** Pumping runs the posted STOPPED notice, which destroys the runner and
+   closes that handle — and `MsgWaitForMultipleObjects` on a closed handle
+   returns `WAIT_FAILED` **forever**. The window hung with no error anywhere.
+2. **Adopting a graph from the wrong thread** builds the canvas's node windows on
+   that thread, so the frame cannot destroy them — a close that never completes,
+   again silently. `apr_controller_set_graph` now marshals.
+
+### Announcement policy as shipped
+
+Two channels, **no TTS anywhere** — no SAPI, no `nvdaControllerClient`, no Tolk.
+A **status-bar live region** in the foreground; **notification-area balloons**
+for anything happening while minimised, where live regions are not reliably
+announced.
+
+**The elapsed clock writes with `announce=0`** — an elapsed time that spoke every
+second would be unusable inside a minute. Editing while recording is greyed
+*and* refuses out loud.
+
+### Close policy
+
+`WM_CLOSE` while recording asks three real answers (stop and close / leave it
+recording in the tray / cancel). **`WM_ENDSESSION` is not a question** and blocks
+until every file is closed.
+
+### `bus.h` was genuinely missing things — added, each with a caller
+
+`apr_bus_remove_action` (**finalizes before it detaches**), `apr_bus_action_path`,
+`apr_source_config` (a session saved from the window otherwise came back
+named-but-empty), `apr_bus_set_name`.
+
+### ★ HARD-KILL VALIDATION — accidental, and the best test of the night
+
+I mis-read `--duration` as milliseconds; it is **seconds**, so a 3-minute
+recording was running when I killed it with `Stop-Process -Force`. That is an
+unplanned real-world test of the kill-survival design:
+
+| file | duration | ffmpeg decode |
+|---|---|---|
+| `a.wav` | 179.42 s | **clean, zero warnings** |
+| `a.mp3` | 179.86 s | clean |
+| `b.ogg` | 179.53 s | **clean, zero warnings** |
+
+All three playable after a hard kill, across two buses. The single MP3 note
+("estimating duration from bitrate") is exactly the documented consequence of the
+Xing tag never being written — **and the reason CBR is the default**: CBR
+duration is arithmetic, so it still reports the right length. §8.0's reasoning
+holds under a real kill, not just a simulated one.
+
+### Section 6 gaps it identified (not wrong statements — omissions)
+
+- **No dialog layer.** The "templates built at runtime from the catalog, not in
+  the `.rc`" decision is a genuine i18n point and currently lives only in
+  `ui_dialogs.h`.
+- **No notification area.** Arguably the primary surface during a session, and
+  the reason balloons exist belongs beside the live-region pattern.
+- **Never says who owns the model or the run loop.** §7's module layout lists
+  neither `core/runner.c` nor `ui/controller.c`. §6.3's selection identity says
+  "a controller wires the two directions" without naming it: `ui/controller.c`.

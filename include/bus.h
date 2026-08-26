@@ -73,6 +73,12 @@ void apr_bus_destroy(AprBus *b);
 
 AprBusId       apr_bus_id(const AprBus *b);
 const wchar_t *apr_bus_name(const AprBus *b);
+
+/* Rename. Returns 0 for an empty name, which is refused rather than accepted:
+ * a bus with no name is a row a screen reader reads as nothing at all, and
+ * every projection of this model reads the name (graph.h). The id does not
+ * change, so nothing holding one is affected. */
+int            apr_bus_set_name(AprBus *b, const wchar_t *name);
 uint32_t       apr_bus_rate(const AprBus *b);
 uint16_t       apr_bus_channels(const AprBus *b);
 
@@ -107,6 +113,15 @@ AprErr apr_bus_add_action(AprBus *b, const AprActionVTable *vt,
 
 size_t                 apr_bus_action_count(const AprBus *b);
 const AprActionVTable *apr_bus_action_at(const AprBus *b, size_t index);
+
+/* Where output `index` is being written, or an empty string.
+ *
+ * An action's config is borrowed for the length of create() -- right for
+ * opening a file, useless for writing the arrangement down afterwards, which
+ * is exactly what saving a session is. The bus keeps the path because the bus
+ * is what owns the output; a front end keeping its own copy would be a second
+ * answer to the same question. Never NULL. */
+const wchar_t *apr_bus_action_path(const AprBus *b, size_t index);
 
 /* Remove one output.
  *

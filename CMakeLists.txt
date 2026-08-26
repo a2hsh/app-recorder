@@ -168,8 +168,11 @@ endif()
 file(GLOB UI_SRC ${CMAKE_SOURCE_DIR}/src/ui/*.c)
 if(UI_SRC)
   add_library(apprecorder_ui STATIC ${UI_SRC})
+  # comdlg32 for the file pickers in src/ui/dialogs.c; shell32 for the
+  # notification area in src/ui/tray.c.
   target_link_libraries(apprecorder_ui PUBLIC
     apprecorder_core comctl32 uxtheme dwmapi oleacc gdi32 user32 shell32
+    comdlg32
   )
   # rc.exe dependency scanning follows #include only, so a change to the
   # manifest itself does not rebuild the .res: the old manifest stays
@@ -201,6 +204,19 @@ if(UI_SRC)
       target_link_libraries(${_uitest} PRIVATE apprecorder_ui)
     endif()
   endforeach()
+
+  # ---------------------------------------------------------------------------
+  # The windowed front end.
+  #
+  # WIN32_EXECUTABLE so it starts with no console window attached.
+  # src/uiapp/main.c is the only translation unit that decides which front end
+  # owns the process -- which is exactly why apprecorder_ui itself still has no
+  # entry point (see the note above, and the comment at the top of that file).
+  # ---------------------------------------------------------------------------
+  if(EXISTS ${CMAKE_SOURCE_DIR}/src/uiapp/main.c)
+    add_executable(apprecorder_ui_app WIN32 ${CMAKE_SOURCE_DIR}/src/uiapp/main.c)
+    target_link_libraries(apprecorder_ui_app PRIVATE apprecorder_ui)
+  endif()
 endif()
 
 # ---------------------------------------------------------------------------

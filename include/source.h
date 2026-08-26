@@ -103,6 +103,19 @@ uint32_t       apr_source_rate(const AprSource *s);
 uint16_t       apr_source_channels(const AprSource *s);
 int            apr_source_refcount(const AprSource *s);
 
+/* WHAT THIS SOURCE WAS ASKED TO CAPTURE, kept for the life of the source.
+ *
+ * A process id or an endpoint id is borrowed for the length of
+ * apr_source_create(), which is right for opening a capture and useless for
+ * writing one down afterwards -- and writing one down is exactly what saving a
+ * session is (session.h). Keeping it HERE rather than in a front end's private
+ * map means there is one answer to "what is this source" instead of two that
+ * can disagree.
+ *
+ * The endpoint id is COPIED, so the returned config outlives whatever the
+ * caller passed in. Never NULL for a live source. */
+const AprCaptureConfig *apr_source_config(const AprSource *s);
+
 /* Nonzero for a source that IS the reference timeline and is consumed
  * untouched, rather than one that must be corrected onto it.
  *

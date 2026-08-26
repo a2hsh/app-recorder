@@ -240,35 +240,93 @@ size_t apr_dlg_endpoint_row(const AprAudioEndpoint *e, wchar_t *buf, size_t cch)
 size_t apr_dlg_resolution_row(const AprSessionResolution *r,
                               wchar_t *buf, size_t cch)
 {
-    const wchar_t *args[2];
+    const wchar_t *args[3];
+    wchar_t        pid[32];
     AprStrId       id;
-    size_t         n = 1;
+    size_t         n;
 
     if (!buf || cch == 0) return 0;
     buf[0] = 0;
     if (!r) return 0;
 
-    args[0] = r->name;
-    args[1] = r->substituted[0] ? r->substituted : r->wanted;
-
     /* The session catalog already owns these sentences, and every one of them
      * names BOTH halves -- see session.h on why "Teams could not be found" is
      * not a sentence a person can act on. Reusing them is also what stops the
-     * UI and the CLI describing the same outcome two different ways. */
+     * UI and the CLI describing the same outcome two different ways.
+     *
+     * THE ARGUMENT COUNT IS PER SENTENCE AND IS NOT NEGOTIABLE. strings.h:
+     * FORMAT_MESSAGE_ARGUMENT_ARRAY indexes the array directly and the API
+     * carries no count, so a sentence with %3!s! against a two-element array
+     * reads past the end and FormatMessageW cannot detect it. The string layer
+     * refuses rather than doing that -- which turns the bug into a visible
+     * placeholder instead of a crash -- but the fix is to pass the right
+     * number here, so each case states its own.
+     *
+     * Every number goes through apr_str_number() first (AGENTS.md rule 6). */
+    args[0] = r->name;
+    args[1] = L"";
+    args[2] = L"";
+
     switch (r->status) {
-    case APR_SESSION_MOVED:           id = APR_S_WARN_SESSION_MOVED;         n = 2; break;
-    case APR_SESSION_BY_WINDOW_CLASS: id = APR_S_WARN_SESSION_BY_WINDOW_CLASS; n = 2; break;
-    case APR_SESSION_FIRST_OF_MANY:   id = APR_S_WARN_SESSION_FIRST_OF_MANY; n = 2; break;
-    case APR_SESSION_DEVICE_BY_NAME:  id = APR_S_WARN_SESSION_DEVICE_BY_NAME; n = 2; break;
-    case APR_SESSION_NOT_RUNNING:     id = APR_S_ERR_SESSION_SOURCE_MISSING; n = 2; break;
-    case APR_SESSION_DEVICE_ABSENT:   id = APR_S_ERR_SESSION_DEVICE_MISSING; n = 2; break;
-    case APR_SESSION_AMBIGUOUS:       id = APR_S_ERR_SESSION_AMBIGUOUS;      n = 2; break;
-    case APR_SESSION_NEEDS_CONSENT:   id = APR_S_ERR_SESSION_NEEDS_CONSENT;  n = 1; break;
+    case APR_SESSION_MOVED:
+        /* "%1 is now running from %2, not %3 where the session recorded it." */
+        id = APR_S_WARN_SESSION_MOVED;
+        args[1] = r->substituted;
+        args[2] = r->wanted;
+        n = 3;
+        break;
+
+    case APR_SESSION_BY_WINDOW_CLASS:
+        id = APR_S_WARN_SESSION_BY_WINDOW_CLASS;
+        args[1] = num_of((int64_t)r->chosen_pid, pid, 32);
+        n = 2;
+        break;
+
+    case APR_SESSION_FIRST_OF_MANY:
+        id = APR_S_WARN_SESSION_FIRST_OF_MANY;
+        args[1] = num_of((int64_t)r->chosen_pid, pid, 32);
+        n = 2;
+        break;
+
+    case APR_SESSION_DEVICE_BY_NAME:
+        id = APR_S_WARN_SESSION_DEVICE_BY_NAME;
+        n = 1;
+        break;
+
+    case APR_SESSION_NOT_RUNNING:
+        id = APR_S_ERR_SESSION_SOURCE_MISSING;
+        args[1] = r->wanted;
+        n = 2;
+        break;
+
+    case APR_SESSION_DEVICE_ABSENT:
+        id = APR_S_ERR_SESSION_DEVICE_MISSING;
+        n = 1;
+        break;
+
+    case APR_SESSION_AMBIGUOUS:
+        id = APR_S_ERR_SESSION_AMBIGUOUS;
+        n = 1;
+        break;
+
+    case APR_SESSION_NEEDS_CONSENT:
+        /* Deliberately NOT the command line's version of this sentence, which
+         * tells the reader to add --allow-system-capture. There is no command
+         * line here; the confirmation is a dialog. */
+        id = APR_S_UI_DLG_RESOLVE_CONSENT;
+        args[1] = r->wanted[0] ? r->wanted : r->name;
+        n = 2;
+        break;
+
     default:
+        /* Every source gets a row, including the ones that were found exactly
+         * as asked. A report that listed only problems would leave a screen
+         * reader user counting to work out which sources were fine. */
         id = APR_S_UI_DLG_RESOLVE_OK;
         n = 1;
         break;
     }
+
     return apr_str_format(id, buf, cch, args, n);
 }
 

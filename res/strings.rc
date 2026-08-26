@@ -612,6 +612,13 @@
 #define APR_EN_UI_TRAY_INFO_ACTION_FAILED  "%1!s! stopped writing. The file that exists is still playable."
 #define APR_EN_UI_TRAY_INFO_MINIMIZED      "apprecorder is still running here. Press Windows+B and then the arrow keys to reach it."
 
+#define APR_EN_UI_MENU_DISCONNECT           "&Disconnect\tCtrl+Shift+E"
+#define APR_EN_UI_MENU_RENAME_BUS           "Re&name this bus\tF2"
+#define APR_EN_UI_MENU_REMOVE_OUTPUT        "Remove an out&put\tCtrl+Shift+3"
+#define APR_EN_UI_MENU_HIDE_TO_TRAY         "&Hide to the notification area\tCtrl+Shift+H"
+
+#define APR_EN_UI_DLG_RESOLVE_CONSENT      "%1!s! asks to record EVERYTHING this computer plays, holding back only %2!s! and whatever it has started. apprecorder will not do that because a file asked for it -- confirm it yourself first."
+
 #define APR_EN_ENTRY(name, id)      id      APR_EN_##name
 #define APR_EN_PENTRY(name, base)                                              \
     base+0  APR_EN_##name##_ZERO                                               \
@@ -1124,6 +1131,13 @@ END
 #define APR_AR_UI_TRAY_INFO_SOURCE_MUTED(id)   /* not translated yet */
 #define APR_AR_UI_TRAY_INFO_ACTION_FAILED(id)  /* not translated yet */
 #define APR_AR_UI_TRAY_INFO_MINIMIZED(id)      /* not translated yet */
+
+#define APR_AR_UI_MENU_DISCONNECT(id)       /* not translated yet */
+#define APR_AR_UI_MENU_RENAME_BUS(id)       /* not translated yet */
+#define APR_AR_UI_MENU_REMOVE_OUTPUT(id)    /* not translated yet */
+#define APR_AR_UI_MENU_HIDE_TO_TRAY(id)     /* not translated yet */
+
+#define APR_AR_UI_DLG_RESOLVE_CONSENT(id)   /* not translated yet */
 
 #define APR_AR_ENTRY(name, id)      APR_AR_##name(id)
 #define APR_AR_PENTRY(name, base)   APR_AR_P_##name(base)

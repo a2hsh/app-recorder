@@ -10,6 +10,11 @@
 #include "log.h"
 #include "mix.h"
 
+/* Long enough for a full Windows path. Stated here rather than pulled from
+ * discover.h so that bus.h does not acquire a dependency on the discovery
+ * layer for one array bound. */
+#define APR_BUS_ACTION_PATH_CCH 260
+
 typedef struct BusEdge {
     AprSource       *src;
     AprSourceReader *rd;
@@ -22,6 +27,10 @@ typedef struct BusAction {
     int                    failed;
     int                    finalized;
     AprErr                 err;
+    /* Copied, not borrowed: AprActionConfig::out_path is only valid for the
+     * length of create(), and a session saved an hour later still has to be
+     * able to say what this output writes. */
+    wchar_t                path[APR_BUS_ACTION_PATH_CCH];
 } BusAction;
 
 struct AprBus {
@@ -113,6 +122,15 @@ void apr_bus_destroy(AprBus *b)
 
 AprBusId       apr_bus_id(const AprBus *b)       { return b ? b->id : 0; }
 const wchar_t *apr_bus_name(const AprBus *b)     { return b ? b->name : L""; }
+
+
+int apr_bus_set_name(AprBus *b, const wchar_t *name)
+{
+    if (!b || !name || !name[0]) return 0;
+    copy_name(b->name, name);
+    return 1;
+}
+
 uint32_t       apr_bus_rate(const AprBus *b)     { return b ? b->rate : 0; }
 uint16_t       apr_bus_channels(const AprBus *b) { return b ? b->channels : 0; }
 int            apr_bus_running(const AprBus *b)  { return b ? b->running : 0; }
@@ -248,6 +266,14 @@ AprErr apr_bus_add_action(AprBus *b, const AprActionVTable *vt,
     b->actions[b->action_count].failed    = 0;
     b->actions[b->action_count].finalized = 0;
     b->actions[b->action_count].err       = apr_ok();
+    b->actions[b->action_count].path[0]   = L'\0';
+    if (cfg->out_path) {
+        size_t k = 0;
+        for (; k + 1 < APR_BUS_ACTION_PATH_CCH && cfg->out_path[k]; k++) {
+            b->actions[b->action_count].path[k] = cfg->out_path[k];
+        }
+        b->actions[b->action_count].path[k] = L'\0';
+    }
     b->action_count++;
     return apr_ok();
 }
@@ -291,6 +317,11 @@ size_t apr_bus_action_count(const AprBus *b) { return b ? b->action_count : 0; }
 const AprActionVTable *apr_bus_action_at(const AprBus *b, size_t index)
 {
     return (b && index < b->action_count) ? b->actions[index].vt : NULL;
+}
+
+const wchar_t *apr_bus_action_path(const AprBus *b, size_t index)
+{
+    return (b && index < b->action_count) ? b->actions[index].path : L"";
 }
 
 int apr_bus_action_failed(const AprBus *b, size_t index)

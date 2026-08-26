@@ -322,6 +322,10 @@ struct AprUiApp {
 
     AprUiCommandFn cmd_fn;
     void          *cmd_user;
+    AprUiCloseFn   close_fn;
+    void          *close_user;
+    AprUiMessageFn msg_fn;
+    void          *msg_user;
 
     int  tree_visible;
     int  applying_theme;  /* re-entrancy guard, see apply_dark */
@@ -454,6 +458,10 @@ static HMENU build_menu(void)
         { APR_CMD_ADD_ACTION, APR_S_UI_MENU_ADD_ACTION },
         { 0, 0 },
         { APR_CMD_CONNECT,    APR_S_UI_MENU_CONNECT },
+        { APR_CMD_DISCONNECT, APR_S_UI_MENU_DISCONNECT },
+        { 0, 0 },
+        { APR_CMD_RENAME_BUS,    APR_S_UI_MENU_RENAME_BUS },
+        { APR_CMD_REMOVE_OUTPUT, APR_S_UI_MENU_REMOVE_OUTPUT },
         { APR_CMD_REMOVE,     APR_S_UI_MENU_REMOVE }
     };
     static const MenuItem rec[] = {
@@ -463,6 +471,7 @@ static HMENU build_menu(void)
     static const MenuItem view[] = {
         { APR_CMD_VIEW_TREE, APR_S_UI_MENU_VIEW_TREE },
         { APR_CMD_VIEW_DARK, APR_S_UI_MENU_VIEW_DARK },
+        { APR_CMD_HIDE_TO_TRAY, APR_S_UI_MENU_HIDE_TO_TRAY },
         { 0, 0 },
         { APR_CMD_NEXT_PANE, APR_S_UI_MENU_VIEW_NEXT_PANE }
     };
@@ -509,6 +518,18 @@ static HACCEL build_accelerators(void)
         { FVIRTKEY | FCONTROL,            '3', APR_CMD_ADD_ACTION },
         { FVIRTKEY | FCONTROL,            'E', APR_CMD_CONNECT },
         { FVIRTKEY,                  VK_DELETE, APR_CMD_REMOVE },
+        /* Ctrl+Shift+3 mirrors Ctrl+3: the key that adds an output, with
+         * Shift, is the key that takes one away. F2 is the platform's rename
+         * key everywhere else and there is no reason to invent another.
+         *
+         * Ctrl+Shift+E is deliberately NOT here. The canvas claims it as a
+         * keystroke, and accelerator matching is exact on modifiers, so
+         * putting it in this table would silently take disconnect away from
+         * the canvas's own binding table -- which is the one thing that table
+         * exists to prevent. */
+        { FVIRTKEY | FCONTROL | FSHIFT,   '3', APR_CMD_REMOVE_OUTPUT },
+        { FVIRTKEY,                     VK_F2, APR_CMD_RENAME_BUS },
+        { FVIRTKEY | FCONTROL | FSHIFT,   'H', APR_CMD_HIDE_TO_TRAY },
         { FVIRTKEY | FCONTROL,            'R', APR_CMD_RECORD_START },
         { FVIRTKEY | FCONTROL,   VK_OEM_PERIOD, APR_CMD_RECORD_STOP },
         { FVIRTKEY | FCONTROL,            'T', APR_CMD_VIEW_TREE },
@@ -975,7 +996,32 @@ static LRESULT CALLBACK frame_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         break;
 
     case WM_CLOSE:
+        /* NEVER the frame's decision alone. The frame owns no model, so it
+         * cannot know whether a recording is in flight; the controller can,
+         * and a recording lost to a window close is the worst failure this
+         * application has. */
+        if (app && app->close_fn &&
+            !app->close_fn(app, APR_UI_CLOSE_USER, app->close_user)) {
+            return 0;
+        }
         DestroyWindow(hwnd);
+        return 0;
+
+    case WM_QUERYENDSESSION:
+        /* Always agree. Refusing a shutdown is not a recorder's call to make,
+         * and the actual work happens in WM_ENDSESSION where there is a
+         * defined window in which to do it. */
+        return TRUE;
+
+    case WM_ENDSESSION:
+        /* wParam nonzero means the session really is ending. Windows kills the
+         * process shortly after this returns, so the handler must finish
+         * closing every file BEFORE returning -- the same contract the CLI's
+         * console control handler honours for CTRL_CLOSE_EVENT. Its answer is
+         * not a vote and is ignored. */
+        if (wp && app && app->close_fn) {
+            (void)app->close_fn(app, APR_UI_CLOSE_SESSION_END, app->close_user);
+        }
         return 0;
 
     case WM_DESTROY:
@@ -985,6 +1031,15 @@ static LRESULT CALLBACK frame_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     default:
         break;
+    }
+
+    /* The notification area's callback, the shell's TaskbarCreated broadcast
+     * and the recording clock's timer all land here and none of them is the
+     * frame's business. Forwarded rather than understood. */
+    if (app && app->msg_fn) {
+        int handled = 0;
+        LRESULT r = app->msg_fn(app, msg, wp, lp, &handled, app->msg_user);
+        if (handled) return r;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
@@ -1193,7 +1248,8 @@ AprErr apr_ui_app_create(HINSTANCE inst, AprUiApp **out)
         static const int owned_by_model[] = {
             APR_CMD_FILE_NEW, APR_CMD_FILE_OPEN, APR_CMD_FILE_SAVE,
             APR_CMD_FILE_SAVE_AS, APR_CMD_ADD_SOURCE, APR_CMD_ADD_BUS,
-            APR_CMD_ADD_ACTION, APR_CMD_CONNECT, APR_CMD_REMOVE,
+            APR_CMD_ADD_ACTION, APR_CMD_CONNECT, APR_CMD_DISCONNECT,
+            APR_CMD_REMOVE, APR_CMD_RENAME_BUS, APR_CMD_REMOVE_OUTPUT,
             APR_CMD_RECORD_START, APR_CMD_RECORD_STOP,
             APR_CMD_HELP_KEYS, APR_CMD_HELP_ABOUT
         };
@@ -1251,6 +1307,20 @@ void apr_ui_app_set_command_handler(AprUiApp *app, AprUiCommandFn fn, void *user
     app->cmd_user = user;
 }
 
+void apr_ui_app_set_close_handler(AprUiApp *app, AprUiCloseFn fn, void *user)
+{
+    if (!app) return;
+    app->close_fn = fn;
+    app->close_user = user;
+}
+
+void apr_ui_app_set_message_handler(AprUiApp *app, AprUiMessageFn fn, void *user)
+{
+    if (!app) return;
+    app->msg_fn = fn;
+    app->msg_user = user;
+}
+
 void apr_ui_app_enable_command(AprUiApp *app, int command_id, int enabled)
 {
     if (!app || !app->menu) return;
@@ -1268,8 +1338,34 @@ void apr_ui_app_show(AprUiApp *app, int cmd_show)
 
 void apr_ui_app_set_status(AprUiApp *app, AprStrId id)
 {
-    if (!app || !app->status) return;
-    SendMessageW(app->status, SB_SETTEXTW, 0, (LPARAM)apr_str(id));
+    apr_ui_app_set_status_text(app, apr_str(id), 1);
+}
+
+void apr_ui_app_set_status_text(AprUiApp *app, const wchar_t *text, int announce)
+{
+    if (!app || !app->status || !text) return;
+    SendMessageW(app->status, SB_SETTEXTW, 0, (LPARAM)text);
+
+    /* THE STATUS BAR IS A LIVE REGION, and this is the flag that keeps it
+     * bearable. A screen reader picks a live-region change up without focus
+     * having moved, which is exactly right for "recording started" and
+     * unusable for a clock that reprints once a second. The clock passes 0.
+     *
+     * Best-effort, like every announcement in this product: it is never the
+     * ONLY way a state change is said, because a live region on a background
+     * window is not reliably announced by any reader -- that case goes out as
+     * a notification-area balloon instead (ui_tray.h). */
+    if (announce) {
+        NotifyWinEvent(EVENT_OBJECT_LIVEREGIONCHANGED, app->status,
+                       OBJID_CLIENT, CHILDID_SELF);
+    }
+}
+
+void apr_ui_app_set_title_text(AprUiApp *app, const wchar_t *text)
+{
+    if (!app || !app->frame || !text) return;
+    SetWindowTextW(app->frame, text);
+    apr_ui_set_accessible_name_text(app->frame, text);
 }
 
 void apr_ui_app_request_close(const AprUiApp *app)

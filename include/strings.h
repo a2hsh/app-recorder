@@ -301,6 +301,9 @@
     X(UI_MENU_ADD_ACTION,          1323)                                      \
     X(UI_MENU_CONNECT,             1324)                                      \
     X(UI_MENU_REMOVE,              1325)                                      \
+    X(UI_MENU_DISCONNECT,          1326)                                      \
+    X(UI_MENU_RENAME_BUS,          1327)                                      \
+    X(UI_MENU_REMOVE_OUTPUT,       1328)                                      \
     X(UI_MENU_RECORDING,           1330)                                      \
     X(UI_MENU_RECORD_START,        1331)                                      \
     X(UI_MENU_RECORD_STOP,         1332)                                      \
@@ -308,6 +311,7 @@
     X(UI_MENU_VIEW_TREE,           1341)                                      \
     X(UI_MENU_VIEW_DARK,           1342)                                      \
     X(UI_MENU_VIEW_NEXT_PANE,      1343)                                      \
+    X(UI_MENU_HIDE_TO_TRAY,        1344)                                      \
     X(UI_MENU_HELP,                1350)                                      \
     X(UI_MENU_HELP_KEYS,           1351)                                      \
     X(UI_MENU_HELP_ABOUT,          1352)
@@ -605,7 +609,8 @@
     X(UI_DLG_KEY_ALT,               1723)                                 \
     X(UI_DLG_OUTPUT_REMOVED,        1724)                                 \
     X(UI_DLG_PICK_OUTPUT,           1725)                                 \
-    X(UI_DLG_OUTPUT_ROW,            1726)
+    X(UI_DLG_OUTPUT_ROW,            1726)                                      \
+    X(UI_DLG_RESOLVE_CONSENT,     1727)
 
 
 /* ---- the notification area.

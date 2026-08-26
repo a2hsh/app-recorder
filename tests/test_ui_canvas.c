@@ -948,14 +948,21 @@ TEST(a_refusal_says_what_is_actually_wrong_rather_than_the_nearest_sentence)
     apr_str_format(APR_S_UI_ANN_GAIN_NOT_SOURCE, want, 512, args, 1);
     ASSERT_WSTR_EQ(want, said);
 
-    /* And an output cannot be deleted on its own, because bus.h has no call
-     * for it -- refused out loud rather than doing nothing. */
+    /* An output CAN now be deleted on its own. This case used to assert the
+     * refusal, because bus.h had no call for it and the canvas correctly
+     * refused rather than becoming a second owner of a bus's action list.
+     * apr_bus_remove_action() exists now -- and it FINALIZES before it
+     * detaches, so the file the output was writing is closed and playable
+     * rather than abandoned (AGENTS.md rule 4). */
     ASSERT_TRUE(focus_node(&f.h,
                            (size_t)find_node_index(&f.h, APR_NODE_ACTION,
                                                    f.m.mix, 0)));
     ASSERT_TRUE(perform(&f.h, APR_CANVAS_OP_REMOVE));
+    ASSERT_EQ_INT(-1, find_node_index(&f.h, APR_NODE_ACTION, f.m.mix, 0));
     apr_canvas_last_announcement(f.h.canvas, said, 512);
-    ASSERT_WSTR_EQ(apr_str(APR_S_UI_ANN_REMOVE_REFUSED), said);
+    printf("      \"%ls\"\n", said);
+    ASSERT_FALSE(wcscmp(apr_str(APR_S_UI_ANN_REMOVE_REFUSED), said) == 0);
+    ASSERT_TRUE(said[0] != 0);
 
     fixture_down(&f);
 }
