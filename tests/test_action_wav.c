@@ -218,7 +218,8 @@ TEST(the_vtable_identifies_itself_as_wav)
 {
     ASSERT_STR_EQ("wav", apr_action_wav.id);
     ASSERT_WSTR_EQ(L"wav", apr_action_wav.extension);
-    ASSERT_NOT_NULL(apr_action_wav.display_name);
+    ASSERT_NE_INT(0, apr_action_wav.display_name_id);
+    ASSERT_GT_INT(0, (long long)wcslen(apr_str(apr_action_wav.display_name_id)));
     ASSERT_NOT_NULL((void *)(uintptr_t)apr_action_wav.create);
     ASSERT_NOT_NULL((void *)(uintptr_t)apr_action_wav.on_audio);
     ASSERT_NOT_NULL((void *)(uintptr_t)apr_action_wav.finalize);

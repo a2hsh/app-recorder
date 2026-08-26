@@ -117,8 +117,8 @@ static void build_multibus(AprSession *s)
     s->buses[0].action_count = 2;
     strcpy_s(s->buses[0].actions[0].id, 16, "wav");
     wcscpy_s(s->buses[0].actions[0].path, APR_DISC_PATH_CCH, L"C:\\rec\\mix.wav");
-    strcpy_s(s->buses[0].actions[1].id, 16, "m4a");
-    wcscpy_s(s->buses[0].actions[1].path, APR_DISC_PATH_CCH, L"C:\\rec\\mix.m4a");
+    strcpy_s(s->buses[0].actions[1].id, 16, "mp3");
+    wcscpy_s(s->buses[0].actions[1].path, APR_DISC_PATH_CCH, L"C:\\rec\\mix.mp3");
     s->buses[0].actions[1].bitrate_kbps = 192;
     s->buses[0].actions[1].quality      = 4;
 
@@ -293,7 +293,7 @@ TEST(a_multi_bus_graph_survives_a_save_and_a_load)
     ASSERT_WSTR_EQ(L"Mix", g_b.buses[0].name);
     ASSERT_EQ_INT(3, (int)g_b.buses[0].edge_count);
     ASSERT_EQ_INT(2, (int)g_b.buses[0].action_count);
-    ASSERT_STR_EQ("m4a", g_b.buses[0].actions[1].id);
+    ASSERT_STR_EQ("mp3", g_b.buses[0].actions[1].id);
     ASSERT_EQ_INT(192, g_b.buses[0].actions[1].bitrate_kbps);
     ASSERT_EQ_INT(4,   g_b.buses[0].actions[1].quality);
 

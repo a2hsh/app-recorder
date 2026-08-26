@@ -25,6 +25,22 @@
  *   table lookup and a memcpy per chunk, so design 5.2's "simulated multi-hour
  *   session ends with alignment error below one sample" test runs in
  *   milliseconds per hour of audio rather than in hours.
+ *
+ *   HEALTH THAT LIES THE WAY THE REAL THING LIES. AprCaptureStatus carries
+ *   `alive` and `muted` because both are real failures that look like a
+ *   perfect recording: process loopback keeps emitting silence for ever after
+ *   the target exits and WASAPI never says so (design 4.1 #6), and loopback is
+ *   post-session-volume so an app muted in the Windows mixer records digital
+ *   zeros while the engine still reports it rendering (4.1 #5). The fake
+ *   reproduces BOTH, including the inconvenient half: a dead or muted fake
+ *   keeps producing frames, at exactly the configured rate, and they are
+ *   silent. Modelling death as "the source stops" would be tidier and would
+ *   make every test built on it agree that the desync cannot happen.
+ *
+ *   Health is a pure function of the absolute frame index, like the audio, so
+ *   the transitions land on the same sample however finely a caller steps the
+ *   timeline. Generation is clamped to the next transition so a chunk can
+ *   never straddle one.
  */
 #include "apr_winver.h"
 
@@ -50,9 +66,16 @@ typedef struct FakeImpl {
     int32_t  ppm;
     uint32_t tone_hz;
     float    amplitude;
+    int      start_muted;
+    int      start_dead;
 
     uint64_t tick_rate;      /* apr_qpc_freq() */
     uint64_t num, den;       /* frames = elapsed * num / den, exactly */
+
+    /* Health schedule (capture.h). Frame indices; 0 means never. */
+    uint64_t mute_at, unmute_at, die_at;
+    int      muted;          /* current, mirrors st.muted */
+    int      dead;           /* current, mirrors !st.alive. One-way. */
 
     int      anchored;
     uint64_t anchor_ticks;
@@ -91,19 +114,98 @@ static void fill_chunk(FakeImpl *f, uint64_t first_frame, uint32_t frames)
     }
 }
 
+/* ---------------------------------------------------------------------------
+ * Health
+ *
+ * Both states are evaluated from the absolute frame index and nothing else, so
+ * they are as deterministic as the samples are. `_at` is the index of the
+ * FIRST frame in the new state.
+ * ------------------------------------------------------------------------- */
+
+static int muted_at(const FakeImpl *f, uint64_t n)
+{
+    int hit_mute   = f->mute_at   != 0 && n >= f->mute_at;
+    int hit_unmute = f->unmute_at != 0 && n >= f->unmute_at;
+
+    /* Both crossed: the later event is the one in force. They cannot be equal
+     * -- fake_open refuses that rather than picking a winner here. */
+    if (hit_mute && hit_unmute) return f->unmute_at > f->mute_at ? 0 : 1;
+    if (hit_mute)   return 1;
+    if (hit_unmute) return 0;
+    return f->start_muted;
+}
+
+static int dead_at(const FakeImpl *f, uint64_t n)
+{
+    if (f->start_dead) return 1;
+    return f->die_at != 0 && n >= f->die_at;
+}
+
+static void publish_health(FakeImpl *f, uint64_t n)
+{
+    int muted = muted_at(f, n);
+
+    if (muted != f->muted) {
+        f->muted = muted;
+        apr_capstat_set_muted(&f->st, muted);
+        APR_DEBUG(L"fake source: %s at frame %llu",
+                  muted ? L"muted" : L"unmuted", (unsigned long long)n);
+    }
+    if (!f->dead && dead_at(f, n)) {
+        /* Same shape as capture_process.c's real detector, and for the same
+         * reason: the error is what tells the owner this source failed, and
+         * the capture deliberately keeps running (design section 10 -- one
+         * source dying must not take the session down). */
+        AprErr e = APR_ERR(APR_E_STATE,
+                           L"fake source exited at frame %llu; like process "
+                           L"loopback it keeps delivering silence",
+                           (unsigned long long)n);
+        f->dead = 1;
+        apr_capstat_set_error(&f->st, &e);
+        apr_capstat_set_alive(&f->st, 0);
+    }
+}
+
+/* Frames that may be generated in one go from `from` without straddling a
+ * health transition. 0 when no transition is ahead. */
+static uint64_t frames_to_next_event(const FakeImpl *f, uint64_t from)
+{
+    static const size_t k = 3;
+    uint64_t ev[3];
+    uint64_t best = 0;
+    size_t   i;
+
+    ev[0] = f->mute_at;
+    ev[1] = f->unmute_at;
+    ev[2] = f->die_at;
+
+    for (i = 0; i < k; i++) {
+        if (ev[i] != 0 && ev[i] > from && (best == 0 || ev[i] < best))
+            best = ev[i];
+    }
+    return best == 0 ? 0 : best - from;
+}
+
 static void generate_to(FakeImpl *f, uint64_t target_frames)
 {
     while (f->frames < target_frames) {
         uint64_t left = target_frames - f->frames;
-        uint32_t n = (left > FAKE_CHUNK_FRAMES) ? FAKE_CHUNK_FRAMES
-                                                : (uint32_t)left;
-        if (f->period) {
+        uint64_t to_event = frames_to_next_event(f, f->frames);
+        uint32_t n;
+
+        if (to_event != 0 && to_event < left) left = to_event;
+        n = (left > FAKE_CHUNK_FRAMES) ? FAKE_CHUNK_FRAMES : (uint32_t)left;
+
+        /* A muted app and a dead one BOTH record as pure silence. Measured,
+         * not assumed -- see the header comment. */
+        if (f->period && !f->muted && !f->dead) {
             fill_chunk(f, f->frames, n);
             rb_write(f->rb, f->chunk, n);
         } else {
             rb_write_silence(f->rb, n);
         }
         f->frames += n;
+        publish_health(f, f->frames);
     }
     f->st.frames_written = (LONG64)f->frames;
 }
@@ -168,6 +270,14 @@ static AprErr fake_open(AprCapture *c, const AprCaptureConfig *cfg, RingBuf *rb)
                        cfg->fake.rate_error_ppm);
     if (!(cfg->fake.amplitude >= -4.0f && cfg->fake.amplitude <= 4.0f))
         return APR_ERR(APR_E_INVALID_ARG, L"amplitude is not a sane finite value");
+    /* Two contradictory health events on one frame. Resolving it quietly would
+     * make the source's behaviour depend on the order of two lines in whatever
+     * configured it, which is the one thing this file must never do. */
+    if (cfg->fake.mute_at_frame != 0 &&
+        cfg->fake.mute_at_frame == cfg->fake.unmute_at_frame)
+        return APR_ERR(APR_E_INVALID_ARG,
+                       L"mute_at_frame and unmute_at_frame are both %llu",
+                       (unsigned long long)cfg->fake.mute_at_frame);
 
     f = (FakeImpl *)calloc(1, sizeof(*f));
     if (!f) return APR_ERR(APR_E_NO_MEMORY, L"fake capture");
@@ -180,7 +290,17 @@ static AprErr fake_open(AprCapture *c, const AprCaptureConfig *cfg, RingBuf *rb)
     f->ppm         = cfg->fake.rate_error_ppm;
     f->tone_hz     = cfg->fake.tone_hz;
     f->amplitude   = cfg->fake.amplitude;
+    f->mute_at     = cfg->fake.mute_at_frame;
+    f->unmute_at   = cfg->fake.unmute_at_frame;
+    f->die_at      = cfg->fake.die_at_frame;
+    f->start_muted = cfg->fake.start_muted ? 1 : 0;
+    f->start_dead  = cfg->fake.start_dead ? 1 : 0;
     f->tick_rate   = apr_qpc_freq();
+
+    /* Published before a single frame exists: an app that was already muted,
+     * or had already exited, when the session was armed is a normal outcome
+     * and the UI has to be able to say so with nothing in the ring yet. */
+    publish_health(f, 0);
 
     /* frames = elapsed_ticks * (rate * (1e6 + ppm)) / (tick_rate * 1e6).
      * Both factors fit in 64 bits; apr_mul_div_u64 carries the product in 128,
@@ -208,9 +328,15 @@ static AprErr fake_open(AprCapture *c, const AprCaptureConfig *cfg, RingBuf *rb)
     f->stop_ev = CreateEventW(NULL, TRUE /* manual reset */, FALSE, NULL);
     if (!f->stop_ev) return APR_ERR_LAST(L"CreateEvent for the fake source");
 
-    APR_DEBUG(L"fake source: %u Hz / %u ch, %+d ppm, %u Hz tone at %.6f",
+    APR_DEBUG(L"fake source: %u Hz / %u ch, %+d ppm, %u Hz tone at %.6f, "
+              L"mute@%llu unmute@%llu die@%llu%s%s",
               f->sample_rate, (unsigned)f->channels, f->ppm, f->tone_hz,
-              (double)f->amplitude);
+              (double)f->amplitude,
+              (unsigned long long)f->mute_at,
+              (unsigned long long)f->unmute_at,
+              (unsigned long long)f->die_at,
+              f->start_muted ? L" start-muted" : L"",
+              f->start_dead  ? L" start-dead"  : L"");
     return apr_ok();
 }
 

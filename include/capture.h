@@ -50,6 +50,36 @@ typedef struct AprCaptureConfig {
             int32_t  rate_error_ppm;  /* stand in for a drifting crystal */
             uint32_t tone_hz;         /* 0 = silence */
             float    amplitude;
+
+            /* HEALTH. The two ways a recording comes back silent while every
+             * other indicator says it went fine (design 4.1 #5/#6 and section
+             * 10) are the two conditions AprCaptureStatus reports below, and
+             * neither could be reached from a test without these.
+             *
+             * Frame indices, not ticks: exact, independent of QPF, and
+             * independent of rate_error_ppm, so a health transition lands on
+             * the same sample however finely the timeline is stepped.
+             * `_at_frame` is the index of the FIRST frame in the new state.
+             *
+             * 0 means "never" -- start_muted / start_dead are how you ask for
+             * frame 0, which is what frees 0 to mean never and keeps a
+             * zero-initialised config healthy.
+             *
+             * BOTH STATES STILL PRODUCE FRAMES, AT EXACTLY THE SAME RATE, AND
+             * THOSE FRAMES ARE SILENT. That is not a simplification: loopback
+             * is post-session-volume, so a muted app records digital zeros,
+             * and after the target process exits loopback keeps handing over
+             * zeros for ever with no error and no flag. The fake reproduces
+             * the confusing behaviour rather than a tidied version of it,
+             * because the confusion is the thing under test.
+             *
+             * Death is one-way. mute_at_frame == unmute_at_frame is refused
+             * rather than silently resolved. */
+            uint64_t mute_at_frame;
+            uint64_t unmute_at_frame;
+            uint64_t die_at_frame;
+            int      start_muted;
+            int      start_dead;
         } fake;
     };
 } AprCaptureConfig;

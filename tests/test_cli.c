@@ -318,28 +318,55 @@ TEST(a_path_with_no_extension_says_so_rather_than_guessing)
 TEST(the_extension_chooses_the_format_when_format_is_not_given)
 {
     Cap c; static AprCliPlan p;
-    wchar_t wav[MAX_PATH], m4a[MAX_PATH];
+    wchar_t wav[MAX_PATH], mp3[MAX_PATH];
     tmp_path(wav, MAX_PATH, L"ext", L"wav");
-    tmp_path(m4a, MAX_PATH, L"ext", L"m4a");
+    tmp_path(mp3, MAX_PATH, L"ext", L"mp3");
 
     ASSERT_EQ_INT(APR_CLI_OK, PARSE(&c, &p, L"--fake", L"440",
-                                    L"--out", wav, L"--out", m4a));
+                                    L"--out", wav, L"--out", mp3));
     ASSERT_EQ_INT(APR_CLI_OK, apr_cli_resolve(&p, io_of(&c)));
     ASSERT_STR_EQ("wav", p.buses[0].outputs[0].action_id);
-    ASSERT_STR_EQ("m4a", p.buses[0].outputs[1].action_id);
+    ASSERT_STR_EQ("mp3", p.buses[0].outputs[1].action_id);
     ASSERT_FALSE(file_exists(wav));   /* resolving must not create anything */
-    ASSERT_FALSE(file_exists(m4a));
+    ASSERT_FALSE(file_exists(mp3));
+}
+
+/* The ogg action WRITES ".opus" -- RFC 7845 recommends it and the vtable says
+ * so -- but ".ogg" is what most people type, and it is also the registry id.
+ * Both must land on the same action with no --format, or the two spellings
+ * disagree for a reason nobody can see from the command line. */
+TEST(both_opus_and_ogg_extensions_reach_the_ogg_action)
+{
+    Cap c; static AprCliPlan p;
+    ASSERT_EQ_INT(APR_CLI_OK, PARSE(&c, &p, L"--fake", L"440",
+                                    L"--out", L"a.opus", L"--out", L"b.ogg",
+                                    L"--out", L"c.OGG"));
+    ASSERT_EQ_INT(APR_CLI_OK, apr_cli_resolve(&p, io_of(&c)));
+    ASSERT_STR_EQ("ogg", p.buses[0].outputs[0].action_id);
+    ASSERT_STR_EQ("ogg", p.buses[0].outputs[1].action_id);
+    ASSERT_STR_EQ("ogg", p.buses[0].outputs[2].action_id);
+}
+
+/* The id fallback must not turn every id into an extension: "none" is a
+ * registry entry with no extension at all, and a file called x.none is a file
+ * this build cannot write, not a request to discard the audio. */
+TEST(an_action_with_no_extension_is_not_reachable_by_one)
+{
+    Cap c;
+    ASSERT_EQ_INT(APR_CLI_CONFIG, RUN(&c, L"--fake", L"440", L"--out", L"x.none",
+                                      L"--dry-run"));
+    ASSERT_TRUE(said(&c, L"none"));
 }
 
 TEST(format_overrides_the_extension_for_the_output_that_follows_it)
 {
     Cap c; static AprCliPlan p;
     ASSERT_EQ_INT(APR_CLI_OK, PARSE(&c, &p, L"--fake", L"440",
-                                    L"--format", L"wav", L"--out", L"a.m4a",
-                                    L"--out", L"b.m4a"));
+                                    L"--format", L"wav", L"--out", L"a.mp3",
+                                    L"--out", L"b.mp3"));
     ASSERT_EQ_INT(APR_CLI_OK, apr_cli_resolve(&p, io_of(&c)));
     ASSERT_STR_EQ("wav", p.buses[0].outputs[0].action_id);
-    ASSERT_STR_EQ("m4a", p.buses[0].outputs[1].action_id);
+    ASSERT_STR_EQ("mp3", p.buses[0].outputs[1].action_id);
 }
 
 TEST(two_outputs_cannot_share_one_file)

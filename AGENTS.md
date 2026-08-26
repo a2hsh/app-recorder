@@ -90,6 +90,15 @@ Adding an encoder is one file plus one test file. Nothing else.
 
 - **Export exactly `const AprActionVTable apr_action_<id>;`** — not
   `apr_action_<id>_vtable`. `core/registry.c` picks it up by that name.
+- **The vtable carries no prose.** `display_name_id` is an `AprStrId`, not a
+  string: add `ACTION_NAME_<ID>` to `APR_STR_LIST_CORE` in `include/strings.h`
+  and its text to every `LANGUAGE` block of `res/strings.rc`, and name that id
+  in the vtable. Whoever displays it calls `apr_str()` — which locks and may
+  allocate, so never from `on_audio`. This is rule 6, applied to a struct.
+- **`id` and `extension` are not prose and stay literals.** `id` is a stable
+  wire value that appears in session files; `extension` is matched against
+  paths. Neither is translated, neither may change. They are allowed to
+  disagree — `ogg` writes `.opus` — and the CLI accepts either spelling.
 - **Do not edit `CMakeLists.txt` to register it.** `APR_HAVE_ACTION_<ID>` is
   defined automatically from the presence of `src/actions/action_<id>.c`, so a
   half-written encoder cannot break the link for everyone else.
@@ -100,7 +109,11 @@ Adding an encoder is one file plus one test file. Nothing else.
   audio through `on_audio`, assert it still returns inside a bounded wait. Prove
   it; do not assert it.
 - **`finalize` must leave a playable file on every exit path**, including error
-  paths and half-written recordings.
+  paths and half-written recordings. **And a recording that never reaches
+  `finalize` at all must still be playable.** A container that keeps its index
+  at the front and writes it last fails this and cannot be rescued from a dead
+  process — that is why there is no AAC/M4A action (design 8.0). Do not add a
+  format that cannot survive a `TerminateProcess`.
 - **Do not scrub NaN/Inf yourself.** `core/mix.c` handles it for every integer
   format. Duplicating that is a rule 3 failure.
 

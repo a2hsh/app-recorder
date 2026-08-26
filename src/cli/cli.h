@@ -29,9 +29,11 @@
  * STOPPING IS THE PART THAT MUST NOT BE CLEVER
  *
  *   A recording killed part-way that leaves an unplayable file is the worst
- *   outcome this program has: an M4A whose moov atom was never written cannot
- *   be repaired from inside a process that no longer exists (SESSION-HANDOFF,
- *   action_m4a). So Ctrl+C is a request, not a kill: it sets a flag, the loop
+ *   outcome this program has, and nothing outside this process can repair one
+ *   once this process is gone. A container that could not survive it was
+ *   deleted rather than shipped (design 8, AAC/M4A), and the formats that
+ *   remain still have to be closed properly to end at a sensible frame
+ *   boundary. So Ctrl+C is a request, not a kill: it sets a flag, the loop
  *   notices, and every action is finalized before the process exits. A second
  *   Ctrl+C says so and still refuses to abandon the finalize. The console
  *   close button gets the same treatment, with the handler blocking until the
@@ -119,7 +121,7 @@ typedef struct AprCliSource {
 
 typedef struct AprCliOutput {
     wchar_t path[APR_CLI_SPEC_CCH];
-    char    action_id[16];            /* registry id: "wav", "mp3", "m4a" ... */
+    char    action_id[16];            /* registry id: "wav", "mp3", "ogg" ... */
     int     bitrate_kbps;
     int     quality;
 } AprCliOutput;

@@ -6,9 +6,11 @@
  *
  * 1. FINALIZE RUNS ON EVERY PATH, AND THAT IS ARRANGED STRUCTURALLY.
  *
- *    An M4A whose moov atom was never written does not play, and cannot be
- *    repaired from inside a process that is already gone (SESSION-HANDOFF,
- *    action_m4a). So there is exactly ONE place a graph is destroyed, it is a
+ *    A recording that never reached finalize is at best short and at worst
+ *    unplayable, and no surviving process can repair it once this one is gone.
+ *    That asymmetry is what killed AAC/M4A outright (design 8), and the three
+ *    formats left still owe the user a clean close. So there is exactly ONE
+ *    place a graph is destroyed, it is a
  *    __finally block, and apr_graph_destroy stops every bus -- which finalizes
  *    every action -- before it frees anything. Nothing in do_record returns
  *    past that block, an access violation inside it unwinds through it (main
@@ -47,6 +49,7 @@
 #include <string.h>
 #include <math.h>
 #include <wchar.h>
+#include <wctype.h>
 
 #include "cli/cli.h"
 
@@ -55,6 +58,7 @@
 #include "discover.h"
 #include "graph.h"
 #include "log.h"
+#include "runner.h"
 #include "session.h"
 #include "strings.h"
 
@@ -871,6 +875,35 @@ static const wchar_t *extension_of(const wchar_t *path)
     return dot[1] ? dot + 1 : NULL;
 }
 
+/* Case-insensitive compare of a registry id (ASCII, by definition -- session
+ * files hold it) against a file extension. Not _wcsicmp on a widened copy,
+ * because there is nothing to widen: an id that is not plain ASCII is not an
+ * id this product would accept in a session file either. */
+static int ieq_ascii_w(const char *a, const wchar_t *b)
+{
+    if (!a || !b) return 0;
+    for (; *a && *b; a++, b++) {
+        if (towlower((wint_t)(unsigned char)*a) != towlower((wint_t)*b)) return 0;
+    }
+    return *a == '\0' && *b == L'\0';
+}
+
+/* TWO PASSES, AND THE ORDER IS THE POINT.
+ *
+ * First the extension each action actually WRITES. That is the authoritative
+ * mapping and it must win: the ogg action writes ".opus" because RFC 7845 says
+ * so, and a path spelled that way has to reach it.
+ *
+ * Then the registry id. This is what makes `--out mix.ogg` work without an
+ * explicit --format, which it did not before: ".opus" resolved and ".ogg" did
+ * not, so the same action was reachable by the spelling almost nobody types
+ * and not by the one everybody does. An id is a stable, lowercase, ASCII token
+ * that already names the format, so treating it as an accepted spelling costs
+ * nothing and removes a surprise.
+ *
+ * An action whose extension is EMPTY is reachable by neither pass. That is the
+ * built-in "none" sink: it writes no file, so "x.none" is a format this build
+ * cannot write and must be refused, not silently turned into a discard. */
 static const AprActionVTable *action_for_extension(const wchar_t *ext)
 {
     size_t i, n = apr_action_count();
@@ -878,6 +911,11 @@ static const AprActionVTable *action_for_extension(const wchar_t *ext)
     for (i = 0; i < n; i++) {
         const AprActionVTable *vt = apr_action_at(i);
         if (vt && vt->extension && vt->extension[0] && ieq(vt->extension, ext))
+            return vt;
+    }
+    for (i = 0; i < n; i++) {
+        const AprActionVTable *vt = apr_action_at(i);
+        if (vt && vt->extension && vt->extension[0] && ieq_ascii_w(vt->id, ext))
             return vt;
     }
     return NULL;
@@ -1519,11 +1557,13 @@ static AprCliExit do_dry_run(const Ctx *cx, const AprCliPlan *p)
  * Recording
  * ------------------------------------------------------------------------- */
 
+/* Per-source health bookkeeping used to live here. It belongs to the loop, so
+ * it now lives in core/runner.c and is reachable through the runner's snapshot
+ * -- which is also what lets the UI draw it without touching the graph from
+ * another thread. */
 typedef struct RunState {
     AprGraph *g;
     AprBusId  bus_ids[APR_MAX_BUSES];
-    int       reported_dead[APR_MAX_SOURCES];
-    int       reported_muted[APR_MAX_SOURCES];
     int       incomplete;
     uint64_t  frames_out[APR_MAX_BUSES];
 } RunState;
@@ -1625,139 +1665,140 @@ static AprCliExit build_graph(const Ctx *cx, const AprCliPlan *p, RunState *st)
     return APR_CLI_OK;
 }
 
-static void poll_sources(const Ctx *cx, RunState *st)
+/* ---------------------------------------------------------------------------
+ * THE LOOP ITSELF LIVES IN core/runner.c, NOT HERE.
+ *
+ * It used to be twenty lines in this file, and they are the twenty lines the
+ * UI needs most: arm, anchor at one QPC instant, tick, WAIT OUT THE MIXER'S
+ * LOOKBEHIND so the final block is not thrown away, then finalize on every
+ * exit path. A second front end copying them is the DRY failure AGENTS.md
+ * rule 3 names, and the copy would go wrong SILENTLY -- a recording missing
+ * its last block still opens and still sounds like a recording.
+ *
+ * What stays here is what is genuinely the command line's: turning the
+ * runner's notices into the sentences and the exit codes a script branches on.
+ * The order those sentences come out in is the runner's event order, and it is
+ * exactly the order this file produced before the extraction. tests/test_cli.c
+ * is what proves that.
+ * ------------------------------------------------------------------------- */
+
+typedef struct RunObs {
+    const Ctx        *cx;
+    const AprCliPlan *p;
+} RunObs;
+
+static void say_output_lines(const RunObs *o, AprStrId id)
 {
-    size_t i, n = apr_graph_source_count(st->g);
+    size_t bi, oi;
 
-    for (i = 0; i < n && i < APR_MAX_SOURCES; i++) {
-        AprSource *s = apr_graph_source_at(st->g, i);
-        const wchar_t *args[1];
-
-        if (!s) continue;
-        apr_source_poll(s, NULL);
-        args[0] = apr_source_name(s);
-
-        /* Loopback keeps emitting perfect silence forever after the target
-         * exits and WASAPI never says so (design 4.1 #6). Without this line a
-         * dead application produces a file that looks like a success. */
-        if (!apr_source_alive(s) && !st->reported_dead[i]) {
-            st->reported_dead[i] = 1;
-            st->incomplete = 1;
-            warn(cx, APR_S_WARN_SOURCE_EXITED, args, 1);
-        }
-        if (apr_source_muted(s) && !st->reported_muted[i]) {
-            st->reported_muted[i] = 1;
-            warn(cx, APR_S_WARN_SOURCE_MUTED, args, 1);
+    for (bi = 0; bi < o->p->bus_count; bi++) {
+        for (oi = 0; oi < o->p->buses[bi].output_count; oi++) {
+            const wchar_t *args[1];
+            args[0] = o->p->buses[bi].outputs[oi].path;
+            note(o->cx, id, args, 1);
         }
     }
 }
 
-static void report_action_failures(const Ctx *cx, RunState *st)
+/* Called on the thread running the loop, which for the CLI is this one. */
+static void cli_observer(void *user, const AprRunNotice *n)
 {
-    size_t bi, k;
+    RunObs *o = (RunObs *)user;
+    wchar_t why[512];
+    const wchar_t *args[2];
 
-    for (bi = 0; bi < apr_graph_bus_count(st->g); bi++) {
-        AprBus *b = apr_graph_bus_at(st->g, bi);
-        if (!b) continue;
-        for (k = 0; k < apr_bus_action_count(b); k++) {
-            if (apr_bus_action_failed(b, k)) {
-                const AprActionVTable *vt = apr_bus_action_at(b, k);
-                AprErr  e   = apr_bus_action_error(b, k);
-                wchar_t why[512];
-                const wchar_t *args[2];
-                st->incomplete = 1;
-                args[0] = (vt && vt->display_name) ? vt->display_name
-                                                   : apr_bus_name(b);
-                args[1] = errtext(&e, why, 512);
-                warn(cx, APR_S_WARN_ACTION_FAILED, args, 2);
-            }
-        }
+    if (!o || !n) return;
+
+    switch (n->ev) {
+    case APR_RUN_EV_ARM_FAILED:
+        args[0] = apr_str(APR_S_APP_NAME);
+        args[1] = errtext(&n->err, why, 512);
+        /* One source failing to arm does not stop a session (design 10), but
+         * it has to be said out loud. */
+        warn(o->cx, APR_S_ERR_CAPTURE_START, args, 2);
+        break;
+
+    case APR_RUN_EV_STARTED:
+        say_output_lines(o, APR_S_STATUS_RECORDING_TO);
+        if (!o->p->duration_ms && !o->cx->quiet && !o->cx->json)
+            SAY0(o->cx, APR_CLI_STDOUT, APR_S_CLI_STOP_HINT);
+        break;
+
+    case APR_RUN_EV_SOURCE_DIED:
+        args[0] = n->name;
+        warn(o->cx, APR_S_WARN_SOURCE_EXITED, args, 1);
+        break;
+
+    case APR_RUN_EV_SOURCE_MUTED:
+        args[0] = n->name;
+        warn(o->cx, APR_S_WARN_SOURCE_MUTED, args, 1);
+        break;
+
+    case APR_RUN_EV_ACTION_FAILED:
+        args[0] = n->name;
+        args[1] = errtext(&n->err, why, 512);
+        warn(o->cx, APR_S_WARN_ACTION_FAILED, args, 2);
+        break;
+
+    case APR_RUN_EV_FINISHING:
+        say_output_lines(o, APR_S_STATUS_FINISHING);
+        break;
+
+    default:
+        break;
     }
 }
 
-/* The loop. Everything about the timeline comes from QPC (clock.h): the bus
- * renders exactly what the elapsed time says is due, so a late tick produces a
- * longer block and nothing accumulates. */
 static AprCliExit record_loop(const Ctx *cx, const AprCliPlan *p, RunState *st)
 {
-    uint64_t freq  = apr_qpc_freq();
-    uint64_t start;
-    AprErr   e;
+    AprRunnerConfig cfg;
+    AprRunner      *r = NULL;
+    RunObs          obs;
+    AprErr          e;
+    size_t          bi;
 
-    e = apr_graph_start(st->g, apr_qpc_now());
+    obs.cx = cx;
+    obs.p  = p;
+
+    memset(&cfg, 0, sizeof cfg);
+    cfg.graph       = st->g;
+    cfg.duration_ms = p->duration_ms;
+    /* The console control handler is installed before any runner exists and
+     * has to be able to stop one that does not yet, so it signals a shared
+     * event rather than calling in. Handing that event to the runner is what
+     * keeps Ctrl+C one mechanism instead of two. */
+    cfg.stop_event  = g_stop_event;
+    cfg.observer    = cli_observer;
+    cfg.user        = &obs;
+
+    e = apr_runner_create(&cfg, &r);
     if (apr_failed(&e)) {
         wchar_t why[512];
         const wchar_t *args[2];
         args[0] = apr_str(APR_S_APP_NAME);
         args[1] = errtext(&e, why, 512);
-        /* One source failing to arm does not stop a session (design 10), but
-         * it has to be said out loud. */
-        warn(cx, APR_S_ERR_CAPTURE_START, args, 2);
-        st->incomplete = 1;
-    }
-    start = apr_qpc_now();
-
-    {
-        size_t bi;
-        for (bi = 0; bi < p->bus_count; bi++) {
-            size_t oi;
-            for (oi = 0; oi < p->buses[bi].output_count; oi++) {
-                const wchar_t *args[1];
-                args[0] = p->buses[bi].outputs[oi].path;
-                note(cx, APR_S_STATUS_RECORDING_TO, args, 1);
-            }
-        }
-        if (!p->duration_ms && !cx->quiet && !cx->json)
-            SAY0(cx, APR_CLI_STDOUT, APR_S_CLI_STOP_HINT);
+        return fail(cx, APR_CLI_INTERNAL, APR_S_ERR_CAPTURE_START, args, 2);
     }
 
-    for (;;) {
-        uint64_t now;
-        int64_t  elapsed_ms;
-
-        if (g_stop_event) WaitForSingleObject(g_stop_event, 10);
-        else              Sleep(10);
-
-        now = apr_qpc_now();
-        (void)apr_graph_tick(st->g, now);
-        poll_sources(cx, st);
-
-        elapsed_ms = (int64_t)apr_mul_div_u64(now - start, 1000u, freq, NULL);
-        if (p->duration_ms && elapsed_ms >= p->duration_ms) break;
-        if (stop_requested()) break;
+    e = apr_runner_run(r);
+    if (apr_failed(&e)) {
+        wchar_t why[512];
+        const wchar_t *args[2];
+        args[0] = apr_str(APR_S_APP_NAME);
+        args[1] = errtext(&e, why, 512);
+        apr_runner_destroy(r);
+        return fail(cx, APR_CLI_INTERNAL, APR_S_ERR_CAPTURE_START, args, 2);
     }
 
-    /* The mixer deliberately runs APR_BUS_LOOKBEHIND_MS behind wall clock
-     * (bus.h), so stopping at this instant would throw away the last block.
-     * Wait for it to become due, render it, and only then finalize. */
-    Sleep(APR_BUS_LOOKBEHIND_MS + 10);
-    (void)apr_graph_tick(st->g, apr_qpc_now());
-
-    {
-        size_t bi;
-        for (bi = 0; bi < p->bus_count && bi < APR_MAX_BUSES; bi++) {
-            AprBus *b = apr_graph_bus(st->g, st->bus_ids[bi]);
-            st->frames_out[bi] = b ? apr_bus_frames_out(b) : 0;
-        }
+    for (bi = 0; bi < p->bus_count && bi < APR_MAX_BUSES; bi++) {
+        st->frames_out[bi] = apr_runner_bus_frames(r, st->bus_ids[bi]);
     }
+    if (apr_runner_incomplete(r)) st->incomplete = 1;
 
-    {
-        size_t bi, oi;
-        for (bi = 0; bi < p->bus_count; bi++) {
-            for (oi = 0; oi < p->buses[bi].output_count; oi++) {
-                const wchar_t *args[1];
-                args[0] = p->buses[bi].outputs[oi].path;
-                note(cx, APR_S_STATUS_FINISHING, args, 1);
-            }
-        }
-    }
-
-    e = apr_graph_stop(st->g);
-    report_action_failures(cx, st);
-    if (apr_failed(&e)) st->incomplete = 1;
-
+    apr_runner_destroy(r);
     return APR_CLI_OK;
 }
+
 
 static void report_result(const Ctx *cx, const AprCliPlan *p, RunState *st,
                           AprCliExit code)

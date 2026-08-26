@@ -550,7 +550,8 @@ TEST(the_vtable_identifies_itself_as_ogg)
     /* RFC 7845 section 9 recommends .opus for Opus in Ogg, and the registry
      * id and the file extension are separate fields so they may disagree. */
     ASSERT_WSTR_EQ(L"opus", apr_action_ogg.extension);
-    ASSERT_NOT_NULL(apr_action_ogg.display_name);
+    ASSERT_NE_INT(0, apr_action_ogg.display_name_id);
+    ASSERT_GT_INT(0, (long long)wcslen(apr_str(apr_action_ogg.display_name_id)));
     ASSERT_NOT_NULL((void *)(uintptr_t)apr_action_ogg.create);
     ASSERT_NOT_NULL((void *)(uintptr_t)apr_action_ogg.on_audio);
     ASSERT_NOT_NULL((void *)(uintptr_t)apr_action_ogg.finalize);
@@ -1253,7 +1254,8 @@ TEST(the_bytes_on_disk_mid_recording_already_play)
 
     /* No end-of-stream page has been written -- there has been no finalize --
      * and the file plays anyway. That is the graceful degradation a page-based
-     * container buys, and it is the thing an M4A cannot do. */
+     * container buys, and it is the thing an MP4 cannot do -- which is why
+     * this product has an Ogg action and no AAC one (design 8). */
     to_decode(snapshot, snap_len, &dec);
     ASSERT_EQ_INT(1, dec.saw_head);
     ASSERT_EQ_INT(1, dec.saw_tags);

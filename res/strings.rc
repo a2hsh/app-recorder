@@ -98,6 +98,16 @@
 #define APR_EN_UIA_SOURCE_FEEDS          "%1!s!, source, feeding %2!s!."
 #define APR_EN_UIA_BUS_FEEDS             "%1!s!, bus, feeding %2!s!."
 
+/* One per registered action, named by AprActionVTable::display_name_id. These
+ * are what the tree panel reads out for an output row and what the CLI prints
+ * when an encoder fails, so they name the FORMAT, not the library: a reader
+ * needs to know what the file will be, not that LAME wrote it. The codec is in
+ * parentheses where it is not obvious from the name. */
+#define APR_EN_ACTION_NAME_WAV           "WAV (float32, uncompressed)"
+#define APR_EN_ACTION_NAME_MP3           "MP3 (MPEG-1 Layer III)"
+#define APR_EN_ACTION_NAME_OGG           "Ogg Opus"
+#define APR_EN_ACTION_NAME_NONE          "No output (discard)"
+
 /* ---------------------------------------------------------------------------
  * CLI surface. Every line the command-line front end prints is one entry here,
  * including each line of the usage text and each exit-code line -- a help
@@ -147,7 +157,7 @@
 #define APR_EN_CLI_EXIT_INCOMPLETE              "6   Recording finished and every file plays, but something went wrong while it ran."
 #define APR_EN_CLI_EXIT_INTERNAL                "7   apprecorder failed and has no better description for it than that."
 #define APR_EN_CLI_EXAMPLES_HEADER              "Examples"
-#define APR_EN_CLI_EXAMPLE_ONE                  "apprecorder --pid 4321 --out teams.m4a"
+#define APR_EN_CLI_EXAMPLE_ONE                  "apprecorder --pid 4321 --out teams.mp3"
 #define APR_EN_CLI_EXAMPLE_TWO                  "apprecorder --bus Mix --exe teams.exe --device Chat --out mix.wav --bus Voice --device Chat --out voice.wav"
 #define APR_EN_CLI_STOP_HINT                    "Press Ctrl+C to stop. Every file is closed and made playable before apprecorder exits."
 #define APR_EN_CLI_VERSION_LINE                 "apprecorder %1!s!"
@@ -475,6 +485,133 @@
 #define APR_EN_N_OUTPUTS_MANY                   "%1!s! outputs"
 #define APR_EN_N_OUTPUTS_OTHER                  "%1!s! outputs"
 
+
+/* ---- recording, live ---- */
+#define APR_EN_UI_STATUS_IDLE            "Not recording."
+#define APR_EN_UI_STATUS_RECORDING       "Recording. %1!s! elapsed."
+#define APR_EN_UI_STATUS_FINISHING       "Finishing the recording and closing the files."
+#define APR_EN_UI_TIME_ELAPSED           "%1!s!:%2!s!:%3!s!"
+#define APR_EN_UI_ANN_RECORD_STARTED     "Recording started."
+#define APR_EN_UI_ANN_RECORD_STOPPED     "Recording stopped. %1!s! recorded."
+#define APR_EN_UI_ANN_RECORD_INCOMPLETE  "Recording stopped after %1!s!. Every file is playable, but the session is not what was asked for."
+#define APR_EN_UI_ANN_RECORD_FAILED      "The recording could not start: %1!s!"
+#define APR_EN_UI_ANN_ARM_FAILED         "Some sources could not be started. The recording continues without them."
+#define APR_EN_UI_ANN_SOURCE_DIED        "%1!s! has exited. It records silence from here on."
+#define APR_EN_UI_ANN_SOURCE_MUTED       "%1!s! is muted in the Windows volume mixer, so it records silence."
+#define APR_EN_UI_ANN_ACTION_FAILED      "%1!s! stopped writing: %2!s! The file that exists is still playable."
+#define APR_EN_UI_ANN_ALREADY_RECORDING  "A recording is already running."
+#define APR_EN_UI_ANN_NOT_RECORDING      "Nothing is being recorded."
+#define APR_EN_UI_ANN_NOTHING_TO_RECORD  "There is nothing to record yet. Add a source, a bus and an output first."
+#define APR_EN_UI_ANN_BUSY_RECORDING     "That cannot be changed while a recording is running. Stop the recording first."
+#define APR_EN_UI_HEALTH_OK              "%1!s! is recording."
+#define APR_EN_UI_HEALTH_MUTED           "%1!s! is muted and is recording silence."
+#define APR_EN_UI_HEALTH_DEAD            "%1!s! has exited and is recording silence."
+#define APR_EN_UI_PANE_RECORDING         "Recording status"
+#define APR_EN_UI_DESC_RECORDING         "Says whether a recording is running, how long it has been going, and how each source is doing."
+#define APR_EN_UI_CLOSE_TITLE            "A recording is still running"
+#define APR_EN_UI_CLOSE_BODY             "apprecorder is still recording. Closing now stops the recording and closes every file so that it stays playable."
+#define APR_EN_UI_CLOSE_STOP_AND_EXIT    "Stop recording and close"
+#define APR_EN_UI_CLOSE_KEEP_RECORDING   "Keep recording"
+#define APR_EN_UI_CLOSE_TO_TRAY          "Leave it recording in the notification area"
+#define APR_EN_UI_ANN_CLOSING_FILES      "Closing the files. This window will close when they are safely written."
+
+/* ---- dialogs ---- */
+#define APR_EN_UI_DLG_OK                   "OK"
+#define APR_EN_UI_DLG_CANCEL               "Cancel"
+#define APR_EN_UI_DLG_CLOSE                "Close"
+#define APR_EN_UI_DLG_REFRESH              "Refresh the list"
+#define APR_EN_UI_DLG_BROWSE               "Choose a file..."
+#define APR_EN_UI_DLG_ADD_SOURCE_TITLE     "Add a source"
+#define APR_EN_UI_DLG_SOURCE_KIND          "What kind of source"
+#define APR_EN_UI_DLG_KIND_APP             "An application that is playing audio"
+#define APR_EN_UI_DLG_KIND_DEVICE          "A hardware input"
+#define APR_EN_UI_DLG_KIND_SYSTEM          "Everything the machine plays, except one application"
+#define APR_EN_UI_DLG_APP_LIST             "Applications playing audio"
+#define APR_EN_UI_DLG_DEVICE_LIST          "Capture devices"
+#define APR_EN_UI_DLG_APP_ROW              "%1!s!, process %2!s!, %3!s!"
+#define APR_EN_UI_DLG_APP_STATE_ACTIVE     "playing audio now"
+#define APR_EN_UI_DLG_APP_STATE_IDLE       "holding an audio session but quiet"
+#define APR_EN_UI_DLG_APP_STATE_MUTED      "muted in Windows, so it would record silence"
+#define APR_EN_UI_DLG_DEVICE_ROW           "%1!s!"
+#define APR_EN_UI_DLG_DEVICE_ROW_DEFAULT   "%1!s!, the default capture device"
+#define APR_EN_UI_DLG_NO_APPS              "No application is playing audio right now. Start one and refresh the list."
+#define APR_EN_UI_DLG_NO_DEVICES           "No capture device is available."
+#define APR_EN_UI_DLG_SOURCE_NAME          "Name for this source"
+#define APR_EN_UI_DLG_ADD_BUS_TITLE        "Add a bus"
+#define APR_EN_UI_DLG_RENAME_BUS_TITLE     "Rename this bus"
+#define APR_EN_UI_DLG_BUS_NAME             "Bus name"
+#define APR_EN_UI_DLG_ADD_OUTPUT_TITLE     "Add an output"
+#define APR_EN_UI_DLG_OUT_BUS              "Which bus to write"
+#define APR_EN_UI_DLG_OUT_FORMAT           "Format"
+#define APR_EN_UI_DLG_OUT_PATH             "File to write"
+#define APR_EN_UI_DLG_OUT_BITRATE          "Bitrate in kilobits per second, 0 for the format's own default"
+#define APR_EN_UI_DLG_OUT_QUALITY          "Quality, 0 for the format's own default"
+#define APR_EN_UI_DLG_SAVE_AUDIO_TITLE     "Where to write this recording"
+#define APR_EN_UI_DLG_FILTER_AUDIO         "Audio files"
+#define APR_EN_UI_DLG_FILTER_ALL           "All files"
+#define APR_EN_UI_DLG_FILTER_SESSION       "apprecorder sessions"
+#define APR_EN_UI_DLG_OPEN_SESSION_TITLE   "Open a session"
+#define APR_EN_UI_DLG_SAVE_SESSION_TITLE   "Save this session"
+#define APR_EN_UI_DLG_REMOVE_TITLE         "Remove"
+#define APR_EN_UI_DLG_REMOVE_CONFIRM       "Remove %1!s! from this session?"
+#define APR_EN_UI_DLG_SYSTEM_TITLE         "Record everything except one application"
+#define APR_EN_UI_DLG_SYSTEM_BODY          "This records EVERYTHING this machine plays -- every application, including ones started later -- and holds back only the one you name. Anything else you can hear will be in the file."
+#define APR_EN_UI_DLG_SYSTEM_TREE          "Holding back %1!s! also holds back everything it has started: %2!s!"
+#define APR_EN_UI_DLG_SYSTEM_TREE_NONE     "%1!s! has started nothing else at this moment. It may start something a second from now, and that would be held back too."
+#define APR_EN_UI_DLG_SYSTEM_CONSENT       "I understand that this records everything this machine plays."
+#define APR_EN_UI_DLG_SYSTEM_TARGET        "The application to hold back"
+#define APR_EN_UI_DLG_RESOLVE_TITLE        "What this session found"
+#define APR_EN_UI_DLG_RESOLVE_LIST         "Sources in this session"
+#define APR_EN_UI_DLG_RESOLVE_SUMMARY      "%1!s! as asked, %2!s! found somewhere else, %3!s! not found."
+#define APR_EN_UI_DLG_RESOLVE_OK           "%1!s!: found exactly as the session asked."
+#define APR_EN_UI_DLG_RESOLVE_CANDIDATE    "Also running: process %1!s!, %2!s!"
+#define APR_EN_UI_DLG_RESOLVE_LOAD         "Load it anyway"
+#define APR_EN_UI_DLG_KEYS_TITLE           "Keyboard shortcuts"
+#define APR_EN_UI_DLG_KEYS_LIST            "Every operation and the key that performs it"
+#define APR_EN_UI_DLG_KEYS_ROW             "%1!s!: %2!s!"
+#define APR_EN_UI_DLG_KEYS_COL_OP          "Operation"
+#define APR_EN_UI_DLG_KEYS_COL_KEY         "Key"
+#define APR_EN_UI_DLG_ABOUT_TITLE          "About apprecorder"
+#define APR_EN_UI_DLG_ABOUT_BODY           "%1!s! -- %2!s!"
+#define APR_EN_UI_DLG_NAME_NEEDED          "Give it a name first."
+#define APR_EN_UI_DLG_PATH_NEEDED          "Choose a file to write first."
+#define APR_EN_UI_DLG_PICK_NEEDED          "Choose something from the list first."
+#define APR_EN_UI_DLG_NO_BUSES             "There is no bus to write yet. Add a bus first."
+#define APR_EN_UI_DLG_SOURCE_ADDED         "Added %1!s!."
+#define APR_EN_UI_DLG_BUS_ADDED            "Added the bus %1!s!."
+#define APR_EN_UI_DLG_BUS_RENAMED          "The bus is now called %1!s!."
+#define APR_EN_UI_DLG_OUTPUT_ADDED         "%1!s! will be written to %2!s!."
+#define APR_EN_UI_DLG_ADD_FAILED           "That could not be added: %1!s!"
+#define APR_EN_UI_DLG_SESSION_LOADED       "Loaded the session %1!s!."
+#define APR_EN_UI_DLG_SESSION_SAVED        "Saved the session to %1!s!."
+#define APR_EN_UI_DLG_SESSION_FAILED       "That session could not be loaded: %1!s!"
+#define APR_EN_UI_DLG_SESSION_SAVE_FAILED  "That session could not be saved: %1!s!"
+#define APR_EN_UI_DLG_KEY_COMBO            "%1!s!+%2!s!"
+#define APR_EN_UI_DLG_KEY_CTRL             "Ctrl"
+#define APR_EN_UI_DLG_KEY_SHIFT            "Shift"
+#define APR_EN_UI_DLG_KEY_ALT              "Alt"
+#define APR_EN_UI_DLG_OUTPUT_REMOVED       "%1!s! is no longer being written."
+#define APR_EN_UI_DLG_PICK_OUTPUT          "Which output to remove"
+#define APR_EN_UI_DLG_OUTPUT_ROW           "%1!s! to %2!s!"
+
+/* ---- the notification area ---- */
+#define APR_EN_UI_TRAY_ICON_NAME           "apprecorder"
+#define APR_EN_UI_TRAY_TIP_IDLE            "apprecorder -- not recording"
+#define APR_EN_UI_TRAY_TIP_RECORDING       "apprecorder -- recording, %1!s!"
+#define APR_EN_UI_TRAY_TIP_FINISHING       "apprecorder -- closing the files"
+#define APR_EN_UI_TRAY_MENU_SHOW           "&Show the window"
+#define APR_EN_UI_TRAY_MENU_START          "Start &recording"
+#define APR_EN_UI_TRAY_MENU_STOP           "S&top recording"
+#define APR_EN_UI_TRAY_MENU_OPEN           "&Open a session..."
+#define APR_EN_UI_TRAY_MENU_QUIT           "&Quit apprecorder"
+#define APR_EN_UI_TRAY_INFO_TITLE          "apprecorder"
+#define APR_EN_UI_TRAY_INFO_STARTED        "Recording started."
+#define APR_EN_UI_TRAY_INFO_STOPPED        "Recording stopped. %1!s! recorded."
+#define APR_EN_UI_TRAY_INFO_SOURCE_DIED    "%1!s! has exited. It records silence from here on."
+#define APR_EN_UI_TRAY_INFO_SOURCE_MUTED   "%1!s! is muted in Windows, so it records silence."
+#define APR_EN_UI_TRAY_INFO_ACTION_FAILED  "%1!s! stopped writing. The file that exists is still playable."
+#define APR_EN_UI_TRAY_INFO_MINIMIZED      "apprecorder is still running here. Press Windows+B and then the arrow keys to reach it."
+
 #define APR_EN_ENTRY(name, id)      id      APR_EN_##name
 #define APR_EN_PENTRY(name, base)                                              \
     base+0  APR_EN_##name##_ZERO                                               \
@@ -539,6 +676,21 @@ END
 
 STRINGTABLE
 BEGIN
+    APR_STR_LIST_UI_REC(APR_EN_ENTRY)
+END
+
+STRINGTABLE
+BEGIN
+    APR_STR_LIST_UI_DLG(APR_EN_ENTRY)
+END
+
+STRINGTABLE
+BEGIN
+    APR_STR_LIST_UI_TRAY(APR_EN_ENTRY)
+END
+
+STRINGTABLE
+BEGIN
     APR_STR_PLURAL_LIST(APR_EN_PENTRY)
 END
 
@@ -591,6 +743,10 @@ END
 #define APR_AR_NODE_KIND_ACTION(id)          /* not translated yet */
 #define APR_AR_UIA_SOURCE_FEEDS(id)          /* not translated yet */
 #define APR_AR_UIA_BUS_FEEDS(id)             /* not translated yet */
+#define APR_AR_ACTION_NAME_WAV(id)           /* not translated yet */
+#define APR_AR_ACTION_NAME_MP3(id)           /* not translated yet */
+#define APR_AR_ACTION_NAME_OGG(id)           /* not translated yet */
+#define APR_AR_ACTION_NAME_NONE(id)          /* not translated yet */
 #define APR_AR_CLI_COMMANDS_HEADER(id)          /* not translated yet */
 #define APR_AR_CLI_CMD_RECORD(id)               /* not translated yet */
 #define APR_AR_CLI_CMD_LIST_APPS(id)            /* not translated yet */
@@ -845,6 +1001,129 @@ END
 
 #define APR_AR_P_N_OTHER_BUSES(base)         /* not translated yet */
 #define APR_AR_P_N_OUTPUTS(base)             /* not translated yet */
+
+#define APR_AR_UI_STATUS_IDLE(id)            /* not translated yet */
+#define APR_AR_UI_STATUS_RECORDING(id)       /* not translated yet */
+#define APR_AR_UI_STATUS_FINISHING(id)       /* not translated yet */
+#define APR_AR_UI_TIME_ELAPSED(id)           /* not translated yet */
+#define APR_AR_UI_ANN_RECORD_STARTED(id)     /* not translated yet */
+#define APR_AR_UI_ANN_RECORD_STOPPED(id)     /* not translated yet */
+#define APR_AR_UI_ANN_RECORD_INCOMPLETE(id)  /* not translated yet */
+#define APR_AR_UI_ANN_RECORD_FAILED(id)      /* not translated yet */
+#define APR_AR_UI_ANN_ARM_FAILED(id)         /* not translated yet */
+#define APR_AR_UI_ANN_SOURCE_DIED(id)        /* not translated yet */
+#define APR_AR_UI_ANN_SOURCE_MUTED(id)       /* not translated yet */
+#define APR_AR_UI_ANN_ACTION_FAILED(id)      /* not translated yet */
+#define APR_AR_UI_ANN_ALREADY_RECORDING(id)  /* not translated yet */
+#define APR_AR_UI_ANN_NOT_RECORDING(id)      /* not translated yet */
+#define APR_AR_UI_ANN_NOTHING_TO_RECORD(id)  /* not translated yet */
+#define APR_AR_UI_ANN_BUSY_RECORDING(id)     /* not translated yet */
+#define APR_AR_UI_HEALTH_OK(id)              /* not translated yet */
+#define APR_AR_UI_HEALTH_MUTED(id)           /* not translated yet */
+#define APR_AR_UI_HEALTH_DEAD(id)            /* not translated yet */
+#define APR_AR_UI_PANE_RECORDING(id)         /* not translated yet */
+#define APR_AR_UI_DESC_RECORDING(id)         /* not translated yet */
+#define APR_AR_UI_CLOSE_TITLE(id)            /* not translated yet */
+#define APR_AR_UI_CLOSE_BODY(id)             /* not translated yet */
+#define APR_AR_UI_CLOSE_STOP_AND_EXIT(id)    /* not translated yet */
+#define APR_AR_UI_CLOSE_KEEP_RECORDING(id)   /* not translated yet */
+#define APR_AR_UI_CLOSE_TO_TRAY(id)          /* not translated yet */
+#define APR_AR_UI_ANN_CLOSING_FILES(id)      /* not translated yet */
+
+#define APR_AR_UI_DLG_OK(id)                   /* not translated yet */
+#define APR_AR_UI_DLG_CANCEL(id)               /* not translated yet */
+#define APR_AR_UI_DLG_CLOSE(id)                /* not translated yet */
+#define APR_AR_UI_DLG_REFRESH(id)              /* not translated yet */
+#define APR_AR_UI_DLG_BROWSE(id)               /* not translated yet */
+#define APR_AR_UI_DLG_ADD_SOURCE_TITLE(id)     /* not translated yet */
+#define APR_AR_UI_DLG_SOURCE_KIND(id)          /* not translated yet */
+#define APR_AR_UI_DLG_KIND_APP(id)             /* not translated yet */
+#define APR_AR_UI_DLG_KIND_DEVICE(id)          /* not translated yet */
+#define APR_AR_UI_DLG_KIND_SYSTEM(id)          /* not translated yet */
+#define APR_AR_UI_DLG_APP_LIST(id)             /* not translated yet */
+#define APR_AR_UI_DLG_DEVICE_LIST(id)          /* not translated yet */
+#define APR_AR_UI_DLG_APP_ROW(id)              /* not translated yet */
+#define APR_AR_UI_DLG_APP_STATE_ACTIVE(id)     /* not translated yet */
+#define APR_AR_UI_DLG_APP_STATE_IDLE(id)       /* not translated yet */
+#define APR_AR_UI_DLG_APP_STATE_MUTED(id)      /* not translated yet */
+#define APR_AR_UI_DLG_DEVICE_ROW(id)           /* not translated yet */
+#define APR_AR_UI_DLG_DEVICE_ROW_DEFAULT(id)   /* not translated yet */
+#define APR_AR_UI_DLG_NO_APPS(id)              /* not translated yet */
+#define APR_AR_UI_DLG_NO_DEVICES(id)           /* not translated yet */
+#define APR_AR_UI_DLG_SOURCE_NAME(id)          /* not translated yet */
+#define APR_AR_UI_DLG_ADD_BUS_TITLE(id)        /* not translated yet */
+#define APR_AR_UI_DLG_RENAME_BUS_TITLE(id)     /* not translated yet */
+#define APR_AR_UI_DLG_BUS_NAME(id)             /* not translated yet */
+#define APR_AR_UI_DLG_ADD_OUTPUT_TITLE(id)     /* not translated yet */
+#define APR_AR_UI_DLG_OUT_BUS(id)              /* not translated yet */
+#define APR_AR_UI_DLG_OUT_FORMAT(id)           /* not translated yet */
+#define APR_AR_UI_DLG_OUT_PATH(id)             /* not translated yet */
+#define APR_AR_UI_DLG_OUT_BITRATE(id)          /* not translated yet */
+#define APR_AR_UI_DLG_OUT_QUALITY(id)          /* not translated yet */
+#define APR_AR_UI_DLG_SAVE_AUDIO_TITLE(id)     /* not translated yet */
+#define APR_AR_UI_DLG_FILTER_AUDIO(id)         /* not translated yet */
+#define APR_AR_UI_DLG_FILTER_ALL(id)           /* not translated yet */
+#define APR_AR_UI_DLG_FILTER_SESSION(id)       /* not translated yet */
+#define APR_AR_UI_DLG_OPEN_SESSION_TITLE(id)   /* not translated yet */
+#define APR_AR_UI_DLG_SAVE_SESSION_TITLE(id)   /* not translated yet */
+#define APR_AR_UI_DLG_REMOVE_TITLE(id)         /* not translated yet */
+#define APR_AR_UI_DLG_REMOVE_CONFIRM(id)       /* not translated yet */
+#define APR_AR_UI_DLG_SYSTEM_TITLE(id)         /* not translated yet */
+#define APR_AR_UI_DLG_SYSTEM_BODY(id)          /* not translated yet */
+#define APR_AR_UI_DLG_SYSTEM_TREE(id)          /* not translated yet */
+#define APR_AR_UI_DLG_SYSTEM_TREE_NONE(id)     /* not translated yet */
+#define APR_AR_UI_DLG_SYSTEM_CONSENT(id)       /* not translated yet */
+#define APR_AR_UI_DLG_SYSTEM_TARGET(id)        /* not translated yet */
+#define APR_AR_UI_DLG_RESOLVE_TITLE(id)        /* not translated yet */
+#define APR_AR_UI_DLG_RESOLVE_LIST(id)         /* not translated yet */
+#define APR_AR_UI_DLG_RESOLVE_SUMMARY(id)      /* not translated yet */
+#define APR_AR_UI_DLG_RESOLVE_OK(id)           /* not translated yet */
+#define APR_AR_UI_DLG_RESOLVE_CANDIDATE(id)    /* not translated yet */
+#define APR_AR_UI_DLG_RESOLVE_LOAD(id)         /* not translated yet */
+#define APR_AR_UI_DLG_KEYS_TITLE(id)           /* not translated yet */
+#define APR_AR_UI_DLG_KEYS_LIST(id)            /* not translated yet */
+#define APR_AR_UI_DLG_KEYS_ROW(id)             /* not translated yet */
+#define APR_AR_UI_DLG_KEYS_COL_OP(id)          /* not translated yet */
+#define APR_AR_UI_DLG_KEYS_COL_KEY(id)         /* not translated yet */
+#define APR_AR_UI_DLG_ABOUT_TITLE(id)          /* not translated yet */
+#define APR_AR_UI_DLG_ABOUT_BODY(id)           /* not translated yet */
+#define APR_AR_UI_DLG_NAME_NEEDED(id)          /* not translated yet */
+#define APR_AR_UI_DLG_PATH_NEEDED(id)          /* not translated yet */
+#define APR_AR_UI_DLG_PICK_NEEDED(id)          /* not translated yet */
+#define APR_AR_UI_DLG_NO_BUSES(id)             /* not translated yet */
+#define APR_AR_UI_DLG_SOURCE_ADDED(id)         /* not translated yet */
+#define APR_AR_UI_DLG_BUS_ADDED(id)            /* not translated yet */
+#define APR_AR_UI_DLG_BUS_RENAMED(id)          /* not translated yet */
+#define APR_AR_UI_DLG_OUTPUT_ADDED(id)         /* not translated yet */
+#define APR_AR_UI_DLG_ADD_FAILED(id)           /* not translated yet */
+#define APR_AR_UI_DLG_SESSION_LOADED(id)       /* not translated yet */
+#define APR_AR_UI_DLG_SESSION_SAVED(id)        /* not translated yet */
+#define APR_AR_UI_DLG_SESSION_FAILED(id)       /* not translated yet */
+#define APR_AR_UI_DLG_SESSION_SAVE_FAILED(id)  /* not translated yet */
+#define APR_AR_UI_DLG_KEY_COMBO(id)            /* not translated yet */
+#define APR_AR_UI_DLG_KEY_CTRL(id)             /* not translated yet */
+#define APR_AR_UI_DLG_KEY_SHIFT(id)            /* not translated yet */
+#define APR_AR_UI_DLG_KEY_ALT(id)              /* not translated yet */
+#define APR_AR_UI_DLG_OUTPUT_REMOVED(id)       /* not translated yet */
+#define APR_AR_UI_DLG_PICK_OUTPUT(id)          /* not translated yet */
+#define APR_AR_UI_DLG_OUTPUT_ROW(id)           /* not translated yet */
+
+#define APR_AR_UI_TRAY_ICON_NAME(id)           /* not translated yet */
+#define APR_AR_UI_TRAY_TIP_IDLE(id)            /* not translated yet */
+#define APR_AR_UI_TRAY_TIP_RECORDING(id)       /* not translated yet */
+#define APR_AR_UI_TRAY_TIP_FINISHING(id)       /* not translated yet */
+#define APR_AR_UI_TRAY_MENU_SHOW(id)           /* not translated yet */
+#define APR_AR_UI_TRAY_MENU_START(id)          /* not translated yet */
+#define APR_AR_UI_TRAY_MENU_STOP(id)           /* not translated yet */
+#define APR_AR_UI_TRAY_MENU_OPEN(id)           /* not translated yet */
+#define APR_AR_UI_TRAY_MENU_QUIT(id)           /* not translated yet */
+#define APR_AR_UI_TRAY_INFO_TITLE(id)          /* not translated yet */
+#define APR_AR_UI_TRAY_INFO_STARTED(id)        /* not translated yet */
+#define APR_AR_UI_TRAY_INFO_STOPPED(id)        /* not translated yet */
+#define APR_AR_UI_TRAY_INFO_SOURCE_DIED(id)    /* not translated yet */
+#define APR_AR_UI_TRAY_INFO_SOURCE_MUTED(id)   /* not translated yet */
+#define APR_AR_UI_TRAY_INFO_ACTION_FAILED(id)  /* not translated yet */
+#define APR_AR_UI_TRAY_INFO_MINIMIZED(id)      /* not translated yet */
 
 #define APR_AR_ENTRY(name, id)      APR_AR_##name(id)
 #define APR_AR_PENTRY(name, base)   APR_AR_P_##name(base)

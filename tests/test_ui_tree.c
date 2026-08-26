@@ -82,17 +82,23 @@ typedef struct Model {
     int         has_action;
 } Model;
 
+static AprSourceId add_fake_cfg(AprGraph *g, const wchar_t *name,
+                                const AprCaptureConfig *c)
+{
+    AprSourceId id = 0;
+    (void)apr_graph_add_source(g, name, c, &id);
+    return id;
+}
+
 static AprSourceId add_fake(AprGraph *g, const wchar_t *name)
 {
     AprCaptureConfig c;
-    AprSourceId id = 0;
 
     memset(&c, 0, sizeof c);
     c.kind = APR_SRC_FAKE;          /* design 4.3: the core needs no hardware,
                                      * and AGENTS.md rule 1 means a UI test is
                                      * the last place that should change. */
-    (void)apr_graph_add_source(g, name, &c, &id);
-    return id;
+    return add_fake_cfg(g, name, &c);
 }
 
 static void model_build(Model *m)
@@ -317,13 +323,14 @@ TEST(every_row_says_what_it_is_and_what_it_is_wired_to)
 TEST(the_state_clauses_a_silent_recording_depends_on_are_in_the_catalog)
 {
     /* A muted source records pure silence and an exited one keeps recording
-     * silence, and BOTH look perfectly healthy from every other angle. The
-     * branches that select these are driven by apr_source_muted() /
-     * apr_source_alive(), neither of which a fake source can be pushed into
-     * from a test -- so what is pinned here is that the copy exists, is
-     * distinct, and is not empty. If someone deletes an entry, the row would
-     * silently fall back to the healthy wording, which is the dangerous
-     * direction. */
+     * silence, and BOTH look perfectly healthy from every other angle. What is
+     * pinned HERE is only that the copy exists, is distinct, and is not empty:
+     * if someone deletes an entry, the row falls back to the healthy wording,
+     * which is the dangerous direction.
+     *
+     * The branches that SELECT this copy are driven through a real graph in
+     * the two cases below, now that capture.h's fake source can be told to go
+     * muted or to die. */
     const wchar_t *muted;
     const wchar_t *exited;
 
@@ -344,6 +351,141 @@ TEST(the_state_clauses_a_silent_recording_depends_on_are_in_the_catalog)
                        apr_str(APR_S_UI_TREE_SOURCE_STATE_SHARED)) != 0);
     ASSERT_TRUE(wcscmp(apr_str(APR_S_UI_TREE_SOURCE_UNUSED),
                        apr_str(APR_S_UI_TREE_SOURCE_UNUSED_STATE)) != 0);
+}
+
+/* A one-source, one-bus session whose source's health is whatever the caller
+ * asked capture.h for. Shared by the two cases below; nothing else in this
+ * file needs it. */
+typedef struct StateModel {
+    AprGraph   *g;
+    AprSourceId src;
+    AprBusId    bus;
+} StateModel;
+
+static int state_model_build(StateModel *m, const AprCaptureConfig *cfg)
+{
+    AprErr e;
+
+    memset(m, 0, sizeof *m);
+    e = apr_graph_create(RATE, 2, &m->g);
+    if (apr_failed(&e) || !m->g) return 0;
+
+    (void)apr_graph_add_bus(m->g, L"Main Mix", &m->bus);
+    m->src = add_fake_cfg(m->g, L"Teams", cfg);
+    if (m->src == 0) return 0;
+    (void)apr_graph_connect(m->g, m->src, m->bus, 1.0f);
+
+    /* The panel reads apr_source_muted()/apr_source_alive(), which are a
+     * cached snapshot -- the frame owner refreshes them, so this stands in for
+     * the frame's timer tick. No audio, no thread, no clock. */
+    apr_source_poll(apr_graph_source(m->g, m->src), NULL);
+    return 1;
+}
+
+/* The source row for a one-source session, whatever index it landed at. */
+static int state_row_label(const StateModel *m, wchar_t *out, size_t cch)
+{
+    AprTreeRow r[MAXROWS];
+    size_t n = apr_tree_panel_rows(m->g, r, MAXROWS);
+    size_t i;
+
+    for (i = 0; i < n && i < MAXROWS; i++) {
+        if (r[i].sel.kind == APR_TREE_ROW_SOURCE && r[i].sel.source == m->src) {
+            return apr_tree_panel_label(m->g, &r[i].sel, out, cch) > 0;
+        }
+    }
+    return 0;
+}
+
+TEST(a_source_muted_in_the_windows_mixer_says_so_in_the_row_a_screen_reader_reads)
+{
+    /* Nothing else in the UI can tell you this. The recording will be pure
+     * silence -- loopback is post-session-volume -- and every other indicator
+     * will look perfect, so the fact has to be IN THE NAME, not in a colour. */
+    StateModel m;
+    AprCaptureConfig cfg;
+    wchar_t muted_text[512], healthy_text[512];
+    StateModel healthy;
+
+    memset(&cfg, 0, sizeof cfg);
+    cfg.kind = APR_SRC_FAKE;
+    cfg.fake.start_muted = 1;
+
+    (void)apr_str_set_language(MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US));
+    ASSERT_TRUE(state_model_build(&m, &cfg));
+    ASSERT_EQ_INT(1, apr_source_muted(apr_graph_source(m.g, m.src)));
+    ASSERT_EQ_INT(1, apr_source_alive(apr_graph_source(m.g, m.src)));
+    ASSERT_TRUE(state_row_label(&m, muted_text, 512));
+
+    memset(&cfg, 0, sizeof cfg);
+    cfg.kind = APR_SRC_FAKE;
+    ASSERT_TRUE(state_model_build(&healthy, &cfg));
+    ASSERT_TRUE(state_row_label(&healthy, healthy_text, 512));
+
+    /* The state clause is present, and it is the MUTED one specifically. */
+    ASSERT_NOT_NULL(wcsstr(muted_text, apr_str(APR_S_UI_TREE_STATE_MUTED)));
+    ASSERT_NULL(wcsstr(muted_text, apr_str(APR_S_UI_TREE_STATE_EXITED)));
+    /* Still a complete row, not just a state: name and bus survive. */
+    ASSERT_NOT_NULL(wcsstr(muted_text, L"Teams"));
+    ASSERT_NOT_NULL(wcsstr(muted_text, L"Main Mix"));
+    /* And a healthy source is not given it by accident. */
+    ASSERT_TRUE(wcscmp(muted_text, healthy_text) != 0);
+    ASSERT_NULL(wcsstr(healthy_text, apr_str(APR_S_UI_TREE_STATE_MUTED)));
+
+    apr_graph_destroy(healthy.g);
+    apr_graph_destroy(m.g);
+}
+
+TEST(a_source_whose_process_exited_says_so_rather_than_looking_healthy)
+{
+    /* The other silent failure: loopback keeps producing buffers of zeros for
+     * ever and WASAPI never reports the death, so without this clause closing
+     * Teams mid-session reads as a successful recording. */
+    StateModel m;
+    AprCaptureConfig cfg;
+    wchar_t text[512];
+
+    memset(&cfg, 0, sizeof cfg);
+    cfg.kind = APR_SRC_FAKE;
+    cfg.fake.start_dead = 1;
+
+    (void)apr_str_set_language(MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US));
+    ASSERT_TRUE(state_model_build(&m, &cfg));
+    ASSERT_EQ_INT(0, apr_source_alive(apr_graph_source(m.g, m.src)));
+    ASSERT_TRUE(state_row_label(&m, text, 512));
+
+    ASSERT_NOT_NULL(wcsstr(text, apr_str(APR_S_UI_TREE_STATE_EXITED)));
+    ASSERT_NULL(wcsstr(text, apr_str(APR_S_UI_TREE_STATE_MUTED)));
+    ASSERT_NOT_NULL(wcsstr(text, L"Teams"));
+
+    apr_graph_destroy(m.g);
+}
+
+TEST(a_dead_source_is_reported_as_dead_even_while_it_is_also_muted)
+{
+    /* Both at once is a real state -- a muted app whose process then exits --
+     * and the row can only carry one clause. Death is the one that has to win:
+     * unmuting a dead app fixes nothing, and telling the user to check the
+     * volume mixer sends them to the wrong place. */
+    StateModel m;
+    AprCaptureConfig cfg;
+    wchar_t text[512];
+
+    memset(&cfg, 0, sizeof cfg);
+    cfg.kind = APR_SRC_FAKE;
+    cfg.fake.start_muted = 1;
+    cfg.fake.start_dead  = 1;
+
+    (void)apr_str_set_language(MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US));
+    ASSERT_TRUE(state_model_build(&m, &cfg));
+    ASSERT_EQ_INT(1, apr_source_muted(apr_graph_source(m.g, m.src)));
+    ASSERT_EQ_INT(0, apr_source_alive(apr_graph_source(m.g, m.src)));
+    ASSERT_TRUE(state_row_label(&m, text, 512));
+
+    ASSERT_NOT_NULL(wcsstr(text, apr_str(APR_S_UI_TREE_STATE_EXITED)));
+    ASSERT_NULL(wcsstr(text, apr_str(APR_S_UI_TREE_STATE_MUTED)));
+
+    apr_graph_destroy(m.g);
 }
 
 /* ==========================================================================

@@ -67,9 +67,10 @@
 #include "discover.h"
 #include "session.h"
 
-/* EnumWindows / GetClassNameW. A pragma rather than a CMakeLists edit, for
- * the same reason action_m4a.c links Media Foundation this way: several
- * agents are in that file and this change has no business being global. */
+/* EnumWindows / GetClassNameW. A pragma rather than a CMakeLists edit: this
+ * translation unit is the only thing in the product that needs user32, several
+ * agents are in CMakeLists.txt, and the dependency has no business being
+ * global. */
 #pragma comment(lib, "user32.lib")
 
 /* One translation unit, so nothing of jsmn's reaches the link, and strict

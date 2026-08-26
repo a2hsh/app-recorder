@@ -116,7 +116,7 @@ size_t apr_graph_sources_for_bus(const AprGraph *g, AprBusId bus,
  * Actions
  * ------------------------------------------------------------------------- */
 
-/* Looked up by registry id ("wav", "m4a", ...) -- the string a session file
+/* Looked up by registry id ("wav", "ogg", ...) -- the string a session file
  * stores. The config's format fields are filled in from the graph. */
 AprErr apr_graph_add_action(AprGraph *g, AprBusId bus, const char *action_id,
                             const AprActionConfig *cfg);

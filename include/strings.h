@@ -117,7 +117,7 @@
  * ------------------------------------------------------------------------- */
 
 #define APR_STR_ID_MIN 1000
-#define APR_STR_ID_MAX 1600
+#define APR_STR_ID_MAX 1800
 
 /* X(NAME, id) -- a plain string. Referenced in C as APR_S_NAME. */
 
@@ -140,7 +140,14 @@
  *   the generated enum and tests/test_strings.c all walk APR_STR_LIST.
  * ------------------------------------------------------------------------- */
 
-/* ---- the product itself, and what both front ends share. ---- */
+/* ---- the product itself, and what both front ends share.
+ *
+ * ACTION_NAME_* is one entry per registered action, and it lives here rather
+ * than beside the encoder because an encoder's vtable must not carry prose:
+ * AprActionVTable::display_name_id names one of these and the CLI and both UI
+ * panes resolve it at the point of display. They are in the order
+ * core/registry.c lists the actions. Adding an encoder adds one line here and
+ * one in every LANGUAGE block of res/strings.rc, and nothing else. ---- */
 #define APR_STR_LIST_CORE(X)                                                   \
     X(APP_NAME,                  1001)                                         \
     X(APP_TAGLINE,               1002)                                         \
@@ -163,7 +170,11 @@
     X(NODE_KIND_BUS,             1051)                                         \
     X(NODE_KIND_ACTION,          1052)                                         \
     X(UIA_SOURCE_FEEDS,          1053)                                         \
-    X(UIA_BUS_FEEDS,             1054)
+    X(UIA_BUS_FEEDS,             1054)                                         \
+    X(ACTION_NAME_WAV,           1055)                                         \
+    X(ACTION_NAME_MP3,           1056)                                         \
+    X(ACTION_NAME_OGG,           1057)                                         \
+    X(ACTION_NAME_NONE,          1058)
 
 /* ---- the command line: usage text, one entry per printed line. ---- */
 #define APR_STR_LIST_CLI(X)                                                    \
@@ -463,6 +474,173 @@
     X(STATUS_SESSION_LOADED,         1550)                                    \
     X(STATUS_SESSION_SAVED,          1551)
 
+
+/* ---- recording: what the window and the notification area say while a
+ * session is actually running.
+ *
+ * EVERY ONE OF THESE IS SPOKEN, not merely displayed. The author is blind, so
+ * a colour change is not a state change: a recording that started, a source
+ * that died, a file that stopped being written all have to arrive as text a
+ * screen reader reads. They reach it two ways -- a live-region change on the
+ * status readout while the window is in front, and a notification-area balloon
+ * when it is not, because a live region on an unfocused background window is
+ * not reliably announced by any reader. ---- */
+#define APR_STR_LIST_UI_REC(X)                                          \
+    X(UI_STATUS_IDLE,               1600)                                 \
+    X(UI_STATUS_RECORDING,          1601)                                 \
+    X(UI_STATUS_FINISHING,          1602)                                 \
+    X(UI_TIME_ELAPSED,              1603)                                 \
+    X(UI_ANN_RECORD_STARTED,        1604)                                 \
+    X(UI_ANN_RECORD_STOPPED,        1605)                                 \
+    X(UI_ANN_RECORD_INCOMPLETE,     1606)                                 \
+    X(UI_ANN_RECORD_FAILED,         1607)                                 \
+    X(UI_ANN_ARM_FAILED,            1608)                                 \
+    X(UI_ANN_SOURCE_DIED,           1609)                                 \
+    X(UI_ANN_SOURCE_MUTED,          1610)                                 \
+    X(UI_ANN_ACTION_FAILED,         1611)                                 \
+    X(UI_ANN_ALREADY_RECORDING,     1612)                                 \
+    X(UI_ANN_NOT_RECORDING,         1613)                                 \
+    X(UI_ANN_NOTHING_TO_RECORD,     1614)                                 \
+    X(UI_ANN_BUSY_RECORDING,        1615)                                 \
+    X(UI_HEALTH_OK,                 1616)                                 \
+    X(UI_HEALTH_MUTED,              1617)                                 \
+    X(UI_HEALTH_DEAD,               1618)                                 \
+    X(UI_PANE_RECORDING,            1619)                                 \
+    X(UI_DESC_RECORDING,            1620)                                 \
+    X(UI_CLOSE_TITLE,               1621)                                 \
+    X(UI_CLOSE_BODY,                1622)                                 \
+    X(UI_CLOSE_STOP_AND_EXIT,       1623)                                 \
+    X(UI_CLOSE_KEEP_RECORDING,      1624)                                 \
+    X(UI_CLOSE_TO_TRAY,             1625)                                 \
+    X(UI_ANN_CLOSING_FILES,         1626)
+
+
+/* ---- the dialogs: the half of the product that turns "navigate a graph" into
+ * "build one".
+ *
+ * Dialogs are standard Win32 dialog templates with standard controls, because
+ * those carry the MSAA/UIA a screen reader has decades of tuning for. That
+ * means every label here is also an ACCESSIBLE NAME, so each one is written to
+ * be heard on its own rather than read next to a control: "Bitrate in
+ * kilobits per second, 0 for the format's own default", not "Bitrate".
+ *
+ * The EXCLUDE entries (UI_DLG_SYSTEM_*) are worded to design 4.1.1: it records
+ * EVERYTHING the machine plays and it walks the target's process tree, so
+ * naming a launcher holds back everything the launcher started. Never word it
+ * as "everything except X", and never make it a default. ---- */
+#define APR_STR_LIST_UI_DLG(X)                                          \
+    X(UI_DLG_OK,                    1650)                                 \
+    X(UI_DLG_CANCEL,                1651)                                 \
+    X(UI_DLG_CLOSE,                 1652)                                 \
+    X(UI_DLG_REFRESH,               1653)                                 \
+    X(UI_DLG_BROWSE,                1654)                                 \
+    X(UI_DLG_ADD_SOURCE_TITLE,      1655)                                 \
+    X(UI_DLG_SOURCE_KIND,           1656)                                 \
+    X(UI_DLG_KIND_APP,              1657)                                 \
+    X(UI_DLG_KIND_DEVICE,           1658)                                 \
+    X(UI_DLG_KIND_SYSTEM,           1659)                                 \
+    X(UI_DLG_APP_LIST,              1660)                                 \
+    X(UI_DLG_DEVICE_LIST,           1661)                                 \
+    X(UI_DLG_APP_ROW,               1662)                                 \
+    X(UI_DLG_APP_STATE_ACTIVE,      1663)                                 \
+    X(UI_DLG_APP_STATE_IDLE,        1664)                                 \
+    X(UI_DLG_APP_STATE_MUTED,       1665)                                 \
+    X(UI_DLG_DEVICE_ROW,            1666)                                 \
+    X(UI_DLG_DEVICE_ROW_DEFAULT,    1667)                                 \
+    X(UI_DLG_NO_APPS,               1668)                                 \
+    X(UI_DLG_NO_DEVICES,            1669)                                 \
+    X(UI_DLG_SOURCE_NAME,           1670)                                 \
+    X(UI_DLG_ADD_BUS_TITLE,         1671)                                 \
+    X(UI_DLG_RENAME_BUS_TITLE,      1672)                                 \
+    X(UI_DLG_BUS_NAME,              1673)                                 \
+    X(UI_DLG_ADD_OUTPUT_TITLE,      1674)                                 \
+    X(UI_DLG_OUT_BUS,               1675)                                 \
+    X(UI_DLG_OUT_FORMAT,            1676)                                 \
+    X(UI_DLG_OUT_PATH,              1677)                                 \
+    X(UI_DLG_OUT_BITRATE,           1678)                                 \
+    X(UI_DLG_OUT_QUALITY,           1679)                                 \
+    X(UI_DLG_SAVE_AUDIO_TITLE,      1680)                                 \
+    X(UI_DLG_FILTER_AUDIO,          1681)                                 \
+    X(UI_DLG_FILTER_ALL,            1682)                                 \
+    X(UI_DLG_FILTER_SESSION,        1683)                                 \
+    X(UI_DLG_OPEN_SESSION_TITLE,    1684)                                 \
+    X(UI_DLG_SAVE_SESSION_TITLE,    1685)                                 \
+    X(UI_DLG_REMOVE_TITLE,          1686)                                 \
+    X(UI_DLG_REMOVE_CONFIRM,        1687)                                 \
+    X(UI_DLG_SYSTEM_TITLE,          1688)                                 \
+    X(UI_DLG_SYSTEM_BODY,           1689)                                 \
+    X(UI_DLG_SYSTEM_TREE,           1690)                                 \
+    X(UI_DLG_SYSTEM_TREE_NONE,      1691)                                 \
+    X(UI_DLG_SYSTEM_CONSENT,        1692)                                 \
+    X(UI_DLG_SYSTEM_TARGET,         1693)                                 \
+    X(UI_DLG_RESOLVE_TITLE,         1694)                                 \
+    X(UI_DLG_RESOLVE_LIST,          1695)                                 \
+    X(UI_DLG_RESOLVE_SUMMARY,       1696)                                 \
+    X(UI_DLG_RESOLVE_OK,            1697)                                 \
+    X(UI_DLG_RESOLVE_CANDIDATE,     1698)                                 \
+    X(UI_DLG_RESOLVE_LOAD,          1699)                                 \
+    X(UI_DLG_KEYS_TITLE,            1700)                                 \
+    X(UI_DLG_KEYS_LIST,             1701)                                 \
+    X(UI_DLG_KEYS_ROW,              1702)                                 \
+    X(UI_DLG_KEYS_COL_OP,           1703)                                 \
+    X(UI_DLG_KEYS_COL_KEY,          1704)                                 \
+    X(UI_DLG_ABOUT_TITLE,           1705)                                 \
+    X(UI_DLG_ABOUT_BODY,            1706)                                 \
+    X(UI_DLG_NAME_NEEDED,           1707)                                 \
+    X(UI_DLG_PATH_NEEDED,           1708)                                 \
+    X(UI_DLG_PICK_NEEDED,           1709)                                 \
+    X(UI_DLG_NO_BUSES,              1710)                                 \
+    X(UI_DLG_SOURCE_ADDED,          1711)                                 \
+    X(UI_DLG_BUS_ADDED,             1712)                                 \
+    X(UI_DLG_BUS_RENAMED,           1713)                                 \
+    X(UI_DLG_OUTPUT_ADDED,          1714)                                 \
+    X(UI_DLG_ADD_FAILED,            1715)                                 \
+    X(UI_DLG_SESSION_LOADED,        1716)                                 \
+    X(UI_DLG_SESSION_SAVED,         1717)                                 \
+    X(UI_DLG_SESSION_FAILED,        1718)                                 \
+    X(UI_DLG_SESSION_SAVE_FAILED,   1719)                                 \
+    X(UI_DLG_KEY_COMBO,             1720)                                 \
+    X(UI_DLG_KEY_CTRL,              1721)                                 \
+    X(UI_DLG_KEY_SHIFT,             1722)                                 \
+    X(UI_DLG_KEY_ALT,               1723)                                 \
+    X(UI_DLG_OUTPUT_REMOVED,        1724)                                 \
+    X(UI_DLG_PICK_OUTPUT,           1725)                                 \
+    X(UI_DLG_OUTPUT_ROW,            1726)
+
+
+/* ---- the notification area.
+ *
+ * A recorder runs for hours minimised, so the tray is the app's primary
+ * surface during a session rather than a convenience. Two things here are
+ * accessibility features and not decoration:
+ *
+ *   UI_TRAY_TIP_* is a LIVE STATUS READOUT. Windows has a keyboard path to the
+ *   notification area (Windows+B, then the arrow keys), so a tooltip that says
+ *   "recording, 12:34" lets the author check on a session from anywhere
+ *   without opening a window or interrupting what he is doing.
+ *
+ *   UI_TRAY_INFO_* are balloon notifications, and they are the channel for
+ *   anything that happens while the window is NOT in front -- a source died,
+ *   an encoder stopped. Screen readers announce those reliably, where a live
+ *   region on a background window is not announced at all. ---- */
+#define APR_STR_LIST_UI_TRAY(X)                                         \
+    X(UI_TRAY_ICON_NAME,            1750)                                 \
+    X(UI_TRAY_TIP_IDLE,             1751)                                 \
+    X(UI_TRAY_TIP_RECORDING,        1752)                                 \
+    X(UI_TRAY_TIP_FINISHING,        1753)                                 \
+    X(UI_TRAY_MENU_SHOW,            1754)                                 \
+    X(UI_TRAY_MENU_START,           1755)                                 \
+    X(UI_TRAY_MENU_STOP,            1756)                                 \
+    X(UI_TRAY_MENU_OPEN,            1757)                                 \
+    X(UI_TRAY_MENU_QUIT,            1758)                                 \
+    X(UI_TRAY_INFO_TITLE,           1759)                                 \
+    X(UI_TRAY_INFO_STARTED,         1760)                                 \
+    X(UI_TRAY_INFO_STOPPED,         1761)                                 \
+    X(UI_TRAY_INFO_SOURCE_DIED,     1762)                                 \
+    X(UI_TRAY_INFO_SOURCE_MUTED,    1763)                                 \
+    X(UI_TRAY_INFO_ACTION_FAILED,   1764)                                 \
+    X(UI_TRAY_INFO_MINIMIZED,       1765)
+
 /* Every plain string, in declaration order. This is what C, the generated
  * enum and tests/test_strings.c walk; the groups above exist only so that
  * res/strings.rc can emit them in rc.exe-sized pieces. */
@@ -475,7 +653,10 @@
     APR_STR_LIST_UI_NODE(X)                                                    \
     APR_STR_LIST_UI_KEYS(X)                                    \
     APR_STR_LIST_UI_TREE(X)                                                    \
-    APR_STR_LIST_SESSION(X)
+    APR_STR_LIST_SESSION(X)                                                    \
+    APR_STR_LIST_UI_REC(X)                                                     \
+    APR_STR_LIST_UI_DLG(X)                                                     \
+    APR_STR_LIST_UI_TRAY(X)
 
 
 /* X(NAME, base) -- a plural string. Referenced in C as APR_S_NAME, which is

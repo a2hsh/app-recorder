@@ -353,7 +353,8 @@ TEST(the_vtable_identifies_itself_as_mp3)
 {
     ASSERT_STR_EQ("mp3", apr_action_mp3.id);
     ASSERT_WSTR_EQ(L"mp3", apr_action_mp3.extension);
-    ASSERT_NOT_NULL(apr_action_mp3.display_name);
+    ASSERT_NE_INT(0, apr_action_mp3.display_name_id);
+    ASSERT_GT_INT(0, (long long)wcslen(apr_str(apr_action_mp3.display_name_id)));
     ASSERT_NOT_NULL((void *)(uintptr_t)apr_action_mp3.create);
     ASSERT_NOT_NULL((void *)(uintptr_t)apr_action_mp3.on_audio);
     ASSERT_NOT_NULL((void *)(uintptr_t)apr_action_mp3.finalize);

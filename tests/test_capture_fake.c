@@ -680,3 +680,324 @@ TEST(start_is_idempotent_and_stop_joins_the_thread)
     fx.c->vt->stop(fx.c);               /* still idempotent afterwards */
     fixture_close(&fx);
 }
+
+/* ==========================================================================
+ * Health -- the two ways a recording comes back silent while everything else
+ * says it went fine.
+ *
+ * Neither of these could be reached from a test before capture.h grew the
+ * health knob, so the tree panel's two state clauses, the CLI's mute warning
+ * and design section 10's SRC_FAILED path were all covered only by proxies.
+ * They are the conditions a real user hits -- close Teams mid-call, or mute it
+ * in the volume mixer -- so they deserve the same exactness as the clock.
+ *
+ * The load-bearing property in all of them is that FRAMES KEEP COMING. A fake
+ * that stopped producing when the source died would be a tidier model and a
+ * useless one: real process loopback hands over perfect silence for ever, and
+ * a test built on the tidy version would never catch the desync the real
+ * behaviour causes.
+ * ======================================================================= */
+
+/* frames_written must equal what the clock says regardless of health, so it is
+ * asserted the same way everywhere below. */
+static uint64_t frames_after(Fixture *fx, uint64_t t0, uint64_t ticks)
+{
+    AprCaptureStatus st;
+    apr_capture_fake_advance(fx->c, t0 + ticks);
+    fx->c->vt->status(fx->c, &st);
+    return st.frames_written;
+}
+
+static int all_silent(const float *p, size_t n)
+{
+    size_t i;
+    for (i = 0; i < n; i++) if (p[i] != 0.0f) return 0;
+    return 1;
+}
+
+static int any_loud(const float *p, size_t n)
+{
+    size_t i;
+    for (i = 0; i < n; i++) if (p[i] != 0.0f) return 1;
+    return 0;
+}
+
+TEST(a_source_can_start_muted_and_it_records_pure_silence)
+{
+    /* Measured, not assumed: loopback is post-session-volume, so a muted app
+     * records digital zeros while the engine still reports it rendering. */
+    Fixture fx;
+    AprCaptureStatus st;
+    AprCaptureConfig cfg = fake_cfg(48000, 2, 0, 1000, 0.5f);
+    static float buf[4800 * 2];
+    const uint64_t t0 = 1u;
+    size_t n;
+
+    cfg.fake.start_muted = 1;
+    ASSERT_TRUE(fixture_open(&fx, &cfg, 8192));
+
+    /* Published before a single frame exists: the UI must be able to warn
+     * about a source that has not produced anything yet. */
+    fx.c->vt->status(fx.c, &st);
+    ASSERT_EQ_INT(1, st.muted);
+    ASSERT_EQ_INT(1, st.alive);
+    ASSERT_FALSE(apr_failed(&st.last_error));
+
+    apr_capture_fake_advance(fx.c, t0);
+    ASSERT_EQ_U64(4800u, frames_after(&fx, t0, ms_ticks(100)));
+
+    n = drain_all(fx.rb, buf, 4800, NULL);
+    ASSERT_EQ_U64(4800u, (uint64_t)n);
+    ASSERT_TRUE(all_silent(buf, n * 2));
+
+    fx.c->vt->status(fx.c, &st);
+    ASSERT_EQ_INT(1, st.muted);
+    /* Muted is not dead. Different cause, different fix, different clause. */
+    ASSERT_EQ_INT(1, st.alive);
+
+    fixture_close(&fx);
+}
+
+TEST(going_muted_mid_session_silences_the_exact_frame_it_was_asked_to)
+{
+    /* Sample-exact, because the boundary must not depend on how the caller
+     * chopped the timeline -- the same reason the audio is a pure function of
+     * the frame index. */
+    Fixture fx;
+    AprCaptureStatus st;
+    AprCaptureConfig cfg = fake_cfg(48000, 2, 0, 1000, 0.5f);
+    static float buf[4800 * 2];
+    const uint64_t t0 = 1u;
+    size_t n;
+
+    cfg.fake.mute_at_frame = 2400;    /* 50 ms in */
+    ASSERT_TRUE(fixture_open(&fx, &cfg, 8192));
+
+    apr_capture_fake_advance(fx.c, t0);
+    fx.c->vt->status(fx.c, &st);
+    ASSERT_EQ_INT(0, st.muted);
+
+    ASSERT_EQ_U64(4800u, frames_after(&fx, t0, ms_ticks(100)));
+    n = drain_all(fx.rb, buf, 4800, NULL);
+    ASSERT_EQ_U64(4800u, (uint64_t)n);
+
+    ASSERT_TRUE(any_loud(buf, 2400 * 2));
+    ASSERT_TRUE(all_silent(buf + 2400 * 2, 2400 * 2));
+    /* The two frames before the boundary are still real audio, so the cut is
+     * on the frame that was asked for and not one either side of it. */
+    ASSERT_TRUE(any_loud(buf + 2398 * 2, 2 * 2));
+
+    fx.c->vt->status(fx.c, &st);
+    ASSERT_EQ_INT(1, st.muted);
+    ASSERT_EQ_INT(1, st.alive);
+    fixture_close(&fx);
+}
+
+TEST(unmuting_brings_the_audio_back_without_moving_the_timeline)
+{
+    /* Muting is a gate over a timeline that never stopped, not a pause. The
+     * proof is a second source with the same configuration and no mute at all:
+     * once the first unmutes, the two must be equal SAMPLE FOR SAMPLE. A fake
+     * that restarted its oscillator on unmute would look perfectly plausible
+     * on its own and would be a source whose samples are no longer a pure
+     * function of the frame index -- which every determinism guarantee in this
+     * file, and every golden-file encoder test above it, rests on. */
+    Fixture fx, ref;
+    AprCaptureStatus st;
+    AprCaptureConfig cfg    = fake_cfg(48000, 2, 0, 1000, 0.5f);
+    AprCaptureConfig refcfg = fake_cfg(48000, 2, 0, 1000, 0.5f);
+    static float buf[4800 * 2], refbuf[4800 * 2];
+    const uint64_t t0 = 1u;
+    size_t n, rn;
+
+    cfg.fake.start_muted     = 1;
+    cfg.fake.unmute_at_frame = 2400;
+    ASSERT_TRUE(fixture_open(&fx, &cfg, 8192));
+    ASSERT_TRUE(fixture_open(&ref, &refcfg, 8192));
+
+    apr_capture_fake_advance(fx.c, t0);
+    apr_capture_fake_advance(ref.c, t0);
+    ASSERT_EQ_U64(4800u, frames_after(&fx, t0, ms_ticks(100)));
+    ASSERT_EQ_U64(4800u, frames_after(&ref, t0, ms_ticks(100)));
+
+    n  = drain_all(fx.rb, buf, 4800, NULL);
+    rn = drain_all(ref.rb, refbuf, 4800, NULL);
+    ASSERT_EQ_U64(4800u, (uint64_t)n);
+    ASSERT_EQ_U64(4800u, (uint64_t)rn);
+
+    ASSERT_TRUE(all_silent(buf, 2400 * 2));
+    ASSERT_TRUE(any_loud(buf + 2400 * 2, 2400 * 2));
+    ASSERT_MEM_EQ(refbuf + 2400 * 2, buf + 2400 * 2, 2400 * 2 * sizeof(float));
+
+    fx.c->vt->status(fx.c, &st);
+    ASSERT_EQ_INT(0, st.muted);
+
+    fixture_close(&ref);
+    fixture_close(&fx);
+}
+
+TEST(a_dead_source_keeps_delivering_silence_for_ever_and_says_so)
+{
+    /* The behaviour that makes closing Teams mid-session look like a
+     * successful recording: WASAPI never reports the death, the stream stays
+     * gapless and 100% full, and every frame is zero. The fake reproduces it
+     * exactly -- including the part that is inconvenient to test. */
+    Fixture fx;
+    AprCaptureStatus st;
+    AprCaptureConfig cfg = fake_cfg(48000, 2, 0, 1000, 0.5f);
+    static float buf[4800 * 2];
+    const uint64_t t0 = 1u;
+    size_t n;
+
+    cfg.fake.die_at_frame = 2400;
+    ASSERT_TRUE(fixture_open(&fx, &cfg, 8192));
+
+    apr_capture_fake_advance(fx.c, t0);
+    fx.c->vt->status(fx.c, &st);
+    ASSERT_EQ_INT(1, st.alive);
+    ASSERT_FALSE(apr_failed(&st.last_error));
+
+    ASSERT_EQ_U64(4800u, frames_after(&fx, t0, ms_ticks(100)));
+
+    fx.c->vt->status(fx.c, &st);
+    ASSERT_EQ_INT(0, st.alive);
+    ASSERT_TRUE(apr_failed(&st.last_error));   /* and it explains itself */
+    ASSERT_EQ_INT(0, st.muted);                /* dead is not muted */
+
+    n = drain_all(fx.rb, buf, 4800, NULL);
+    ASSERT_EQ_U64(4800u, (uint64_t)n);
+    ASSERT_TRUE(any_loud(buf, 2400 * 2));
+    ASSERT_TRUE(all_silent(buf + 2400 * 2, 2400 * 2));
+
+    /* Now the part that matters: ten more seconds after death still produce
+     * exactly the frames the clock says are due. A source that stopped here
+     * would leave every other file in the session correct and this one short,
+     * which is the failure the whole drift design exists to prevent. */
+    ASSERT_EQ_U64(due(ms_ticks(10100), 48000, 0),
+                  frames_after(&fx, t0, ms_ticks(10100)));
+    fx.c->vt->status(fx.c, &st);
+    ASSERT_EQ_INT(0, st.alive);
+    ASSERT_EQ_U64(st.frames_written, rb_write_pos(fx.rb));
+
+    fixture_close(&fx);
+}
+
+TEST(a_source_can_be_dead_before_it_ever_produced_a_frame)
+{
+    /* An app that exited between the user picking it and the session starting.
+     * The UI has to be able to say so before any audio exists. */
+    Fixture fx;
+    AprCaptureStatus st;
+    AprCaptureConfig cfg = fake_cfg(48000, 2, 0, 1000, 0.5f);
+    static float buf[960 * 2];
+    const uint64_t t0 = 1u;
+    size_t n;
+
+    cfg.fake.start_dead = 1;
+    ASSERT_TRUE(fixture_open(&fx, &cfg, 4096));
+
+    fx.c->vt->status(fx.c, &st);
+    ASSERT_EQ_INT(0, st.alive);
+    ASSERT_TRUE(apr_failed(&st.last_error));
+
+    apr_capture_fake_advance(fx.c, t0);
+    ASSERT_EQ_U64(960u, frames_after(&fx, t0, ms_ticks(20)));
+    n = drain_all(fx.rb, buf, 960, NULL);
+    ASSERT_EQ_U64(960u, (uint64_t)n);
+    ASSERT_TRUE(all_silent(buf, n * 2));
+
+    fixture_close(&fx);
+}
+
+TEST(a_dying_drifting_source_still_drifts_at_exactly_its_configured_rate)
+{
+    /* Death must not touch the clock. A fake that stopped counting, or counted
+     * differently once dead, would silently repair the very drift the test
+     * above it was measuring. */
+    Fixture fx;
+    AprCaptureConfig cfg = fake_cfg(48000, 2, 30 /* ppm fast */, 0, 0.0f);
+    const uint64_t t0 = 55u;
+
+    cfg.fake.die_at_frame = 48000;   /* one second in */
+    ASSERT_TRUE(fixture_open(&fx, &cfg, 1024));   /* deliberately overrunning */
+
+    apr_capture_fake_advance(fx.c, t0);
+    ASSERT_EQ_U64(due(ms_ticks(60000), 48000, 30),
+                  frames_after(&fx, t0, ms_ticks(60000)));
+
+    fixture_close(&fx);
+}
+
+TEST(health_transitions_do_not_depend_on_how_the_timeline_is_stepped)
+{
+    /* The determinism guarantee, extended to health: one leap and a thousand
+     * steps must produce byte-identical audio and identical status. Health is
+     * evaluated per chunk, so a transition that was not clamped to a chunk
+     * boundary would show up here and nowhere else. */
+    Fixture a, b;
+    AprCaptureStatus sa, sb;
+    AprCaptureConfig cfg = fake_cfg(48000, 2, 17, 440, 0.25f);
+    static float buf_a[2048 * 2], buf_b[2048 * 2];
+    const uint64_t t0 = 24680u;
+    const uint64_t span = ms_ticks(40);
+    size_t na, nb;
+    uint64_t i;
+
+    cfg.fake.mute_at_frame   = 137;    /* deliberately not a chunk multiple */
+    cfg.fake.unmute_at_frame = 613;
+    cfg.fake.die_at_frame    = 1499;
+
+    ASSERT_TRUE(fixture_open(&a, &cfg, 4096));
+    ASSERT_TRUE(fixture_open(&b, &cfg, 4096));
+
+    apr_capture_fake_advance(a.c, t0);
+    apr_capture_fake_advance(a.c, t0 + span);
+
+    apr_capture_fake_advance(b.c, t0);
+    for (i = 1; i <= 1000; i++)
+        apr_capture_fake_advance(b.c, t0 + span * i / 1000);
+
+    na = drain_all(a.rb, buf_a, 2048, NULL);
+    nb = drain_all(b.rb, buf_b, 2048, NULL);
+    ASSERT_EQ_U64((uint64_t)na, (uint64_t)nb);
+    ASSERT_TRUE(na > 1500);
+    ASSERT_MEM_EQ(buf_a, buf_b, na * 2 * sizeof(float));
+
+    a.c->vt->status(a.c, &sa);
+    b.c->vt->status(b.c, &sb);
+    ASSERT_EQ_U64(sa.frames_written, sb.frames_written);
+    ASSERT_EQ_INT(sa.alive, sb.alive);
+    ASSERT_EQ_INT(sa.muted, sb.muted);
+    ASSERT_EQ_INT(0, sa.alive);
+    ASSERT_EQ_INT(0, sa.muted);
+
+    /* The three states really did all occur, in order. */
+    ASSERT_TRUE(any_loud(buf_a, 137 * 2));
+    ASSERT_TRUE(all_silent(buf_a + 137 * 2, (613 - 137) * 2));
+    ASSERT_TRUE(any_loud(buf_a + 613 * 2, (1499 - 613) * 2));
+    ASSERT_TRUE(all_silent(buf_a + 1499 * 2, (na - 1499) * 2));
+
+    fixture_close(&a);
+    fixture_close(&b);
+}
+
+TEST(a_mute_and_an_unmute_on_the_same_frame_are_refused_rather_than_guessed)
+{
+    /* Two contradictory events on one frame is a test bug, and resolving it
+     * quietly would make the fake's behaviour depend on the order of two lines
+     * in whatever file configured it. */
+    RingBuf *rb = NULL;
+    AprCapture *c = NULL;
+    AprCaptureConfig cfg = fake_cfg(48000, 2, 0, 0, 0.0f);
+    AprErr e;
+
+    cfg.fake.mute_at_frame   = 1000;
+    cfg.fake.unmute_at_frame = 1000;
+
+    e = rb_create(1024, 2 * sizeof(float), &rb);
+    ASSERT_FALSE(apr_failed(&e));
+    e = apr_capture_create(&cfg, rb, &c);
+    ASSERT_TRUE(apr_failed(&e));
+    ASSERT_EQ_INT(APR_E_INVALID_ARG, e.kind);
+    rb_destroy(rb);
+}

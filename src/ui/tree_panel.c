@@ -356,12 +356,10 @@ static size_t label_action(const AprGraph *g, const AprTreeSel *sel,
     vt = apr_bus_action_at(b, sel->action);
     if (!vt) { if (cch) buf[0] = 0; return 0; }
 
-    /* NOTE FOR WHOEVER OWNS action.h: `display_name` is a wide literal in each
-     * encoder's vtable, which is a user-facing string living in code -- the one
-     * thing AGENTS.md rule 6 forbids. It is not this file's to fix (an id per
-     * format belongs beside the registry), but the moment it becomes an
-     * AprStrId this call site becomes apr_str(vt->display_name_id). */
-    args[0] = vt->display_name ? vt->display_name : L"";
+    /* The encoder's display name is a catalog id, not a literal in its vtable
+     * (AGENTS.md rule 6), so it resolves here, at the point of display, on the
+     * UI thread -- which is where apr_str() is allowed to lock and allocate. */
+    args[0] = vt->display_name_id ? apr_str(vt->display_name_id) : L"";
     args[1] = apr_bus_name(b);
     return apr_str_format(apr_bus_action_failed(b, sel->action)
                             ? APR_S_UI_TREE_ACTION_FAILED

@@ -799,7 +799,7 @@ static void mp3_destroy(void *state)
  * plugin machinery anywhere (design 3.3). */
 const AprActionVTable apr_action_mp3 = {
     "mp3",
-    L"MP3 (MPEG-1 Layer III)",
+    APR_S_ACTION_NAME_MP3,
     L"mp3",
     mp3_create,
     mp3_on_audio,

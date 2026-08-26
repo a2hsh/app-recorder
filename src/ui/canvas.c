@@ -513,7 +513,7 @@ static size_t bus_output_names(CanvasState *st, AprBusId id,
     if (n > cap) n = cap;
     for (i = 0; i < n; ++i) {
         const AprActionVTable *vt = apr_bus_action_at(b, i);
-        out[i] = (vt && vt->display_name) ? vt->display_name : L"";
+        out[i] = (vt && vt->display_name_id) ? apr_str(vt->display_name_id) : L"";
     }
     return n;
 }

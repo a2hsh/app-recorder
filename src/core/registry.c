@@ -78,7 +78,7 @@ static void none_destroy(void *state)
 }
 
 static const AprActionVTable apr_action_none = {
-    "none", L"No output (discard)", L"",
+    "none", APR_S_ACTION_NAME_NONE, L"",
     none_create, none_on_audio, none_finalize, none_destroy
 };
 
@@ -95,9 +95,6 @@ extern const AprActionVTable apr_action_mp3;          /* src/actions/action_mp3.
 #ifdef APR_HAVE_ACTION_OGG
 extern const AprActionVTable apr_action_ogg;          /* src/actions/action_ogg.c */
 #endif
-#ifdef APR_HAVE_ACTION_M4A
-extern const AprActionVTable apr_action_m4a;          /* src/actions/action_m4a.c */
-#endif
 
 /* Order is the order the UI offers them in, so it is editorial, not
  * alphabetical: lossless first, then lossy by ubiquity. */
@@ -107,9 +104,6 @@ static const AprActionVTable *const g_actions[] = {
 #endif
 #ifdef APR_HAVE_ACTION_MP3
     &apr_action_mp3,
-#endif
-#ifdef APR_HAVE_ACTION_M4A
-    &apr_action_m4a,
 #endif
 #ifdef APR_HAVE_ACTION_OGG
     &apr_action_ogg,
@@ -127,8 +121,9 @@ const AprActionVTable *apr_action_at(size_t index)
     return index < apr_action_count() ? g_actions[index] : NULL;
 }
 
-/* Matched on `id`, which is what a session file stores. Never on
- * display_name, which is prose and will be localised. */
+/* Matched on `id`, which is what a session file stores. Never on the display
+ * name, which is prose, is not even a string here any more (it is an AprStrId)
+ * and changes with the interface language. */
 const AprActionVTable *apr_action_find(const char *id)
 {
     size_t i, n = apr_action_count();

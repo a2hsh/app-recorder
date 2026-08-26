@@ -3365,6 +3365,97 @@ owner exists). **Move it to `discover.c` when the UI needs it.**
 `apprecorder.exe` = **786,944 bytes (768.5 KB)** — under the 1 MB goal with four
 encoders, LAME, libogg and libopus statically linked.
 
+*(Superseded later the same day: 23 suites and 769,024 bytes once M4A was
+removed. See the next entry.)*
+
+---
+
+## 2026-08-26 — M4A DELETED, `display_name` FIXED, TWO SMALL ONES
+
+### 1. M4A is gone, and the spec says why
+
+Author's decision, verbatim: *"For m4a, if it's giving us trouble, fuck it, we
+don't need it, wav and mp3 and ogg high quality stereo recordings are enough for
+me."* Removal, not deprecation.
+
+Deleted: `src/actions/action_m4a.c`, `tests/test_action_m4a.c`, the `extern` and
+table entry in `core/registry.c`, `m4a` from the `foreach(_action …)` list in
+`CMakeLists.txt`, and every `m4a` in the CLI, the help text, the headers and the
+docs. `CMakeLists.txt` derives `APR_HAVE_ACTION_M4A` from file presence, so that
+half took care of itself — **verified**, not assumed: the define is absent and
+the registry's guarded block compiles out.
+
+Media Foundation was linked from inside the m4a source with
+`#pragma comment(lib, …)`, so it left with the file. Confirmed by grep that
+nothing else in the tree references `mfplat`, `mfreadwrite`, `mfuuid` or
+`propsys`, and that `CMakeLists.txt` never named them.
+
+**The reason is now design section 8.0**, written to be read by whoever proposes
+adding AAC back. MP4 keeps its index in `moov`, `moov` is written at finalize,
+so a killed recording is unplayable and cannot be repaired from a dead process.
+WAV loses only correct RIFF size fields (every player infers length anyway), MP3
+ends on a self-synchronising frame boundary, OGG ends on a complete page whose
+granule position carries the duration in its own header. That asymmetry is the
+argument, and 8.0 keeps it.
+
+**Binary: 786,944 → 769,024 bytes (−17,920)** measured immediately after these
+changes and before anything else landed. That delta is M4A *and* the `AprStrId`
+change together — they were not built separately. The image read **777,216** at
+hand-off; the extra 8,192 is the capture agent's concurrent work on
+`capture_fake.c`, not a regression here.
+
+### 2. `display_name` is an `AprStrId` (AGENTS.md rule 6)
+
+`AprActionVTable::display_name` was a `const wchar_t *` literal — a user-facing
+string in code. It is now:
+
+```c
+    const char    *id;              /* "wav", "mp3", "ogg" — wire value */
+    AprStrId       display_name_id; /* catalog id, NOT a literal */
+    const wchar_t *extension;       /* without the dot; matched against paths */
+```
+
+`id` and `extension` are unchanged and stay literals: one is a stable value in
+session files, the other is matched against paths. Neither is prose.
+
+- New catalog entries in `APR_STR_LIST_CORE`: `ACTION_NAME_WAV` (1055),
+  `ACTION_NAME_MP3` (1056), `ACTION_NAME_OGG` (1057), `ACTION_NAME_NONE` (1058).
+  English text in `res/strings.rc`; **Arabic placeholders added — four more
+  strings for the translation pass.**
+- `include/action.h` now includes `strings.h`.
+- Three call sites resolve with `apr_str()`: `cli.c` (`report_action_failures`),
+  `ui/canvas.c` (`bus_output_names`), `ui/tree_panel.c` (`label_action`). Those
+  last two are two lines in another agent's files, and `tree_panel.c` had
+  already left a comment predicting this exact edit.
+- Tests changed from `ASSERT_NOT_NULL(display_name)` to asserting the id is
+  non-zero **and** resolves to a non-empty string — a set id with no `.rc` entry
+  would otherwise pass while displaying a placeholder.
+
+### 3. `.ogg` resolves without `--format`
+
+`action_for_extension` in `cli.c` now makes two passes: the `extension` field
+first, so `.opus` still reaches the ogg action as RFC 7845 wants; then the
+registry `id`, so `.ogg` reaches it too. Both passes skip an action with an
+empty extension, which keeps the built-in `none` sink unreachable by path — a
+new test asserts `x.none` is still refused. Extension-based dispatch is
+unchanged: the authoritative mapping wins first.
+
+### 4. The `foreach(_uitest …)` merge point is gone
+
+It walks `TEST_SRC` and matches `^test_ui_`. Adding `tests/test_ui_*.c` needs no
+build-system edit. Done last, and the suite re-run after.
+
+### Verification
+
+`build.cmd Release test`: **23/23 suites, 0 failures.** 24 minus the deleted
+`test_action_m4a`. `/W4 /WX` clean.
+
+For the record, because it cost a few runs: `test_capture_fake` failed
+intermittently during this work — a *different* set of cases each time — while
+the capture agent was rewriting `capture_fake.c` and its test minute by minute
+for the health knob (known defect 2). None of it was from these changes, and it
+went green once they settled.
+
 ---
 
 # ★ START HERE — state as of 2026-08-26, ~06:00
@@ -3373,7 +3464,7 @@ encoders, LAME, libogg and libopus statically linked.
 
 ```
 cd d:\data\projects\apprecorder
-build.cmd Release test          → 24/24 suites, 0 failures
+build.cmd Release test          → 23/23 suites, 0 failures
 build\Release\apprecorder.exe list-apps
 build\Release\apprecorder.exe list-devices
 ```
@@ -3399,14 +3490,16 @@ working.
 | foundation (harness, err, log, ringbuf, clock) | done, 74 cases |
 | capture (process / device / fake) | done |
 | core (graph, bus, mix, resample, drift) | done — **0.43 frames over 3 h** |
-| encoders WAV / MP3 / M4A / OGG-Opus | all four done |
+| encoders WAV / MP3 / OGG-Opus | done — **M4A deleted 2026-08-26**, design 8.0 |
 | i18n (catalog, CLDR plurals, RTL) | done — **Arabic not written** |
 | CLI | **working** |
 | UI foundation + canvas + tree panel | done, a11y tree tested |
 | session persistence | done |
 
-**Release binary 786,944 bytes (768.5 KB)** — under the 1 MB goal with four
-encoders, LAME, libogg and libopus linked in.
+**Release binary 777,216 bytes (759 KB)** — under the 1 MB goal with three
+encoders, LAME, libogg and libopus linked in. It was 786,944 with M4A in; the
+removal plus the `display_name` -> `AprStrId` change gave back 17,920 bytes
+(measured at 769,024), and concurrent capture-layer work has since added 8,192.
 
 ## THE THREE THINGS ONLY YOU CAN DO
 
@@ -3431,34 +3524,37 @@ outstanding count every run.
 
 ### 3. Two decisions left open
 
-- **M4A dies badly on a process kill** — the `moov` atom is only written at
-  finalize and cannot be rebuilt from a dead process. WAV, MP3 and OGG all
-  survive. Three fixes are documented in `action_m4a.c` (fragmented MP4, a
-  separate ADTS `.aac` action, or segment rotation), each with a real cost.
+- ~~**M4A dies badly on a process kill**~~ — **decided 2026-08-26: deleted.**
+  Your call: *"if it's giving us trouble, fuck it, we don't need it, wav and
+  mp3 and ogg high quality stereo recordings are enough for me."* The reason is
+  written down in design **8.0** so nobody re-adds AAC without solving the
+  `moov`-at-finalize problem first.
 - **Digit shaping** — Western vs Arabic-Indic numerals. One function
   (`apr_str_number`) owns it. Your domain.
 
 ## KNOWN DEFECTS — small, documented, not yet fixed
 
-1. **`AprActionVTable::display_name` is a wide literal in each encoder's vtable.**
-   A user-facing string in code — violates AGENTS.md rule 6. **My design error in
-   `action.h`.** The tree panel reads it for output rows. Needs an `AprStrId` per
-   format beside the registry; do all four vtables in one pass.
+1. ~~**`AprActionVTable::display_name` is a wide literal**~~ — **fixed
+   2026-08-26.** The field is now `AprStrId display_name_id`, resolved with
+   `apr_str()` at the point of display (CLI, canvas, tree panel). The names live
+   in `APR_STR_LIST_CORE` as `ACTION_NAME_WAV/MP3/OGG/NONE` (ids 1055-1058).
+   Arabic placeholders added; **four more strings pending translation.**
 2. **`capture_fake` has no health knob**, so `apr_source_muted()` /
    `apr_source_alive()` cannot be driven from a test. Blocks proper coverage of
    the tree's two state clauses **and** the CLI's `WARN_SOURCE_MUTED` path. Small
    fix, unlocks both.
-3. **`action_m4a.c` still scrubs non-finite values** before `apr_pcm_from_float`.
-   Confirmed redundant since `mix.c` handles NaN/±Inf for every integer format.
-   Dead code, not a defect. Remove with a verified build.
-4. **`--out x.ogg` needs an explicit `--format ogg`**; `.opus` works without it.
-   Extension mapping is by the registry's `extension` field and Opus registers
-   `.opus`. Surprising; worth a CLI alias.
+3. ~~**`action_m4a.c` still scrubs non-finite values**~~ — moot: the file is
+   gone.
+4. ~~**`--out x.ogg` needs an explicit `--format ogg`**~~ — **fixed
+   2026-08-26.** `action_for_extension` in `cli.c` now runs two passes: the
+   `extension` field first (authoritative — `.opus` must reach ogg), then the
+   registry `id`. An action with an empty extension (`none`) is reachable by
+   neither, so `x.none` is still refused.
 5. **Window-class lookup is a private static in `session_load.c`.** Move to
    `discover.c` when the UI needs it.
-6. **`CMakeLists.txt`'s `foreach(_uitest …)` list** is a three-way merge point.
-   A `MATCHES "^test_ui_"` loop would remove it permanently — safe now that the
-   UI agents are finished.
+6. ~~**`CMakeLists.txt`'s `foreach(_uitest …)` list**~~ — **fixed 2026-08-26.**
+   It now walks `TEST_SRC` and matches `^test_ui_`, so a new `tests/test_ui_*.c`
+   links `apprecorder_ui` with no build-system edit.
 7. **No dialog layer**, so the canvas announces "not available yet" for add
    source/bus/output. It can navigate and rewire an existing graph but cannot
    build one from scratch. **This is the main gap between the UI and being
@@ -3478,3 +3574,71 @@ outstanding count every run.
 - **Test the real property, not a proxy.** The UIA client found an unnamed
   mouse-only splitter; `GetGUIThreadInfo` found a swallowed `SetFocus` that every
   proxy check passed.
+
+---
+
+## 2026-08-26 — M4A DELETED. `display_name` fixed. Defects 1, 3, 4, 6 closed.
+
+Author's call: *"if it's giving us trouble, fuck it, we don't need it, wav and
+mp3 and ogg high quality stereo recordings are enough for me."*
+
+**23/23 suites green Release.** Binary **786,944 → 777,216 bytes (759 KB)**.
+
+### M4A gone, and the reason generalised into a rule
+
+Removed the action, its test, its registry entry, its `foreach` id, and every
+`m4a` in CLI/help/headers/docs. **Media Foundation is fully gone** — its link
+directives lived inside the deleted file as `#pragma comment(lib, …)`; grep
+confirms no `mfplat`/`mfreadwrite`/`mfuuid`/`propsys` anywhere. `APR_HAVE_ACTION_M4A`
+verified absent from the generated `build.ninja`, not assumed.
+
+**Why it went is now design §8.0**, a section rather than a footnote, with a
+table contrasting what a kill leaves for WAV (size fields wrong, length
+inferred), MP3 (self-synchronising frames) and OGG (granule position in the page
+header).
+
+**And it became a general criterion in AGENTS.md rule 4**, which is the part
+worth keeping:
+
+> *"A recording that never reaches `finalize` at all must still be playable. A
+> container that keeps its index at the front and writes it last fails this and
+> cannot be rescued from a dead process… Do not add a format that cannot survive
+> a `TerminateProcess`."*
+
+That is a test for any future format, not a note about AAC.
+
+### `display_name` → `AprStrId` (defect 1 — my design error)
+
+```c
+const char    *id;              /* wire value, in session files */
+AprStrId       display_name_id; /* catalog id, NOT a literal */
+const wchar_t *extension;       /* matched against paths */
+```
+
+Four ids added (`ACTION_NAME_WAV/_MP3/_OGG/_NONE` — the built-in discard sink had
+a literal too). **Tests moved from `ASSERT_NOT_NULL(display_name)` to asserting
+the id is non-zero *and* resolves to non-empty**, because a set id with no `.rc`
+entry would otherwise pass while displaying a placeholder. `id` and `extension`
+stay literals and the rule says why: neither is prose, and they are allowed to
+disagree — `ogg` writes `.opus`.
+
+### Defects 4 and 6
+
+- **`.ogg` resolves without `--format`.** `action_for_extension` now runs two
+  passes: the `extension` field first (authoritative, so `.opus` still reaches
+  ogg per RFC 7845), then the registry `id`. Both skip an empty extension so the
+  `none` sink stays unreachable by path. Verified live: `.ogg` and `.opus` both
+  print `as ogg`; `.m4a` fails exit 2 with *"m4a is not a format this build can
+  write."*
+- **`foreach(_uitest …)`** replaced with a `^test_ui_` walk. Done last, suite
+  re-run after.
+
+### Note on a flaky suite
+
+`test_capture_fake` failed intermittently — *a different set of cases each run* —
+while the capture agent was rewriting it minute by minute for the health knob.
+Not a real failure; it went green once they settled. Worth remembering as a
+signature: **a suite failing differently each run during a parallel wave is
+contention, not a bug.**
+
+### Remaining known defects: 2 (health knob, in flight), 5 (window-class move), 7 (UI, in flight)

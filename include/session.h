@@ -223,7 +223,7 @@ typedef struct AprSessionEdge {
 } AprSessionEdge;
 
 typedef struct AprSessionAction {
-    char    id[16];                     /* registry id: "wav", "mp3", "m4a" */
+    char    id[16];                     /* registry id: "wav", "mp3", "ogg" */
     wchar_t path[APR_DISC_PATH_CCH];
     int     bitrate_kbps;               /* 0 = the encoder's default */
     int     quality;                    /* 0 = the encoder's default */
@@ -540,9 +540,9 @@ const char *apr_session_kind_wire(AprSessionSrcKind k);
  *   - `pid` is written for the same-boot case and is never sufficient on its
  *     own; a reader that trusted it would open whatever inherited the number.
  *   - `gainDb` is dB, so a human editing the file writes -6, not 0.501187.
- *   - `format` is the registry id, NOT the file extension. They coincide today
- *     and are allowed to diverge (an ADTS ".aac" action would be a different
- *     id with the same extension family).
+ *   - `format` is the registry id, NOT the file extension, and they already
+ *     diverge: the "ogg" action writes ".opus", which is what RFC 7845
+ *     recommends. Never derive one from the other.
  *   - Field names are ASCII and are NOT localized, for the same reason the
  *     --json output is not: a file a script writes must not change shape
  *     because the interface language did.

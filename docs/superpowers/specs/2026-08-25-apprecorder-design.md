@@ -19,7 +19,7 @@ such limit.
 
 - Capture any running app's audio **per-process**, plus any hardware capture endpoint.
 - Arbitrary bus count. A source may feed several buses at once.
-- Encode to WAV, MP3, OGG/Opus, M4A.
+- Encode to WAV, MP3, OGG/Opus. (AAC/M4A was built and then removed — see 8.0.)
 - Small and cheap: target under 1 MB binary, single-digit MB resident, negligible idle CPU.
 - **Accessible and good-looking at the same time**, neither one a fallback.
 
@@ -170,15 +170,30 @@ separately is two buses. Same code path.
 ### 3.3 Action
 
 ```c
-typedef struct ActionVTable {
-    const char *id;                        /* "wav", "mp3", "ogg", "m4a" */
-    const char *display_name;
-    void* (*create)(const ActionConfig *cfg, const WaveFormat *fmt);
-    int   (*on_audio)(void *st, const float *pcm, size_t frames, uint64_t qpc);
-    int   (*finalize)(void *st);
-    void  (*destroy)(void *st);
-} ActionVTable;
+typedef struct AprActionVTable {
+    const char    *id;                     /* "wav", "mp3", "ogg" */
+    AprStrId       display_name_id;        /* catalog id, NOT a literal */
+    const wchar_t *extension;              /* without the dot */
+    AprErr (*create)(const AprActionConfig *cfg, void **out_state);
+    AprErr (*on_audio)(void *st, const float *pcm, size_t frames, uint64_t qpc);
+    AprErr (*finalize)(void *st);
+    void   (*destroy)(void *st);
+} AprActionVTable;
 ```
+
+**`display_name_id` is an id, not a string, and that was a correction.** The
+first draft of this section had `const char *display_name`, which put a
+user-facing string in code — the one thing section 6.2 forbids — and it shipped
+that way in four vtables before anyone noticed. The name now lives in the
+catalog as `ACTION_NAME_<ID>` and is resolved with `apr_str()` at the point of
+display, on the UI thread or a worker, never on an audio callback.
+
+`id` and `extension` stay literals on purpose. `id` is a stable wire value that
+appears in session files and must never be translated; `extension` is matched
+against paths. They are allowed to disagree — the `ogg` action writes `.opus`,
+per RFC 7845 — so nothing may derive one from the other. The CLI resolves an
+output's format from the extension an action writes, then from its id, which is
+why both `mix.opus` and `mix.ogg` reach the Ogg action with no `--format`.
 
 Registration is a **static array** in `core/registry.c`. No plugin system, no
 dynamic loading, no ABI to version — this is what keeps the binary small and the
@@ -647,7 +662,7 @@ src/
              discover.c        /* which apps are rendering, which endpoints
                                 * exist. Both front ends need the same three
                                 * queries, so it is a module, not CLI code. */
-  actions/   action_wav.c  action_mp3.c  action_ogg.c  action_m4a.c
+  actions/   action_wav.c  action_mp3.c  action_ogg.c
   ui/        app.c  canvas.c  node_window.c  tree_panel.c
              theme.c  darkmode.c  dpi.c
   session/   session_load.c  session_save.c
@@ -678,10 +693,42 @@ Single owners of cross-cutting concerns:
 | WAV | hand-written | trivial; also the golden-file test target |
 | MP3 | libmp3lame | LGPL, C |
 | OGG | libogg + libopus | BSD, C |
-| M4A | **Media Foundation AAC encoder** | ships in Windows: zero binary cost, no fdk-aac licensing question |
 
-Each is one `ActionVTable` in one file. They share no state and touch no core
+Each is one `AprActionVTable` in one file. They share no state and touch no core
 internals, which makes them the natural unit of parallel work.
+
+### 8.0 There is no AAC/M4A action, and this is why
+
+There was one. It worked: Media Foundation's AAC encoder ships in Windows, so it
+cost nothing in binary size and raised no fdk-aac licensing question, and it is
+the format Apple software asks for. It was written, tested, and deleted on
+2026-08-26 on the author's instruction — *"if it's giving us trouble, fuck it,
+we don't need it"* — and the reason it was trouble is worth keeping, because it
+is a property of the container and not of the implementation.
+
+**MP4 keeps its index in the `moov` atom, and `moov` is written at finalize.**
+Until finalize runs there is no sample table, so a recording that ends by
+process death is a file no player will open — and nothing can repair it,
+because the information needed to rebuild the index died with the process that
+held it. A crash, a `TerminateProcess`, a power loss, or a `CTRL_CLOSE_EVENT`
+that outran the shutdown path all produce the same zero-value artefact.
+
+The other three degrade gracefully, and each for a structural reason:
+
+| Format | What a kill leaves |
+|---|---|
+| WAV | Every frame already on disk. The RIFF size fields are wrong, and every player in existence infers the length from the file size anyway. |
+| MP3 | Every complete frame. Frames are self-describing and self-synchronising; the stream simply ends. CBR by default precisely so the missing Xing tag costs no accuracy. |
+| OGG | Every complete page. Duration comes from the last page's granule position, which is in the page header, not in an index at the front. Verified by truncating a finished file and decoding it with ffprobe. |
+
+Three fixes for MP4 were documented and costed before the deletion — fragmented
+MP4 (`moof`/`mdat`), a separate ADTS `.aac` action, and segment rotation. Each
+is real work, and none is worth it for a format WAV, MP3 and OGG already cover.
+
+**Do not re-add AAC without solving the finalize problem first.** Adding it back
+as a plain MP4 muxer re-introduces the one outcome this product treats as
+unacceptable: an unplayable recording (see `cli.h`, "stopping is the part that
+must not be clever"). If it returns, it returns fragmented or as ADTS.
 
 ### 8.1 LAME is LGPL — this constrains how the binary may be released
 
@@ -767,8 +814,8 @@ Sequenced where things are load-bearing, parallel where they are leaves.
    real app before anything is built on top.
 3. **Core** (sequential) — `graph`, `source`, `bus`, `mix`, `resample`, drift.
    Shape must be settled before any leaf work begins.
-4. **Encoders** (parallel) — WAV, MP3, OGG, M4A: four agents, one interface, no
-   shared state.
+4. **Encoders** (parallel) -- WAV, MP3, OGG: one agent each, one interface, no
+   shared state. (M4A was a fourth; section 8.0 says where it went.)
 5. **UI** (partly parallel) — `app`, `canvas`, `node_window` sequential;
    `theme`, `dpi`, `darkmode`, `tree_panel` parallel after the canvas exists.
 6. **Session and polish.**

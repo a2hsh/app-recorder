@@ -736,11 +736,11 @@ static void wav_destroy(void *state)
 }
 
 /* Registered by core/registry.c, which declares
- * `extern const AprActionVTable apr_action_wav_vtable;` -- there is no
+ * `extern const AprActionVTable apr_action_wav;` -- there is no
  * registration call here, and no plugin machinery anywhere (design 3.3). */
-const AprActionVTable apr_action_wav_vtable = {
+const AprActionVTable apr_action_wav = {
     "wav",
-    L"WAV (float32, uncompressed)",
+    APR_S_ACTION_NAME_WAV,
     L"wav",
     wav_create,
     wav_on_audio,

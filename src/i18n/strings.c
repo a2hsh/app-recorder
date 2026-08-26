@@ -541,6 +541,78 @@ size_t apr_str_number(int64_t n, wchar_t *buf, size_t cch)
     return len;
 }
 
+size_t apr_str_number_fixed(int64_t scaled, int decimals,
+                            wchar_t *buf, size_t cch)
+{
+    /* Worst case: sign, 20 digits, a separator, 6 decimals, terminator. */
+    wchar_t whole[24];
+    wchar_t frac[8];
+    size_t  wlen, i, need;
+    int64_t div = 1, ip, fp;
+    int     neg;
+    int     d;
+
+    if (!buf || cch == 0)
+        return 0;
+    buf[0] = L'\0';
+    if (decimals < 0 || decimals > 6)
+        return 0;
+
+    for (d = 0; d < decimals; d++) div *= 10;
+
+    neg = (scaled < 0);
+    /* Negate in unsigned space so INT64_MIN does not overflow. */
+    {
+        uint64_t mag = neg ? (~(uint64_t)scaled + 1u) : (uint64_t)scaled;
+        ip = (int64_t)(mag / (uint64_t)div);
+        fp = (int64_t)(mag % (uint64_t)div);
+    }
+
+    if (apr_str_number(ip, whole, sizeof whole / sizeof whole[0]) == 0 && ip != 0)
+        return 0;
+    wlen = wcslen(whole);
+
+    frac[0] = L'\0';
+    if (decimals > 0) {
+        wchar_t digits[8];
+        size_t  dlen;
+        if (apr_str_number(fp, digits, sizeof digits / sizeof digits[0]) == 0 && fp != 0)
+            return 0;
+        dlen = wcslen(digits);
+        /* Left-pad with the zero this module renders, never with a literal. */
+        {
+            wchar_t zero[4];
+            size_t  pad = (size_t)decimals - dlen;
+            size_t  k;
+            if (apr_str_number(0, zero, sizeof zero / sizeof zero[0]) == 0)
+                return 0;
+            for (k = 0; k < pad && k + 1 < sizeof frac / sizeof frac[0]; k++)
+                frac[k] = zero[0];
+            frac[k] = L'\0';
+            wcscat_s(frac, sizeof frac / sizeof frac[0], digits);
+        }
+    }
+
+    /* The decimal separator. Western digits and a full stop today, matching
+     * apr_str_number's choice; if the author asks for Arabic-Indic digits this
+     * becomes U+066B here and nowhere else. */
+    need = (neg ? 1u : 0u) + wlen + (decimals > 0 ? 1u + (size_t)decimals : 0u);
+    if (need > cch - 1)
+        return 0;
+
+    i = 0;
+    if (neg) buf[i++] = L'-';
+    memcpy(buf + i, whole, wlen * sizeof(wchar_t));
+    i += wlen;
+    if (decimals > 0) {
+        buf[i++] = L'.';
+        memcpy(buf + i, frac, (size_t)decimals * sizeof(wchar_t));
+        i += (size_t)decimals;
+    }
+    buf[i] = L'\0';
+    return i;
+}
+
 /* Highest insert number referenced by `fmt`, 0 for none.
  *
  * FormatMessageW's escapes: %% is a literal percent, %n a hard line break, %b

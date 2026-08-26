@@ -252,6 +252,40 @@ AprErr apr_bus_add_action(AprBus *b, const AprActionVTable *vt,
     return apr_ok();
 }
 
+/* FINALIZE, THEN DESTROY, THEN CLOSE THE GAP -- in that order and with no way
+ * to skip the first step. An encoder detached without finalizing leaves a file
+ * with no index, no trailing sizes and, for some formats, nothing that opens.
+ * See the header. */
+AprErr apr_bus_remove_action(AprBus *b, size_t index)
+{
+    AprErr e = apr_ok();
+    size_t i;
+
+    if (!b) return APR_ERR(APR_E_INVALID_ARG, L"apr_bus_remove_action: bus is null");
+    if (index >= b->action_count) {
+        return APR_ERR(APR_E_NOT_FOUND, L"bus %u has no action %zu", b->id, index);
+    }
+
+    if (b->actions[index].vt && b->actions[index].state) {
+        if (!b->actions[index].finalized) {
+            e = b->actions[index].vt->finalize(b->actions[index].state);
+            b->actions[index].finalized = 1;
+        }
+        b->actions[index].vt->destroy(b->actions[index].state);
+    }
+
+    for (i = index; i + 1 < b->action_count; i++) {
+        b->actions[i] = b->actions[i + 1];
+    }
+    b->action_count--;
+    memset(&b->actions[b->action_count], 0, sizeof b->actions[0]);
+
+    /* The finalize's result is returned rather than swallowed: the output IS
+     * gone either way, and a caller that wants to say "the file was closed but
+     * the last write failed" needs to be told. */
+    return e;
+}
+
 size_t apr_bus_action_count(const AprBus *b) { return b ? b->action_count : 0; }
 
 const AprActionVTable *apr_bus_action_at(const AprBus *b, size_t index)

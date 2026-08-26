@@ -108,6 +108,25 @@ AprErr apr_bus_add_action(AprBus *b, const AprActionVTable *vt,
 size_t                 apr_bus_action_count(const AprBus *b);
 const AprActionVTable *apr_bus_action_at(const AprBus *b, size_t index);
 
+/* Remove one output.
+ *
+ * THE ACTION IS FINALIZED FIRST, ALWAYS, even for a bus that never ran and
+ * even for an action already marked failed. Detaching an encoder without
+ * finalizing it is exactly the "unplayable file" outcome AGENTS.md rule 4
+ * exists to prevent, and a user removing an output mid-session is the case
+ * where it would happen. Then destroy, then close the gap in the array.
+ *
+ * Later actions shift down by one, so an index held across this call names a
+ * different output afterwards. That is the same contract the array already
+ * had; nothing outside a bus may hold an action index across a mutation.
+ *
+ * This function did not exist while the UI could only navigate an existing
+ * graph, which is why the canvas used to refuse Delete on an output row out
+ * loud. It exists now because a front end that can add an output must be able
+ * to take it away again -- and inventing a private removal inside the UI would
+ * have made the UI a second owner of this array. */
+AprErr apr_bus_remove_action(AprBus *b, size_t index);
+
 /* Nonzero once an action has refused audio and been dropped from the fan-out.
  * Its finalize is still called on stop -- a half-written file must still
  * open. */

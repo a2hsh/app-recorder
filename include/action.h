@@ -1,9 +1,15 @@
 /* action.h — what a bus can do with mixed audio.
  *
- * Recording is the first action, not the only one. Encoders (WAV, MP3, OGG,
- * M4A) are four registrations behind this interface; transcription later is an
+ * Recording is the first action, not the only one. Encoders (WAV, MP3, OGG)
+ * are three registrations behind this interface; transcription later is an
  * on_audio that accumulates instead of encoding and does its network work in
  * finalize. Nothing above this header knows which is which.
+ *
+ * AAC/M4A was written, shipped and then deleted — see design section 8 for why.
+ * The short version: MP4 keeps its index in the moov atom, written only at
+ * finalize, so a killed recording is an unplayable file that no surviving
+ * process can repair. WAV, MP3 and OGG all degrade to a shorter but playable
+ * file. Do not re-add AAC without solving that first.
  *
  * Registration is a static array in core/registry.c — no plugin system, no
  * dynamic loading, no ABI to version. That is deliberate and is what keeps the
@@ -15,6 +21,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "err.h"
+#include "strings.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -30,9 +37,18 @@ typedef struct AprActionConfig {
 } AprActionConfig;
 
 typedef struct AprActionVTable {
-    const char    *id;            /* "wav", "mp3", "ogg", "m4a" — stable, in session files */
-    const wchar_t *display_name;
-    const wchar_t *extension;     /* without the dot */
+    const char    *id;            /* "wav", "mp3", "ogg" — stable, in session files */
+
+    /* The name a person sees, as a catalog id — NOT a literal. A display name
+     * is prose, and prose in code is the one thing AGENTS.md rule 6 forbids;
+     * this field was a `const wchar_t *` until it was not, and every call site
+     * now resolves it with apr_str() at the point of display.
+     *
+     * apr_str() locks and may allocate, so resolve on the UI thread or a
+     * worker — never inside on_audio. */
+    AprStrId       display_name_id;
+
+    const wchar_t *extension;     /* without the dot; matched against paths */
 
     AprErr (*create)(const AprActionConfig *cfg, void **out_state);
 

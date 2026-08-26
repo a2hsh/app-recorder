@@ -23,7 +23,7 @@ add_compile_definitions(
 # guarded by APR_HAVE_ACTION_<ID>, defined here from the presence of the source
 # file, so an encoder that is half written cannot break the link for everyone
 # else and a finished one needs no build-system edit.
-foreach(_action wav mp3 ogg m4a)
+foreach(_action wav mp3 ogg)
   if(EXISTS ${CMAKE_SOURCE_DIR}/src/actions/action_${_action}.c)
     string(TOUPPER ${_action} _ACTION)
     add_compile_definitions(APR_HAVE_ACTION_${_ACTION})
@@ -189,8 +189,15 @@ if(UI_SRC)
 
   # The test loop above links every test against apprecorder_core only. The UI
   # tests additionally need the UI library, and through it the manifest.
-  foreach(_uitest test_ui_theme test_ui_a11y test_ui_tree test_ui_canvas)
-    if(TARGET ${_uitest})
+  #
+  # Matched by NAME, not by a hand-written list. The list was a three-way merge
+  # point: every agent adding a UI test had to edit the same four words in this
+  # shared file, which is exactly the conflict the APR_HAVE_* pattern above
+  # exists to avoid. tests/test_ui_*.c now links the UI library by virtue of
+  # being called that, and adding one needs no build-system edit at all.
+  foreach(test_file ${TEST_SRC})
+    get_filename_component(_uitest ${test_file} NAME_WE)
+    if(_uitest MATCHES "^test_ui_" AND TARGET ${_uitest})
       target_link_libraries(${_uitest} PRIVATE apprecorder_ui)
     endif()
   endforeach()

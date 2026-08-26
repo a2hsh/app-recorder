@@ -3,12 +3,11 @@
  * encoded by the libopus vendored under vendor/opus and paged by the libogg
  * vendored under vendor/ogg (design section 8).
  *
- * WAV is the archive, MP3 is the file that opens everywhere, M4A is the one
- * Apple software wants. Opus is the one that is simply better: at 96 kbps it
- * beats MP3 at 192, it is the only codec here with no patent question left
- * open, and both halves of it are BSD -- which, after the LGPL relink
- * obligation vendor/lame drags into every release (design 8.1), is worth
- * something on its own.
+ * WAV is the archive and MP3 is the file that opens everywhere. Opus is the
+ * one that is simply better: at 96 kbps it beats MP3 at 192, it is the only
+ * codec here with no patent question left open, and both halves of it are
+ * BSD -- which, after the LGPL relink obligation vendor/lame drags into every
+ * release (design 8.1), is worth something on its own.
  *
  * -------------------------------------------------------------------------
  * ON_AUDIO NEITHER ENCODES, RESAMPLES NOR TOUCHES THE DISK
@@ -143,9 +142,10 @@
  * cares recovers the duration by seeking to the last page with a valid
  * capture pattern and reading its granule position -- which is right there in
  * the page header, not in an index at the front of the file. There is nothing
- * to repair, no size field to patch, and no moov atom to rebuild: an M4A
- * truncated the same way does not open at all, and that asymmetry is why the
- * M4A action has to work so much harder than this one.
+ * to repair, no size field to patch, and no index to rebuild. An MP4 truncated
+ * the same way does not open at all, because its moov atom is written only at
+ * finalize -- that asymmetry is exactly why the AAC/M4A action was deleted
+ * rather than shipped (design 8) and why this one survived.
  *
  * The cost is bounded and worth stating: libogg accumulates roughly 4 KB
  * before it emits a page, so a kill loses up to ~350 ms of encoded audio on
@@ -1100,7 +1100,7 @@ static void ogg_destroy(void *state)
  */
 const AprActionVTable apr_action_ogg = {
     "ogg",
-    L"Ogg Opus",
+    APR_S_ACTION_NAME_OGG,
     L"opus",
     ogg_create,
     ogg_on_audio,
