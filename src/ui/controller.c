@@ -271,13 +271,50 @@ static void report_failure(AprController *c, AprStrId id, const AprErr *e)
     say(c, id, args, 1);
 }
 
+/* THE VERB, WITHOUT THE CHOOSER. Same split as apr_controller_open_session,
+ * and for the same two reasons: a modal cannot be answered from the thread
+ * that opened it, so the half that does the work is the only half a test can
+ * drive on the real path; and a later scripting surface wants "add this
+ * source" without a picker in front of it.
+ *
+ * Everything a user receives lives HERE -- the model change, both views, the
+ * menu states and the sentence -- so the dialog route and any other route
+ * cannot drift into announcing different things. */
+AprErr apr_controller_add_source(AprController *c, const wchar_t *name,
+                                 const AprCaptureConfig *cfg)
+{
+    AprSourceId id = 0;
+    const wchar_t *args[1];
+    AprErr e;
+
+    if (!c || !name || !cfg) {
+        return APR_ERR(APR_E_INVALID_ARG, L"apr_controller_add_source: NULL");
+    }
+    if (c->recording) {
+        say0(c, APR_S_UI_ANN_BUSY_RECORDING);
+        return APR_ERR(APR_E_STATE, L"cannot add a source while recording");
+    }
+
+    e = apr_graph_add_source(c->graph, name, cfg, &id);
+    if (apr_failed(&e)) {
+        APR_LOG_ERR(APR_LOG_ERROR, &e);
+        report_failure(c, APR_S_UI_DLG_ADD_FAILED, &e);
+        return e;
+    }
+    APR_INFO(L"add source: added id=%u; graph now holds %u sources",
+             (unsigned)id, (unsigned)apr_graph_source_count(c->graph));
+
+    refresh_views(c);
+    update_commands(c);
+    args[0] = name;
+    say(c, APR_S_UI_DLG_SOURCE_ADDED, args, 1);
+    return apr_ok();
+}
+
 static int do_add_source(AprController *c)
 {
     AprDlgSource pick;
     AprCaptureConfig cfg;
-    AprSourceId id = 0;
-    const wchar_t *args[1];
-    AprErr e;
 
     if (busy(c)) return 1;
     if (!apr_dlg_add_source(c->frame, &pick)) {
@@ -306,28 +343,41 @@ static int do_add_source(AprController *c)
         break;
     }
 
-    e = apr_graph_add_source(c->graph, pick.name, &cfg, &id);
-    if (apr_failed(&e)) {
-        APR_LOG_ERR(APR_LOG_ERROR, &e);
-        report_failure(c, APR_S_UI_DLG_ADD_FAILED, &e);
-        return 1;
+    (void)apr_controller_add_source(c, pick.name, &cfg);
+    return 1;
+}
+
+/* The verb without the chooser, exactly as apr_controller_add_source. */
+AprErr apr_controller_add_bus(AprController *c, const wchar_t *name)
+{
+    AprBusId id = 0;
+    const wchar_t *args[1];
+    AprErr e;
+
+    if (!c || !name) {
+        return APR_ERR(APR_E_INVALID_ARG, L"apr_controller_add_bus: NULL");
     }
-    APR_INFO(L"add source: added id=%u; graph now holds %u sources",
-             (unsigned)id, (unsigned)apr_graph_source_count(c->graph));
+    if (c->recording) {
+        say0(c, APR_S_UI_ANN_BUSY_RECORDING);
+        return APR_ERR(APR_E_STATE, L"cannot add a bus while recording");
+    }
+
+    e = apr_graph_add_bus(c->graph, name, &id);
+    if (apr_failed(&e)) {
+        report_failure(c, APR_S_UI_DLG_ADD_FAILED, &e);
+        return e;
+    }
 
     refresh_views(c);
     update_commands(c);
-    args[0] = pick.name;
-    say(c, APR_S_UI_DLG_SOURCE_ADDED, args, 1);
-    return 1;
+    args[0] = name;
+    say(c, APR_S_UI_DLG_BUS_ADDED, args, 1);
+    return apr_ok();
 }
 
 static int do_add_bus(AprController *c)
 {
     wchar_t name[APR_NAME_CCH];
-    AprBusId id = 0;
-    const wchar_t *args[1];
-    AprErr e;
 
     if (busy(c)) return 1;
     name[0] = 0;
@@ -336,16 +386,7 @@ static int do_add_bus(AprController *c)
         return 1;
     }
 
-    e = apr_graph_add_bus(c->graph, name, &id);
-    if (apr_failed(&e)) {
-        report_failure(c, APR_S_UI_DLG_ADD_FAILED, &e);
-        return 1;
-    }
-
-    refresh_views(c);
-    update_commands(c);
-    args[0] = name;
-    say(c, APR_S_UI_DLG_BUS_ADDED, args, 1);
+    (void)apr_controller_add_bus(c, name);
     return 1;
 }
 

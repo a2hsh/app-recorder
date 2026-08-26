@@ -87,12 +87,6 @@
 #define APR_CANVAS_TEXT_CCH  512
 #define APR_CANVAS_NAME_CCH  128
 
-/* Level range and step, in tenths of a decibel so the arithmetic stays integer
- * everywhere except the one conversion to and from linear gain. */
-#define APR_CANVAS_GAIN_MIN_DB10  (-600)
-#define APR_CANVAS_GAIN_MAX_DB10  (120)
-#define APR_CANVAS_GAIN_STEP_DB10 (10)
-
 typedef struct CanvasNode {
     HWND        hwnd;
     AprNodeKind kind;
@@ -315,15 +309,20 @@ static void say(CanvasState *st, AprStrId id, const wchar_t *const *args,
 
     if (st->announce) st->announce(st->announce_user, st->last);
 
-    /* A live-region change is what a screen reader picks up without focus
-     * having moved. It is best-effort -- not every reader honours it on an
-     * MSAA-bridged window -- which is exactly why it is never the ONLY way an
-     * edit is announced: the focused node's name changes too, and that is
-     * universal. */
-    if (st->hwnd && IsWindow(st->hwnd)) {
-        NotifyWinEvent(EVENT_OBJECT_LIVEREGIONCHANGED, st->hwnd,
-                       OBJID_CLIENT, CHILDID_SELF);
-    }
+    /* AND THAT IS ALL THIS DOES. It used to raise EVENT_OBJECT_LIVEREGIONCHANGED
+     * on the canvas window itself, which was worse than useless: a reader
+     * answers that event by reading the element's NAME, and this element's name
+     * is the PANE's name. So every edit made a screen reader say "Signal flow"
+     * -- never the sentence -- and renaming the pane to fix it would have
+     * broken the thing the name is actually for.
+     *
+     * There is one owner of "say this to the user" and it is the status bar's
+     * live region (src/ui/app.c), which the sink above reaches. An embedder
+     * that does not wire the sink gets no announcements; ui_canvas.h says so.
+     *
+     * The sentence is still not the only way an edit is heard: the focused
+     * node's own name changes with it, and a name change on the focused
+     * element is the one mechanism every reader honours. */
 }
 
 size_t apr_canvas_last_announcement(HWND canvas, wchar_t *buf, size_t cch)
@@ -833,6 +832,10 @@ void apr_canvas_rebuild(HWND canvas)
     AprNodeKind keep_kind = APR_NODE_SOURCE;
     uint32_t keep_id = 0;
     int keep_sub = 0, had_focus = 0, restore;
+    /* The half-made connection, remembered the same way focus is. */
+    int had_pending = 0, pending_disconnect = 0, pend_sub = 0;
+    AprNodeKind pend_kind = APR_NODE_SOURCE;
+    uint32_t pend_id = 0;
     size_t i, j;
 
     if (!st || st->rebuilding) return;
@@ -847,6 +850,29 @@ void apr_canvas_rebuild(HWND canvas)
         keep_kind = st->node[st->cur].kind;
         keep_id = st->node[st->cur].model_id;
         keep_sub = st->node[st->cur].sub_id;
+    }
+
+    /* AND REMEMBER THE HALF-MADE EDGE THE SAME WAY. THIS IS A REPORTED BUG.
+     *
+     * Connect is a two-step gesture, and Ctrl+E is a FRAME accelerator: both
+     * presses arrive as a command at the controller, which refreshes its views
+     * after each one -- i.e. it rebuilds this canvas BETWEEN the two presses.
+     * Dropping `pending` here therefore turned the second press into a first
+     * press on a bus, every single time, and the user's report of it was
+     * "nothing happens".
+     *
+     * Focus was already preserved across a rebuild for exactly this reason.
+     * The pending end is the other half of the same state and had been left
+     * out; a gesture that survives a repaint but not a refresh is not a
+     * gesture. It is still dropped when the node it names has GONE from the
+     * model -- a connection from something that no longer exists is not a
+     * connection anyone can finish. */
+    if (st->pending >= 0 && st->pending < st->count) {
+        had_pending = 1;
+        pending_disconnect = st->pending_is_disconnect;
+        pend_kind = st->node[st->pending].kind;
+        pend_id = st->node[st->pending].model_id;
+        pend_sub = st->node[st->pending].sub_id;
     }
 
     destroy_nodes(st);
@@ -894,6 +920,17 @@ void apr_canvas_rebuild(HWND canvas)
     if (restore < 0 && st->count > 0) restore = 0;
     st->cur = restore;
     if (had_focus && restore >= 0) SetFocus(st->node[restore].hwnd);
+
+    if (had_pending) {
+        int p = find_node(st, pend_kind, pend_id, pend_sub);
+        if (p >= 0) {
+            st->pending = p;
+            st->pending_is_disconnect = pending_disconnect;
+            /* The node window is a new one, so the state it draws itself in
+             * has to be put back on it as well as into the index. */
+            apr_node_set_pending(st->node[p].hwnd, 1);
+        }
+    }
 
     st->rebuilding = 0;
 }

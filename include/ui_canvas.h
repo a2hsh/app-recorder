@@ -233,7 +233,17 @@ UINT apr_canvas_current_mods(void);
 /* Where an announcement goes. The frame wires this to the status bar; a test
  * wires it to a buffer. The canvas always keeps the last one regardless (see
  * apr_canvas_last_announcement) so that "the user was told" is a property that
- * can be asserted rather than reviewed. */
+ * can be asserted rather than reviewed.
+ *
+ * THIS IS THE ONLY WAY OUT. The canvas raises no accessibility event of its
+ * own for an announcement: a reader answers a live-region event by reading the
+ * element's NAME, and this element's name is the PANE's name, so doing it here
+ * made readers speak "Signal flow" instead of the sentence. One owner for
+ * "say this to the user" -- the status bar's live region -- and this is the
+ * road to it. An embedder that leaves the sink unwired gets no announcements.
+ *
+ * What the canvas still does by itself is change the NAME of the node the edit
+ * changed, which is the mechanism every reader honours on a focused element. */
 typedef void (*AprCanvasAnnounceFn)(void *user, const wchar_t *text);
 
 void apr_canvas_set_announce(HWND canvas, AprCanvasAnnounceFn fn, void *user);
@@ -276,6 +286,21 @@ int apr_canvas_command(HWND canvas, int command_id);
  * done" is a state the user is IN, and a test that cannot see it cannot prove
  * Escape gets them out of it. */
 HWND apr_canvas_pending_node(HWND canvas);
+
+/* ---------------------------------------------------------------------------
+ * The level range one press of + or - moves through, in TENTHS of a decibel so
+ * the arithmetic stays integer everywhere except the single conversion to and
+ * from linear gain.
+ *
+ * Public because the sentence the canvas speaks after a level change contains
+ * this number, so anything asserting on that sentence -- or documenting the
+ * key -- has to be able to say what one press does without knowing a second
+ * copy of it.
+ * ------------------------------------------------------------------------- */
+
+#define APR_CANVAS_GAIN_MIN_DB10  (-600)
+#define APR_CANVAS_GAIN_MAX_DB10  (120)
+#define APR_CANVAS_GAIN_STEP_DB10 (10)
 
 /* ---------------------------------------------------------------------------
  * The same three things, as messages

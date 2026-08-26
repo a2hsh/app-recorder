@@ -306,6 +306,12 @@ void apr_ui_set_accessible_role(HWND hwnd, long msaa_role)
 /* --------------------------------------------------------------------------
  * The app
  * ----------------------------------------------------------------------- */
+/* The longest sentence the status bar can hold. It matches the controller's own
+ * announcement buffer (CTL_TEXT_CCH) because the two carry the same sentences;
+ * a shorter one here would truncate an announcement into a half-sentence, and
+ * half a sentence read out is worse than none. */
+#define APR_UI_STATUS_CCH 1024
+
 
 struct AprUiApp {
     HINSTANCE inst;
@@ -326,6 +332,12 @@ struct AprUiApp {
     void          *close_user;
     AprUiMessageFn msg_fn;
     void          *msg_user;
+
+    /* WHAT THE STATUS BAR CURRENTLY SAYS. Kept because that text is also the
+     * element's accessible NAME -- see apr_ui_app_set_status_text -- so a
+     * language change, which re-asserts every other name from the catalog,
+     * must not overwrite a sentence with the word "Status". */
+    wchar_t status_text[APR_UI_STATUS_CCH];
 
     int  tree_visible;
     int  applying_theme;  /* re-entrancy guard, see apply_dark */
@@ -615,7 +627,14 @@ static void reapply_names(AprUiApp *app)
 
     apr_ui_set_accessible_name(app->frame, APR_S_UI_TITLE_UNTITLED);
     if (app->status) {
-        apr_ui_set_accessible_name(app->status, APR_S_UI_PANE_STATUS);
+        /* Its name is its CONTENT (see apr_ui_app_set_status_text), so the
+         * catalog name is only the name of a status bar that has not said
+         * anything yet. */
+        if (app->status_text[0]) {
+            apr_ui_set_accessible_name_text(app->status, app->status_text);
+        } else {
+            apr_ui_set_accessible_name(app->status, APR_S_UI_PANE_STATUS);
+        }
     }
     if (app->splitter) {
         apr_ui_set_accessible_name(app->splitter, APR_S_UI_PANE_SPLITTER);
@@ -1346,16 +1365,41 @@ void apr_ui_app_set_status_text(AprUiApp *app, const wchar_t *text, int announce
     if (!app || !app->status || !text) return;
     SendMessageW(app->status, SB_SETTEXTW, 0, (LPARAM)text);
 
-    /* THE STATUS BAR IS A LIVE REGION, and this is the flag that keeps it
-     * bearable. A screen reader picks a live-region change up without focus
-     * having moved, which is exactly right for "recording started" and
-     * unusable for a clock that reprints once a second. The clock passes 0.
+    /* THE SENTENCE HAS TO BE THIS ELEMENT'S ACCESSIBLE NAME, AND THAT IS THE
+     * WHOLE MECHANISM. It was measured, not assumed:
      *
-     * Best-effort, like every announcement in this product: it is never the
-     * ONLY way a state change is said, because a live region on a background
-     * window is not reliably announced by any reader -- that case goes out as
-     * a notification-area balloon instead (ui_tray.h). */
+     *   - This window's provider is the MSAA bridge, so
+     *     UIA_LiveSettingPropertyId reads Off and no amount of live-region
+     *     event will make a UIA client treat it as a live region. Verified
+     *     with a UIA client in tests/test_ui_behaviour.c, which prints it.
+     *   - What a reader DOES with EVENT_OBJECT_LIVEREGIONCHANGED is read the
+     *     element's NAME. NVDA's handler for that event is, literally,
+     *     ui.message(self.name).
+     *
+     * So while the name was the fixed word "Status", every announcement this
+     * product makes was inert: the event fired, the reader said "Status", and
+     * the sentence was never heard by anybody. Which is exactly what the
+     * author reported, three separate times, as "it's all silence".
+     *
+     * SB_SETTEXTW alone does not do it -- that sets the text of PART 0, a
+     * CHILD of this element, and the event is raised on the element itself.
+     *
+     * The name is set even when we are not announcing, so that a reader
+     * navigating to the status bar reads what it currently says rather than a
+     * sentence from a minute ago. Only the EVENTS are conditional: a clock
+     * that reprints once a second must not speak (the clock passes 0).
+     *
+     * NAMECHANGE as well as LIVEREGIONCHANGED, because they are honoured by
+     * different readers and neither is guaranteed. Belt and braces is the rule
+     * for every announcement here: nothing is said only one way, and anything
+     * that happens while the window is in the background also goes out as a
+     * notification-area balloon (ui_tray.h). */
+    lstrcpynW(app->status_text, text, APR_UI_STATUS_CCH);
+    apr_ui_set_accessible_name_text(app->status, text);
+
     if (announce) {
+        NotifyWinEvent(EVENT_OBJECT_NAMECHANGE, app->status,
+                       OBJID_CLIENT, CHILDID_SELF);
         NotifyWinEvent(EVENT_OBJECT_LIVEREGIONCHANGED, app->status,
                        OBJID_CLIENT, CHILDID_SELF);
     }

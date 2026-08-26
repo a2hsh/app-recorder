@@ -53,6 +53,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "capture.h"
 #include "err.h"
 #include "graph.h"
 #include "ui_app.h"
@@ -97,6 +98,24 @@ int apr_controller_recording(const AprController *c);
  * refreshing a view from anywhere else is how a UI stops answering UI
  * Automation. */
 void apr_controller_model_changed(AprController *c);
+
+/* ---------------------------------------------------------------------------
+ * Building a graph -- the verbs, without the choosers
+ *
+ * THE DIALOG CHOOSES; THESE DO THE WORK. The same split as the session pair
+ * below, for the same two reasons: a modal dialog owns the thread that opened
+ * it, so the only way to drive the real path from a test is to enter it below
+ * the chooser; and a later scripting surface wants "add this source" without a
+ * picker in front of it.
+ *
+ * Everything a user receives is in here -- the model change, both views, the
+ * menu states, and the sentence that goes to the status bar's live region --
+ * so no second route can announce something different.
+ * ------------------------------------------------------------------------- */
+
+AprErr apr_controller_add_source(AprController *c, const wchar_t *name,
+                                 const AprCaptureConfig *cfg);
+AprErr apr_controller_add_bus(AprController *c, const wchar_t *name);
 
 /* ---------------------------------------------------------------------------
  * Sessions

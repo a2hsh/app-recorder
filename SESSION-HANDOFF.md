@@ -4568,3 +4568,151 @@ Release `test_ui_tree` failed twice across six early ctest runs, green in the
 other four, in 12 consecutive isolated runs, and in both final runs. It builds
 only from `APR_SRC_FAKE` and `capture_fake.c` was untouched — looks like UIA
 contention with a live window.
+
+---
+
+## 2026-08-26 (afternoon) — THE ANNOUNCEMENTS WERE NEVER HEARD, AND CTRL+E WAS REAL
+
+**29 suites, 537 cases, 0 failures — Debug and Release, `/W4 /WX` clean.**
+One new suite, `tests/test_ui_behaviour.c` (9 cases). Two product defects fixed,
+both invisible to every structural assertion in the tree.
+
+### The author's question — "why are all these bugs in the UI?" — has an answer
+
+Every suite asserted **structure**: the element exists, it is named, it is
+focusable, the description is not empty. None asserted **behaviour**: press
+this, did the model change, and *was the user told*. Three defects walked
+straight through that gap, and so did these two.
+
+### Defect 1: every announcement in the product was inert. THIS IS THE BIG ONE.
+
+`say()` wrote the sentence into the status bar and raised
+`EVENT_OBJECT_LIVEREGIONCHANGED`. Measured with a UIA client and against NVDA's
+own code:
+
+- `UIA_LiveSettingPropertyId` on the status bar reads **0 (Off)**. That window's
+  provider is the MSAA bridge; it cannot express a live SETTING, so no UIA
+  client will ever treat it as a live region however many events we raise.
+- The event *did* fire — the new suite hooks it and counts it — but **what a
+  reader does with it is read the element's NAME**. NVDA's handler for
+  `liveRegionChange`, disassembled out of its own `library.zip`, is literally
+  `ui.message(self.name)` (`NVDAObjects/__init__.pyc`; and
+  `IAccessibleHandler/internalWinEventHandler.pyc` confirms it hooks the event
+  at all).
+- Our status bar's name was the fixed word **"Status"**, annotated once through
+  `IAccPropServices`. `SB_SETTEXTW` sets the text of **part 0 — a CHILD** of
+  that element — so the sentence was never anywhere the event pointed.
+
+**So for every announcement this product has ever made, a screen reader said
+"Status" and the sentence was never heard by anybody.** That is the mechanism
+behind "it's all silence", reported three separate times for three unrelated
+defects: two of those really were broken, but the third channel — the one that
+was supposed to say what had happened — has been dead the whole time.
+
+**Fix (`apr_ui_app_set_status_text`):** the sentence is now the status bar's
+accessible NAME, and both `EVENT_OBJECT_NAMECHANGE` and
+`EVENT_OBJECT_LIVEREGIONCHANGED` are raised on it. The name is set even when
+`announce` is 0 — so navigating to the status bar reads what it currently says
+rather than a sentence from a minute ago — and only the EVENTS are conditional,
+which keeps the once-a-second clock silent. `AprUiApp` now keeps the text so a
+language change cannot overwrite a live sentence with the word "Status".
+
+**Also removed: `canvas.c`'s own `NotifyWinEvent`.** It raised
+LIVEREGIONCHANGED **on the canvas window**, whose name is the PANE's name — so
+every canvas edit made a reader say "Signal flow" and never the sentence. There
+is now exactly one owner of "say this to the user": the status bar's live
+region, reached through the announcement sink. `ui_canvas.h` says so.
+
+### Defect 2: Ctrl+E, and it was neither of the two hypotheses
+
+`st->cur` was **not** stale. `st->pending` was **destroyed**.
+
+Ctrl+E is a FRAME accelerator, so both presses go frame -> controller -> canvas,
+and the controller calls `refresh_views()` after each one — which calls
+`apr_canvas_rebuild()`, which destroys every node window and did
+`st->pending = -1`. So the first press began the edge and announced it
+correctly; the rebuild then wiped the half-made gesture; the second press was a
+**first** press on a bus. Every time. Deterministically.
+
+The canvas suite could not see it: its connect case calls `apr_canvas_command()`
+directly and never goes through the controller, so no refresh happens between
+the presses.
+
+**Fix:** `apr_canvas_rebuild` now preserves `pending` by MODEL identity exactly
+the way it already preserved focus — including re-applying `apr_node_set_pending`
+to the new node window — and drops it only when the node it names has gone from
+the model. Focus was preserved across a rebuild for precisely this reason; the
+pending end is the other half of the same state and had been left out.
+
+### `tests/test_ui_behaviour.c` — the real deliverable
+
+Every case sends the REAL message (`WM_COMMAND` with 1 in the high word *is*
+what `TranslateAccelerator` sends; `WM_KEYDOWN` at the focused node *is* what
+`DispatchMessage` delivers), asserts the MODEL changed, and asserts WHAT WAS
+ANNOUNCED against the catalog sentence with the catalog's own inserts.
+**An operation that changes the model and says nothing fails here.**
+
+| case | covers |
+|---|---|
+| status bar carries the announcement as its accessible name | defect 1, through a UIA client; prints `LiveSetting` |
+| an announcement raises a live-region event carrying the sentence | the event fires, and MSAA reads the sentence inside the callback |
+| adding a source | model + sentence |
+| adding a bus **through its dialog** | accelerator -> template -> edit field -> OK -> model + sentence |
+| the two-step connect gesture | **defect 2**, including focus moving between the presses |
+| the two-step disconnect gesture | same, other direction |
+| the plus key | real `WM_KEYDOWN`; the gain rose, and the new level was spoken |
+| Delete | node gone from the model AND the canvas, and named |
+| every dialog opens and cancels | all seven, each titled, model untouched |
+
+Verified RED before the fixes: the two announcement cases failed with
+`actual: [Status]`, and both gesture cases failed on
+`ASSERT_NOT_NULL(apr_canvas_pending_node(...))`. The other five passed
+throughout, which is the point — they are the regression net, not the diagnosis.
+
+**Everything model-touching runs on the window's own thread.** Editing the graph
+publishes into two views, which creates and destroys real child windows; doing
+that from the asserting thread would build windows owned by the wrong thread and
+prove nothing about the product. Setup runs inside the UI thread before the loop
+starts; everything after that arrives as a message. Modals are answered from
+outside the thread that owns them with a posted `WM_COMMAND` — which is what the
+dialog's own button sends, not synthetic input.
+
+### Two small structural changes that made it testable
+
+- **`apr_controller_add_source()` / `apr_controller_add_bus()`** — the verb
+  without the chooser, the same split as `apr_controller_open_session` and for
+  the same two reasons: a modal cannot be answered from the thread that opened
+  it, and a later scripting surface wants the verb. Everything a user receives
+  (model, both views, menu states, the sentence) lives in the verb, so no second
+  route can announce something different. `do_add_source`/`do_add_bus` are now
+  the chooser plus a call.
+- **`APR_CANVAS_GAIN_{MIN,MAX,STEP}_DB10` moved to `ui_canvas.h`.** The spoken
+  sentence contains that number, so anything asserting on the sentence has to be
+  able to say what one press does without keeping a second copy of it.
+
+### AGENTS.md rule 1 disclosure
+
+**Nothing was rendered to any output device. No audio was played at all.**
+`APR_SRC_FAKE` throughout; no capture was ever started; the hardware-enumerating
+dialogs were opened and CANCELLED, never accepted. The one WAV output exists so
+that two dialogs have something to act on — it is finalized on teardown and the
+file is deleted. `spike_silentplayer` was not needed or run.
+
+### For the author
+
+Both `apprecorder_ui_app.exe` binaries relinked cleanly (nothing was holding
+them this time, so no rename was needed). **Ctrl+E should now connect, and you
+should actually hear the sentence.** If a reader still says nothing on an edit,
+the next thing to check is whether NVDA has decided to use UIA rather than MSAA
+for this window, because the mechanism above is the MSAA one.
+
+### Still open
+
+- The status bar's name is now its content, so its catalog name
+  (`UI_PANE_STATUS`, "Status") is only ever the name of a status bar that has
+  not said anything yet. If a reader announces the bar by name during object
+  navigation it will read the last sentence — believed right, not yet heard.
+- The live-region evidence above is in-process. The annotation is server-side,
+  so it marshals, but nobody has yet put an out-of-process client on the running
+  app and read the name back.
+- Device capture is still never `start()`ed by any test.
