@@ -140,8 +140,12 @@ TEST(a_key_name_is_built_from_the_catalog_not_from_a_plus_in_code)
 {
     wchar_t k[128];
 
+    /* THE CATALOG, NOT A LITERAL -- in the test as well as in the code. An
+     * assertion written as L"Delete" agrees with a hardcoded L"Delete" in
+     * dialogs.c and would have gone on passing while the Help window read half
+     * in the interface language and half in English. */
     ASSERT_GT_INT(0, (int)apr_dlg_key_name(VK_DELETE, 0, k, 128));
-    ASSERT_WSTR_EQ(L"Delete", k);
+    ASSERT_WSTR_EQ(apr_str(APR_S_UI_KEYNAME_DELETE), k);
 
     ASSERT_GT_INT(0, (int)apr_dlg_key_name('E', APR_KMOD_CTRL, k, 128));
     printf("      \"%ls\"\n", k);
@@ -154,8 +158,86 @@ TEST(a_key_name_is_built_from_the_catalog_not_from_a_plus_in_code)
     ASSERT_NOT_NULL(wcsstr(k, apr_str(APR_S_UI_DLG_KEY_CTRL)));
     ASSERT_NOT_NULL(wcsstr(k, apr_str(APR_S_UI_DLG_KEY_SHIFT)));
 
-    ASSERT_GT_INT(0, (int)apr_dlg_key_name(VK_F1, 0, k, 128));
-    ASSERT_WSTR_EQ(L"F1", k);
+    {
+        /* "F%1!s!", with the number through apr_str_number() like every other
+         * digit this product shows. */
+        const wchar_t *args[1];
+        wchar_t want[128], one[24];
+        apr_str_number(1, one, 24);
+        args[0] = one;
+        apr_str_format(APR_S_UI_KEYNAME_FUNCTION, want, 128, args, 1);
+        ASSERT_GT_INT(0, (int)apr_dlg_key_name(VK_F1, 0, k, 128));
+        ASSERT_WSTR_EQ(want, k);
+    }
+}
+
+TEST(every_named_key_takes_its_name_from_the_catalog)
+{
+    /* AGENTS.md rule 6 has no exception for key names, and the argument that
+     * kept them as C literals -- "a translated Delete that no keyboard sends
+     * is worse than an English one that matches the keycap" -- may well be the
+     * right ANSWER, but it is a TRANSLATION decision. Frozen in C it produced
+     * a shortcut rendered half in the interface language (the modifiers, which
+     * were already in the catalog) and half in English. A translator who
+     * agrees with the old argument writes the English word in the Arabic block
+     * and gets exactly the old behaviour; nobody else has to. */
+    static const struct { UINT vk; AprStrId id; } named[] = {
+        { VK_TAB,        APR_S_UI_KEYNAME_TAB },
+        { VK_RETURN,     APR_S_UI_KEYNAME_ENTER },
+        { VK_SPACE,      APR_S_UI_KEYNAME_SPACE },
+        { VK_DELETE,     APR_S_UI_KEYNAME_DELETE },
+        { VK_ESCAPE,     APR_S_UI_KEYNAME_ESCAPE },
+        { VK_HOME,       APR_S_UI_KEYNAME_HOME },
+        { VK_END,        APR_S_UI_KEYNAME_END },
+        { VK_LEFT,       APR_S_UI_KEYNAME_LEFT },
+        { VK_RIGHT,      APR_S_UI_KEYNAME_RIGHT },
+        { VK_UP,         APR_S_UI_KEYNAME_UP },
+        { VK_DOWN,       APR_S_UI_KEYNAME_DOWN },
+        { VK_OEM_PLUS,   APR_S_UI_KEYNAME_PLUS },
+        { VK_OEM_MINUS,  APR_S_UI_KEYNAME_MINUS },
+        { VK_ADD,        APR_S_UI_KEYNAME_NUM_PLUS },
+        { VK_SUBTRACT,   APR_S_UI_KEYNAME_NUM_MINUS },
+        { VK_OEM_PERIOD, APR_S_UI_KEYNAME_PERIOD }
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof named / sizeof named[0]; ++i) {
+        wchar_t k[128];
+        const wchar_t *want = apr_str(named[i].id);
+        ASSERT_GT_INT(0, (int)apr_dlg_key_name(named[i].vk, 0, k, 128));
+        printf("      0x%02X -> \"%ls\"\n", named[i].vk, k);
+        ASSERT_TRUE(want[0] != 0);   /* an empty catalog entry is a defect */
+        ASSERT_WSTR_EQ(want, k);
+    }
+}
+
+TEST(a_button_is_sized_to_its_own_caption_and_not_to_the_english_one)
+{
+    /* NEVER SIZE A CONTROL TO FIT ITS ENGLISH STRING (AGENTS.md rule 6).
+     * The dialog buttons were a fixed 96 dialog units, which is not enough for
+     * "Stop the recording and close" in ENGLISH -- and Arabic needs more room
+     * again at the same point size, so the Arabic pass would have shipped
+     * captions that could not be read.
+     *
+     * Pure, so the rule is a property a test can hold rather than something a
+     * reviewer has to notice. */
+    short small_ = apr_dlg_button_width(L"OK");
+    short big = apr_dlg_button_width(apr_str(APR_S_UI_CLOSE_STOP_AND_EXIT));
+    short longer = apr_dlg_button_width(
+        L"a caption considerably longer than the one before it");
+
+    printf("      \"OK\" -> %d du; \"%ls\" -> %d du\n",
+           (int)small_, apr_str(APR_S_UI_CLOSE_STOP_AND_EXIT), (int)big);
+
+    /* A floor, so a two-letter caption still gets a button worth aiming at. */
+    ASSERT_GE_INT(APR_DLG_BUTTON_MIN_DU, (int)small_);
+
+    /* And it GROWS -- the whole of the fix. 96 was the old fixed width. */
+    ASSERT_GT_INT(96, (int)big);
+    ASSERT_GT_INT((int)big, (int)longer);
+
+    /* NULL is a caption too, as far as not crashing goes. */
+    ASSERT_GE_INT(APR_DLG_BUTTON_MIN_DU, (int)apr_dlg_button_width(NULL));
 }
 
 /* Help > Keyboard Shortcuts renders the canvas's ONE binding table, so a
@@ -463,6 +545,13 @@ TEST(recording_starts_stops_and_announces_both)
     command(&h, APR_CMD_RECORD_START);
     ASSERT_TRUE(wait_until(is_recording, &h, 8000));
 
+    /* wait_for_said, for the reason its own comment gives about the STOP case:
+     * the flag and the sentence are published a few instructions apart, so
+     * polling the state and then reading the sentence is a race the TEST
+     * loses -- and losing it looks exactly like a defect in the announcement.
+     * The controller publishes the two adjacently now; this is still the
+     * honest way to ask. */
+    ASSERT_TRUE(wait_for_said(&h, apr_str(APR_S_UI_ANN_RECORD_STARTED), 5000));
     apr_controller_last_announcement(h.ctl, said, 1024);
     printf("      start: \"%ls\"\n", said);
     ASSERT_WSTR_EQ(apr_str(APR_S_UI_ANN_RECORD_STARTED), said);

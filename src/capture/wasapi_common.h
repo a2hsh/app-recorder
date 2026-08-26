@@ -25,11 +25,18 @@
  *
  *   A capture already owns a thread, so it now owns its apartment as well.
  *   apr_wasapi_thread_start() creates that thread and puts it in the MTA once;
- *   every COM call the capture makes -- activation, Initialize, the pump, the
- *   mute poll, and every Release -- runs on it. open/start/stop/close marshal
- *   there and wait. That is what lets include/capture.h promise what a library
- *   owes its callers: apr_capture_create() works from ANY apartment, and the
- *   old "open() and close() must share a thread" constraint is gone with it.
+ *   every COM call THIS FILE makes -- activation, Initialize, the pump, and
+ *   every Release -- runs on it. open/start/stop/close marshal there and wait.
+ *   That is what lets include/capture.h promise what a library owes its
+ *   callers: apr_capture_create() works from ANY apartment, and the old
+ *   "open() and close() must share a thread" constraint is gone with it.
+ *
+ *   ONE THREAD PER APARTMENT, NOT ONE APARTMENT PER CAPTURE. capture_process.c
+ *   now runs its mute poll on a SECOND thread with its own MTA and its own COM
+ *   objects, because that poll is an unbounded cross-process RPC and it was
+ *   stalling the pump between audio packets (BUGS.md M3). Nothing about the
+ *   promise above changes: the rule is that the CALLER never has to think
+ *   about an apartment, and no object crosses between those two threads.
  * ===========================================================================
  */
 #ifndef APPRECORDER_CAPTURE_WASAPI_COMMON_H
@@ -56,10 +63,14 @@ extern const GUID apr_iid_IAudioSessionControl2;
 extern const GUID apr_iid_ISimpleAudioVolume;
 extern const GUID apr_ksdataformat_subtype_ieee_float;
 
-/* Called once per pump wakeup, on the pump thread, after packets are drained.
- * Used for the out-of-band checks WASAPI will not do for us: is the target
- * process still alive, is its session muted (design section 10). Must not
- * block for long -- it runs between audio packets. */
+/* Called once per pump wakeup, ON THE PUMP THREAD, after packets are drained.
+ * Used for the out-of-band checks WASAPI will not do for us -- in practice,
+ * "is the target process still alive" (design section 10).
+ *
+ * IT RUNS BETWEEN AUDIO PACKETS, so nothing in it may make a COM call, take a
+ * lock the audio service holds, or block for an unbounded time. Mute polling
+ * used to be here and is not any more, for exactly that reason: a stalled pump
+ * makes WASAPI drop packets and set DATA_DISCONTINUITY. See capture_process.c. */
 typedef void (*AprWasapiTick)(void *user);
 
 /* A unit of work that must happen inside the capture's own apartment. Run by
@@ -99,9 +110,12 @@ typedef struct AprWasapiStream {
     uint16_t channels;
     uint16_t frame_bytes;
 
-    /* Nonzero for a device capture: fill gaps on DATA_DISCONTINUITY and treat
-     * endpoint invalidation as death. A process tap is the reference timeline
-     * (design 5.1) and gets none of that. */
+    /* Nonzero for a device capture. It no longer decides whether a reported
+     * gap is filled -- apr_wasapi_packet_gap takes no kind argument at all,
+     * because a gap the ENGINE reports is a loss on either kind and design
+     * 3.1 answers a loss with alignment over content. What it still marks is
+     * the source that carries real crystal drift and real endpoint removal;
+     * a process tap is the reference timeline (design 5.1). */
     int      device_mode;
 
     AprWasapiTick tick;
@@ -170,15 +184,81 @@ AprErr apr_wasapi_start(AprWasapiStream *s);
  * the tick callback (in which case it does not try to join itself). */
 void apr_wasapi_stop(AprWasapiStream *s);
 
+/* ---------------------------------------------------------------------------
+ * The packet timeline -- pure arithmetic, no COM, deliberately testable.
+ *
+ * Both halves of "what does this packet mean for the clock" live here rather
+ * than inline in drain(), because the answer is the whole of design 5.2 step 4
+ * and it was wrong in a way no hardware-free test could see.
+ * ------------------------------------------------------------------------- */
+
+/* The QPC tick at which a packet's FIRST frame was captured.
+ *
+ * `arrival_ticks` is apr_qpc_now() read the instant GetBuffer handed the
+ * packet over, and those frames were captured BEFORE that: a 480-frame packet
+ * arriving now covers the 10 ms that just ended. Anchoring a source at arrival
+ * therefore places its whole timeline one packet late, which is invisible
+ * while every source has the same packet size and is a straight sync error the
+ * moment one does not -- a 1024-frame endpoint mixed with a 480-frame process
+ * tap lands 11 ms out and stays there.
+ *
+ * Saturates at 0 rather than wrapping, so a synthetic timeline that starts
+ * near zero cannot produce an anchor in the far future. */
+uint64_t apr_wasapi_packet_start(uint64_t arrival_ticks, uint32_t frames,
+                                 uint64_t qpc_freq, uint32_t sample_rate);
+
+/* Everything one arriving packet does to the timeline, with no COM anywhere
+ * near it:
+ *
+ *   - anchors `clock` at the capture time of this source's frame 0 (which is
+ *     this packet's first frame, less anything already delivered -- a first
+ *     packet flagged TIMESTAMP_ERROR is not allowed to anchor, so `delivered`
+ *     may already be nonzero by the time one may);
+ *   - returns the frames of silence that must be written BEFORE this packet's
+ *     audio to keep the ring's index space equal to elapsed time.
+ *
+ * `flags` is the DWORD from IAudioCaptureClient::GetBuffer.
+ *
+ * The fill is returned for a process tap as well as a device, and that is a
+ * deliberate narrowing of design 5.1. "Process taps arrive perfect" is a
+ * measured statement about an engine that is keeping up; it is not a claim
+ * about one that has just told us it dropped audio. When
+ * AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY is set on a process tap the engine is
+ * reporting a loss, and design 3.1's stated policy for a loss is alignment
+ * over content: emit exactly the frames that went missing and resume at the
+ * true absolute position. Nothing is ever synthesized speculatively -- with no
+ * discontinuity flag this returns 0 and not one sample is invented. */
+uint64_t apr_wasapi_packet_gap(AprClock *clock, uint64_t delivered,
+                               uint64_t arrival_ticks, uint32_t frames,
+                               DWORD flags);
+
 /* Implies stop. Runs `teardown` on the capture thread -- that is where the
  * implementation releases the COM objects only it knows about -- then releases
  * this layer's own, retires the thread and closes every handle. Does not free
  * the ring. Callable from any apartment.
  *
- * AFTERWARDS THE CALLER MUST CHECK s->pump_stuck BEFORE FREEING ANYTHING the
- * stream points into. A pump wedged inside WASAPI is still running on a struct
- * embedded in the implementation's own allocation; freeing it is a
- * use-after-free under an audio thread. Leaking is the survivable half. */
-void apr_wasapi_close(AprWasapiStream *s, AprWasapiJob teardown, void *user);
+ * RETURNS apr_ok() ONLY WHEN THE THREAD HAS ACTUALLY EXITED. A failure means
+ * the pump is wedged inside WASAPI and is still running on a struct embedded
+ * in the implementation's own allocation: freeing that allocation, or the ring
+ * the pump writes into, is a use-after-free under an audio thread. Leaking is
+ * the survivable half -- see join.h.
+ *
+ * s->pump_stuck says the same thing and stays for diagnostics, but it is no
+ * longer the only way to find out, which is the point: it was a flag every
+ * caller had to remember to read, and the layer that owned the ring never
+ * saw it at all. */
+AprErr apr_wasapi_close(AprWasapiStream *s, AprWasapiJob teardown, void *user);
+
+/* ---------------------------------------------------------------------------
+ * Test seam. Not for production use; see tests/test_capture_wasapi.c.
+ *
+ * Called inside apr_wasapi_call() at the exact instant the "is the thread
+ * pumping?" answer could go stale -- i.e. in the window a concurrent
+ * apr_wasapi_start() has to win for the caller to post a job the pump will
+ * never read. A test installs a hook that starts the pump there and asserts
+ * the job is refused rather than posted into a queue nobody is serving.
+ * ------------------------------------------------------------------------- */
+typedef void (*AprWasapiRaceHook)(AprWasapiStream *s, void *user);
+void apr_wasapi_test_set_race_hook(AprWasapiRaceHook hook, void *user);
 
 #endif /* APPRECORDER_CAPTURE_WASAPI_COMMON_H */

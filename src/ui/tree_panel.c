@@ -94,6 +94,15 @@
 #define APR_TPM_SET_SINK  (WM_USER + 0x145)
 #define APR_TPM_GET_TV    (WM_USER + 0x146)
 #define APR_TPM_FOCUS_TV  (WM_USER + 0x147)
+#define APR_TPM_SET_ACT   (WM_USER + 0x148)
+
+/* The TreeView is subclassed for exactly one reason, and it is a defect the
+ * design already names: IsDialogMessage eats Enter before any control sees it
+ * (design 6.1). Without this, "activate the row I am standing on" is a key
+ * that reaches nothing -- and activation is what separates MOVING the caret
+ * from COMMITTING to a row, which is the whole of the fix for a panel that
+ * used to yank focus away on every arrow press. */
+#define APR_TREE_SUBCLASS_ID 1u
 
 typedef struct SinkArgs {
     AprTreeSelFn fn;
@@ -108,6 +117,19 @@ typedef struct TreePanel {
 
     AprTreeSelFn sink;
     void        *sink_user;
+
+    /* A SECOND, SEPARATE SIGNAL, and separating the two IS the fix.
+     *
+     * `sink` fires on every caret move, which is what a second view needs in
+     * order to keep its highlight in step. `activate` fires only when the user
+     * COMMITS to a row -- Enter, or a double click. A listener that answered
+     * the first one by moving focus made this panel impossible to browse: one
+     * Down moved the caret, the focus jumped to the other pane, and the second
+     * Down drove that pane instead. Everything past the first row was
+     * unreachable, and the rich sentences in these rows are the whole point of
+     * the panel. */
+    AprTreeSelFn activate;
+    void        *activate_user;
 
     int        suppress;    /* inside apr_tree_panel_select: do not echo   */
     int        applying;    /* SetWindowTheme -> WM_THEMECHANGED re-entry  */
@@ -660,6 +682,71 @@ static void tp_selection_changed(TreePanel *st, HTREEITEM hit)
     st->sink(st->host, &sel, st->sink_user);
 }
 
+/* The user COMMITTED to a row. Never raised by a caret move, and never by
+ * apr_tree_panel_select -- the same suppression the selection sink uses,
+ * because a programmatic selection is not an activation either. */
+static void tp_activated(TreePanel *st, HTREEITEM hit)
+{
+    AprTreeSel sel;
+    TVITEMW it;
+
+    if (!st->activate || st->suppress) return;
+
+    memset(&sel, 0, sizeof sel);
+    memset(&it, 0, sizeof it);
+    it.mask = TVIF_PARAM;
+    it.hItem = hit;
+    if (hit && SendMessageW(st->tv, TVM_GETITEMW, 0, (LPARAM)&it)) {
+        size_t idx = (size_t)it.lParam;
+        if (idx < st->nrows) sel = st->rows[idx].sel;
+    }
+    if (sel.kind == APR_TREE_ROW_NONE) return;
+    st->activate(st->host, &sel, st->activate_user);
+}
+
+/* The caret, right now. */
+static HTREEITEM tp_caret(TreePanel *st)
+{
+    if (!st || !st->tv) return NULL;
+    return (HTREEITEM)SendMessageW(st->tv, TVM_GETNEXTITEM, TVGN_CARET, 0);
+}
+
+/* See APR_TREE_SUBCLASS_ID. Claims Enter -- and ONLY Enter -- back from
+ * IsDialogMessage; everything else, Tab and Escape included, is left exactly
+ * as the control and the frame already handle it. */
+static LRESULT CALLBACK tp_tv_subclass(HWND hwnd, UINT msg, WPARAM wp,
+                                       LPARAM lp, UINT_PTR id, DWORD_PTR ref)
+{
+    TreePanel *st = (TreePanel *)ref;
+
+    (void)id;
+    switch (msg) {
+    case WM_GETDLGCODE: {
+        const MSG *m = (const MSG *)lp;
+        LRESULT base = DefSubclassProc(hwnd, msg, wp, lp);
+        if (m && m->message == WM_KEYDOWN && m->wParam == VK_RETURN) {
+            return base | DLGC_WANTALLKEYS;
+        }
+        return base;
+    }
+
+    case WM_KEYDOWN:
+        if (wp == VK_RETURN && st) {
+            tp_activated(st, tp_caret(st));
+            return 0;
+        }
+        break;
+
+    case WM_NCDESTROY:
+        RemoveWindowSubclass(hwnd, tp_tv_subclass, APR_TREE_SUBCLASS_ID);
+        break;
+
+    default:
+        break;
+    }
+    return DefSubclassProc(hwnd, msg, wp, lp);
+}
+
 /* ==========================================================================
  * The host window
  * ======================================================================== */
@@ -694,6 +781,13 @@ static int tp_create_tree(TreePanel *st, HINSTANCE inst)
      * that is the one place a first-time user is guaranteed to hear it. */
     apr_ui_set_accessible_name(st->tv, APR_S_UI_TREE_NAME);
     apr_ui_set_accessible_description(st->tv, APR_S_UI_TREE_DESC);
+
+    /* See APR_TREE_SUBCLASS_ID: Enter would otherwise never arrive. */
+    if (!SetWindowSubclass(st->tv, tp_tv_subclass, APR_TREE_SUBCLASS_ID,
+                           (DWORD_PTR)st)) {
+        APR_WARN(L"tree panel: the TreeView could not be subclassed; Enter "
+                 L"will not activate a row");
+    }
     return 1;
 }
 
@@ -821,6 +915,13 @@ static LRESULT CALLBACK tp_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             tp_selection_changed(st, nmtv->itemNew.hItem);
             return 0;
         }
+        if (nh->code == NM_DBLCLK) {
+            /* The mouse half of activation. One gesture, one meaning: a
+             * double click and Enter do the same thing, so a sighted user and
+             * a keyboard user get the same behaviour out of the panel. */
+            tp_activated(st, tp_caret(st));
+            return 0;
+        }
         break;
     }
 
@@ -845,6 +946,14 @@ static LRESULT CALLBACK tp_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             SinkArgs *a = (SinkArgs *)lp;
             st->sink = a->fn;
             st->sink_user = a->user;
+        }
+        return 0;
+
+    case APR_TPM_SET_ACT:
+        if (st && lp) {
+            SinkArgs *a = (SinkArgs *)lp;
+            st->activate = a->fn;
+            st->activate_user = a->user;
         }
         return 0;
 
@@ -994,6 +1103,16 @@ void apr_tree_panel_set_selection_sink(HWND panel, AprTreeSelFn fn, void *user)
     a.fn = fn;
     a.user = user;
     SendMessageW(panel, APR_TPM_SET_SINK, 0, (LPARAM)&a);
+}
+
+void apr_tree_panel_set_activate_sink(HWND panel, AprTreeSelFn fn, void *user)
+{
+    SinkArgs a;
+
+    if (!panel || !IsWindow(panel)) return;
+    a.fn = fn;
+    a.user = user;
+    SendMessageW(panel, APR_TPM_SET_ACT, 0, (LPARAM)&a);
 }
 
 HWND apr_tree_panel_treeview(HWND panel)

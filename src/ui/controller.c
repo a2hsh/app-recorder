@@ -102,8 +102,32 @@ struct AprController {
     wchar_t session_path[APR_DISC_PATH_CCH];
     wchar_t last_said[CTL_TEXT_CCH];
 
+    /* The last sentence handed to the notification area, and the count of
+     * them. "It went out on the channel that can reach a hidden window" is
+     * otherwise a property only a human watching his own notification centre
+     * can check -- and with APPRECORDER_NO_TRAY set for every test (AGENTS.md
+     * rule 1) there is deliberately no shell icon to observe. */
+    wchar_t last_balloon[CTL_TEXT_CCH];
+    unsigned balloons;
+
+    /* The model has been changed since it was last saved or loaded. Kept here
+     * rather than in graph.h because "unsaved" is a property of this session
+     * DOCUMENT, not of the audio graph -- the CLI builds graphs it never
+     * intends to write down. */
+    int dirty;
+
+    /* The last open_session ended because the USER SAID NO, not because
+     * anything failed. A cancel is not a failure and must not be announced as
+     * one, and the return value alone cannot tell them apart. */
+    int declined;
+
     /* -1 = ask the real windowing state. 0/1 force it, for tests only. */
     int fg_override;
+
+    /* -1 = CTL_FINALIZE_WAIT_MS. Tests only: the close-timeout path is thirty
+     * seconds of stalled disk away otherwise, and what it SAYS when it gives
+     * up is the thing worth asserting. */
+    int close_wait_override;
 };
 
 /* One session-shaped object at a time; AprSession is a few hundred kilobytes
@@ -172,6 +196,17 @@ void apr_controller_test_set_foreground(AprController *c, int state)
     if (c) c->fg_override = state;
 }
 
+void apr_controller_test_set_close_wait_ms(AprController *c, int ms)
+{
+    if (c) c->close_wait_override = ms;
+}
+
+static DWORD close_wait_ms(const AprController *c)
+{
+    if (c->close_wait_override >= 0) return (DWORD)c->close_wait_override;
+    return CTL_FINALIZE_WAIT_MS;
+}
+
 /* The same sentence on both channels -- but only when the second one is the
  * only one that can reach the user. See a_better_channel_exists(). */
 static void say_and_notify(AprController *c, AprStrId in_window, AprStrId balloon,
@@ -182,6 +217,8 @@ static void say_and_notify(AprController *c, AprStrId in_window, AprStrId balloo
     say(c, in_window, args, nargs);
     if (a_better_channel_exists(c)) return;
     apr_str_format(balloon, text, CTL_TEXT_CCH, args, nargs);
+    lstrcpynW(c->last_balloon, text, CTL_TEXT_CCH);
+    c->balloons++;
     apr_tray_notify(c->tray, APR_S_UI_TRAY_INFO_TITLE, text);
 }
 
@@ -193,6 +230,21 @@ size_t apr_controller_last_announcement(const AprController *c,
     if (!c) return 0;
     lstrcpynW(buf, c->last_said, (int)cch);
     return wcslen(buf);
+}
+
+size_t apr_controller_last_balloon(const AprController *c,
+                                   wchar_t *buf, size_t cch)
+{
+    if (!buf || cch == 0) return 0;
+    buf[0] = 0;
+    if (!c) return 0;
+    lstrcpynW(buf, c->last_balloon, (int)cch);
+    return wcslen(buf);
+}
+
+unsigned apr_controller_balloon_count(const AprController *c)
+{
+    return c ? c->balloons : 0u;
 }
 
 /* ==========================================================================
@@ -243,6 +295,21 @@ size_t apr_controller_format_elapsed(int64_t ms, wchar_t *buf, size_t cch)
  * Views
  * ======================================================================== */
 
+/* THE WINDOW TITLE IS A SENTENCE, NOT A PATH. UI_TITLE_SESSION exists so the
+ * frame can read "mix.aprsession -- apprecorder" (and in another language,
+ * whatever that language does with a document title); writing the bare path
+ * into the frame both bypassed the catalog and made the window's accessible
+ * name a file path with no indication of what application it belongs to. */
+static void set_session_title(AprController *c, const wchar_t *path)
+{
+    wchar_t title[CTL_TEXT_CCH];
+    const wchar_t *args[1];
+
+    args[0] = path ? path : L"";
+    apr_str_format(APR_S_UI_TITLE_SESSION, title, CTL_TEXT_CCH, args, 1);
+    apr_ui_app_set_title_text(c->app, title);
+}
+
 static void refresh_views(AprController *c)
 {
     if (!c) return;
@@ -291,6 +358,37 @@ static void update_commands(AprController *c)
     apr_ui_app_enable_command(c->app, APR_CMD_HELP_ABOUT, 1);
 
     apr_tray_set_can_record(c->tray, !rec && graph_has_output(c->graph), rec);
+}
+
+/* A CHOOSER RETURNED 0. WAS THAT A CANCEL, OR DID NOTHING OPEN?
+ *
+ * ui_dialogs.h: every chooser returns 0 for both, and folding them together is
+ * how a two-byte template bug reached the author as pure silence for a
+ * fortnight -- the key did nothing, no window appeared, and the only evidence
+ * was a log line in a file nobody had open. A cancel needs no sentence,
+ * because the user did it on purpose. A window that could not open does.
+ *
+ * Returns nonzero when it said something, i.e. when it really was a fault. */
+static int dialog_faulted(AprController *c)
+{
+    if (!apr_dlg_last_failed()) return 0;
+    say0(c, APR_S_UI_DLG_CREATE_FAILED);
+    return 1;
+}
+
+/* Nonzero when it is safe to throw the current session away -- either because
+ * there is nothing unsaved in it, or because the user has just said so.
+ *
+ * FILE > NEW AND FILE > OPEN USED TO DISCARD AN HOUR OF ROUTING WITH NO
+ * PROMPT. Ctrl+N is one key away from Ctrl+B on some layouts and one slip
+ * away from Ctrl+M on any of them, and the session that vanishes is the
+ * artifact you rely on to reproduce a recording. */
+static int may_discard(AprController *c)
+{
+    if (!c->dirty) return 1;
+    return apr_dlg_confirm(c->frame, APR_S_UI_DLG_DISCARD_TITLE,
+                           apr_str(APR_S_UI_DLG_DISCARD_BODY),
+                           APR_S_UI_DLG_DISCARD_OK, APR_S_UI_DLG_CANCEL);
 }
 
 /* Nonzero when the command must be refused because a recording is running.
@@ -349,6 +447,7 @@ AprErr apr_controller_add_source(AprController *c, const wchar_t *name,
     APR_INFO(L"add source: added id=%u; graph now holds %u sources",
              (unsigned)id, (unsigned)apr_graph_source_count(c->graph));
 
+    c->dirty = 1;
     refresh_views(c);
     update_commands(c);
     args[0] = name;
@@ -365,6 +464,7 @@ static int do_add_source(AprController *c)
     if (!apr_dlg_add_source(c->frame, &pick)) {
         APR_INFO(L"add source: dialog returned nothing (cancelled, or it could "
                  L"not be created)");
+        (void)dialog_faulted(c);
         return 1;
     }
     APR_INFO(L"add source: kind=%d pid=%u name='%s'",
@@ -413,6 +513,7 @@ AprErr apr_controller_add_bus(AprController *c, const wchar_t *name)
         return e;
     }
 
+    c->dirty = 1;
     refresh_views(c);
     update_commands(c);
     args[0] = name;
@@ -428,6 +529,7 @@ static int do_add_bus(AprController *c)
     name[0] = 0;
     if (!apr_dlg_name_prompt(c->frame, APR_S_UI_DLG_ADD_BUS_TITLE,
                              APR_S_UI_DLG_BUS_NAME, name, APR_NAME_CCH)) {
+        (void)dialog_faulted(c);
         return 1;
     }
 
@@ -470,6 +572,7 @@ static int do_rename_bus(AprController *c)
     lstrcpynW(name, apr_bus_name(b), APR_NAME_CCH);
     if (!apr_dlg_name_prompt(c->frame, APR_S_UI_DLG_RENAME_BUS_TITLE,
                              APR_S_UI_DLG_BUS_NAME, name, APR_NAME_CCH)) {
+        (void)dialog_faulted(c);
         return 1;
     }
     if (!apr_bus_set_name(b, name)) {
@@ -477,6 +580,7 @@ static int do_rename_bus(AprController *c)
         return 1;
     }
 
+    c->dirty = 1;
     refresh_views(c);
     args[0] = name;
     say(c, APR_S_UI_DLG_BUS_RENAMED, args, 1);
@@ -492,7 +596,10 @@ static int do_add_output(AprController *c)
     AprErr e;
 
     if (busy(c)) return 1;
-    if (!apr_dlg_add_output(c->frame, c->graph, current_bus(c), &out)) return 1;
+    if (!apr_dlg_add_output(c->frame, c->graph, current_bus(c), &out)) {
+        (void)dialog_faulted(c);
+        return 1;
+    }
 
     memset(&cfg, 0, sizeof cfg);
     cfg.out_path     = out.path;
@@ -507,6 +614,7 @@ static int do_add_output(AprController *c)
         return 1;
     }
 
+    c->dirty = 1;
     refresh_views(c);
     update_commands(c);
     vt = apr_action_find(out.action_id);
@@ -529,11 +637,22 @@ static int do_remove_output(AprController *c)
     if (busy(c)) return 1;
     id = current_bus(c);
     b = id ? apr_graph_bus(c->graph, id) : NULL;
-    if (!b || apr_bus_action_count(b) == 0) {
+    if (!b) {
         say0(c, APR_S_UI_DLG_NO_BUSES);
         return 1;
     }
-    if (!apr_dlg_pick_output(c->frame, c->graph, id, &index)) return 1;
+    if (apr_bus_action_count(b) == 0) {
+        /* TWO STATES, TWO SENTENCES. "There is no bus to record yet" said to
+         * someone standing on a bus with no outputs is a statement about their
+         * session that is not true, and it sends them off to add the thing
+         * they already have. */
+        say0(c, APR_S_UI_DLG_NO_OUTPUTS);
+        return 1;
+    }
+    if (!apr_dlg_pick_output(c->frame, c->graph, id, &index)) {
+        (void)dialog_faulted(c);
+        return 1;
+    }
 
     vt = apr_bus_action_at(b, index);
     lstrcpynW(name, vt ? apr_str(vt->display_name_id) : L"", APR_NAME_CCH);
@@ -545,6 +664,7 @@ static int do_remove_output(AprController *c)
     e = apr_bus_remove_action(b, index);
     if (apr_failed(&e)) APR_LOG_ERR(APR_LOG_WARN, &e);
 
+    c->dirty = 1;
     refresh_views(c);
     update_commands(c);
     args[0] = name;
@@ -670,6 +790,7 @@ AprErr apr_controller_open_session(AprController *c, const wchar_t *path,
         return APR_ERR(APR_E_STATE, L"cannot open a session while recording");
     }
 
+    c->declined = 0;
     memset(&g_load_rep, 0, sizeof g_load_rep);
     e = apr_session_load(path, &g_session, &g_load_rep);
     if (apr_failed(&e)) return e;
@@ -690,6 +811,13 @@ AprErr apr_controller_open_session(AprController *c, const wchar_t *path,
         if (g_resolve_rep.substituted || g_resolve_rep.failed ||
             g_resolve_rep.needs_system_capture_consent) {
             if (!apr_dlg_resolve_report(c->frame, &g_resolve_rep)) {
+                /* A DELIBERATE CANCEL. Flagged rather than encoded in the
+                 * error, because the caller has to be able to tell "you said
+                 * no" from "this file is broken" -- announcing the first as
+                 * the second told the author that a session he had chosen not
+                 * to open had FAILED to open, in the third person, quoting an
+                 * untranslatable internal literal back at him. */
+                c->declined = 1;
                 return APR_ERR(APR_E_STATE, L"the user declined this session");
             }
         }
@@ -700,6 +828,7 @@ AprErr apr_controller_open_session(AprController *c, const wchar_t *path,
                                  apr_str(APR_S_UI_DLG_SYSTEM_BODY),
                                  APR_S_UI_DLG_SYSTEM_CONSENT,
                                  APR_S_UI_DLG_CANCEL)) {
+                c->declined = 1;
                 return APR_ERR(APR_E_STATE, L"system-wide capture was declined");
             }
             opt.allow_system_capture = 1;
@@ -722,7 +851,20 @@ AprErr apr_controller_open_session(AprController *c, const wchar_t *path,
     if (apr_failed(&e)) { apr_graph_destroy(g); return e; }
 
     lstrcpynW(c->session_path, path, APR_DISC_PATH_CCH);
-    apr_ui_app_set_title_text(c->app, path);
+    c->dirty = 0;
+    set_session_title(c, path);
+
+    /* ui_controller.h: non-interactive "takes what resolved and reports the
+     * rest through the return value". It did not -- it returned ok, and a
+     * caller with nobody to ask was told a session had loaded cleanly when
+     * sources had been silently dropped from it. The graph IS adopted either
+     * way, which is the documented behaviour; what changes is that the caller
+     * now finds out. */
+    if (!interactive && g_resolve_rep.failed) {
+        return APR_ERR(APR_E_NOT_FOUND,
+                       L"some of this session's sources are not on this "
+                       L"machine and were left out");
+    }
     return apr_ok();
 }
 
@@ -733,11 +875,18 @@ static int do_open_session(AprController *c)
     AprErr e;
 
     if (busy(c)) return 1;
+    if (!may_discard(c)) return 1;
     path[0] = 0;
     if (!apr_dlg_choose_session(c->frame, 0, path, APR_DISC_PATH_CCH)) return 1;
 
     e = apr_controller_open_session(c, path, 1);
     if (apr_failed(&e)) {
+        if (c->declined) {
+            /* Not a failure. The user pressed Cancel and knows exactly what
+             * happened; all they need is confirmation that nothing changed. */
+            say0(c, APR_S_UI_DLG_SESSION_CANCELLED);
+            return 1;
+        }
         /* The load faults get the catalog's own sentence for the fault, which
          * names the file's problem; anything else reports the error text. */
         if (g_load_rep.fault != APR_SESSION_FAULT_NONE) {
@@ -893,7 +1042,8 @@ AprErr apr_controller_save_session(AprController *c, const wchar_t *path)
     if (apr_failed(&e)) return e;
 
     lstrcpynW(c->session_path, path, APR_DISC_PATH_CCH);
-    apr_ui_app_set_title_text(c->app, path);
+    c->dirty = 0;
+    set_session_title(c, path);
     return apr_ok();
 }
 
@@ -998,12 +1148,33 @@ static int start_recording(AprController *c)
 
     c->recording = 1;
     c->last_elapsed_ms = 0;
+
+    /* SAID IMMEDIATELY, and the adjacency is deliberate. Anything watching
+     * apr_controller_recording() -- a test, a future scripting surface, the
+     * tray -- learns the state from the line above; everything between that
+     * line and this one is time in which the state is true and the sentence is
+     * not yet available. It used to be four calls' worth, one of which rebuilt
+     * every node window in two views, and a test lost that race roughly one
+     * run in three. */
+    say_and_notify(c, APR_S_UI_ANN_RECORD_STARTED, APR_S_UI_TRAY_INFO_STARTED,
+                   NULL, 0);
+
     update_commands(c);
     apr_tray_set_status(c->tray, APR_TRAY_RECORDING, L"");
     SetTimer(c->frame, APR_CTL_TIMER_CLOCK, 1000, NULL);
 
-    say_and_notify(c, APR_S_UI_ANN_RECORD_STARTED, APR_S_UI_TRAY_INFO_STARTED,
-                   NULL, 0);
+    /* THE TREE'S "RECORDING" CLAUSES EXIST FOR THIS MOMENT AND NOTHING USED TO
+     * REACH THEM. Every bus row picks UI_TREE_BUS_RECORDING over UI_TREE_BUS
+     * from apr_bus_running(), and nothing rebuilt the rows when a run started
+     * -- so F6 into the panel mid-session and every bus read as idle for the
+     * whole recording. The sentences were written, translated and unreachable.
+     *
+     * LAST, not before the announcement. Rebuilding two views destroys and
+     * recreates every node window, which takes long enough that an observer
+     * watching apr_controller_recording() -- exactly what a test does -- can
+     * see "it is recording" a measurable time before it can hear "recording
+     * started". The two facts should arrive together. */
+    refresh_views(c);
     return 1;
 }
 
@@ -1057,7 +1228,13 @@ static void handle_notice(AprController *c, AprRunNotice *n)
 
     switch (n->ev) {
     case APR_RUN_EV_ARM_FAILED:
-        say0(c, APR_S_UI_ANN_ARM_FAILED);
+        /* HONOURS THE TRAY CONTRACT NOW. Arming happens in the first moments
+         * of a run, and a run started from the notification area starts with
+         * the window HIDDEN by definition -- which is precisely where a status
+         * bar live region reaches nobody. This was the one event guaranteed to
+         * fire on the channel that could not carry it. */
+        say_and_notify(c, APR_S_UI_ANN_ARM_FAILED,
+                       APR_S_UI_TRAY_INFO_ARM_FAILED, NULL, 0);
         break;
 
     case APR_RUN_EV_SOURCE_DIED:
@@ -1078,21 +1255,29 @@ static void handle_notice(AprController *c, AprRunNotice *n)
         apr_err_format(&n->err, why, 512);
         args[0] = n->name;
         args[1] = why;
-        say(c, APR_S_UI_ANN_ACTION_FAILED, args, 2);
-        {
-            wchar_t balloon[CTL_TEXT_CCH];
-            apr_str_format(APR_S_UI_TRAY_INFO_ACTION_FAILED, balloon,
-                           CTL_TEXT_CCH, args, 1);
-            apr_tray_notify(c->tray, APR_S_UI_TRAY_INFO_TITLE, balloon);
-        }
+        /* THE BALLOON IS CONDITIONAL LIKE EVERY OTHER ONE. It used to be
+         * raised unconditionally, so in the foreground a screen reader read
+         * the failure twice -- once from the live region and once from the
+         * shell. A balloon is for something that would otherwise be MISSED
+         * (see a_better_channel_exists), and this event is not special. */
+        say_and_notify(c, APR_S_UI_ANN_ACTION_FAILED,
+                       APR_S_UI_TRAY_INFO_ACTION_FAILED, args, 2);
+        /* And the tree's "stopped saving" clause becomes true at this instant;
+         * without a rebuild the row goes on claiming the file is being
+         * written, for the rest of the session. */
+        refresh_views(c);
         break;
 
     case APR_RUN_EV_OUTPUT_RENAMED:
         /* The name that was asked for was already a recording. It has been
          * kept and this take has moved aside (outpath.h) -- which is only
-         * honest if the user is told, so this is said and shown. */
+         * honest if the user is TOLD, and the honest-collision policy is worth
+         * nothing if the telling lands on a status bar in a hidden window.
+         * This is the one fact the policy insists on, so it goes out on
+         * whichever channel can actually reach the user. */
         args[0] = n->path;
-        say(c, APR_S_UI_ANN_OUTPUT_RENAMED, args, 1);
+        say_and_notify(c, APR_S_UI_ANN_OUTPUT_RENAMED,
+                       APR_S_UI_TRAY_INFO_OUTPUT_RENAMED, args, 1);
         break;
 
     case APR_RUN_EV_FINISHING:
@@ -1137,6 +1322,23 @@ static int wait_for_files(AprController *c, DWORD limit_ms)
         if (!c->recording || !c->runner) return 1;
         (void)MsgWaitForMultipleObjects(0, NULL, FALSE, 50, QS_ALLINPUT);
         while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
+            /* WM_QUIT IS NOT OURS TO SWALLOW, AND SWALLOWING IT LEFT A ZOMBIE.
+             *
+             * This drain runs the normal case of "stop recording and close":
+             * recording_finished() posts WM_CLOSE, this same drain dispatches
+             * it, DestroyWindow runs, WM_DESTROY calls PostQuitMessage -- and
+             * then PeekMessage here retrieves the WM_QUIT that was meant for
+             * apr_ui_app_run and drops it on the floor. The window is gone,
+             * the process is not, apr_controller_destroy never runs, the tray
+             * icon is a ghost and a second launch coexists with the first.
+             *
+             * Put it back and stop pumping. The files are closed by
+             * construction at this point -- WM_CLOSE only got posted from
+             * recording_finished. */
+            if (msg.message == WM_QUIT) {
+                PostQuitMessage((int)msg.wParam);
+                return 1;
+            }
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
@@ -1172,6 +1374,14 @@ static int on_close(AprUiApp *app, AprUiCloseReason why, void *user)
     if (choice == APR_DLG_CLOSE_CANCEL) return 0;
 
     if (choice == APR_DLG_CLOSE_TO_TRAY) {
+        /* Same rule as Ctrl+Shift+H, and it matters more here because a
+         * recording IS in flight: with no icon the window stays up rather than
+         * becoming unreachable. The recording keeps running either way, which
+         * is what the user asked for. */
+        if (!apr_tray_is_registered(c->tray)) {
+            say0(c, APR_S_UI_ANN_NO_TRAY);
+            return 0;
+        }
         /* The recording keeps running and the window goes away. The balloon is
          * not decoration: without it the application has silently vanished,
          * and the notification area is not somewhere a person thinks to look
@@ -1189,15 +1399,17 @@ static int on_close(AprUiApp *app, AprUiCloseReason why, void *user)
     apr_runner_request_stop(c->runner);
     c->closing = 1;
 
-    if (wait_for_files(c, CTL_FINALIZE_WAIT_MS)) {
+    if (wait_for_files(c, close_wait_ms(c))) {
         c->allow_close = 1;
         /* recording_finished() has usually already run from the posted STOPPED
          * notice; if the wait won the race, let the posted close happen. */
         return c->recording ? 0 : 1;
     }
-    /* The wait expired. Say so and let the user close it again, rather than
-     * refusing forever. */
-    say0(c, APR_S_UI_ANN_CLOSING_FILES);
+    /* The wait expired. Say SO -- not the sentence that means "this is still
+     * in progress", which is what used to be replayed here: hearing "the
+     * window will close once the files are written" a second time and then
+     * having nothing close is indistinguishable from a hung application. */
+    say0(c, APR_S_UI_ANN_CLOSE_TIMEOUT);
     c->closing = 0;
     return 0;
 }
@@ -1215,10 +1427,12 @@ int apr_controller_command(AprController *c, int command_id)
         AprGraph *g = NULL;
         AprErr e;
         if (busy(c)) return 1;
+        if (!may_discard(c)) return 1;
         e = apr_graph_create(48000, 2, &g);
         if (apr_failed(&e)) { report_failure(c, APR_S_UI_DLG_ADD_FAILED, &e); return 1; }
         (void)apr_controller_set_graph(c, g);
         c->session_path[0] = 0;
+        c->dirty = 0;
         apr_ui_app_set_title_text(c->app, apr_str(APR_S_UI_TITLE_UNTITLED));
         say0(c, APR_S_UI_STATUS_READY);
         return 1;
@@ -1238,6 +1452,7 @@ int apr_controller_command(AprController *c, int command_id)
     case APR_CMD_REMOVE:
         if (busy(c)) return 1;
         if (c->canvas && apr_canvas_command(c->canvas, command_id)) {
+            c->dirty = 1;
             refresh_views(c);
             update_commands(c);
             return 1;
@@ -1254,6 +1469,15 @@ int apr_controller_command(AprController *c, int command_id)
         return 1;
 
     case APR_CMD_HIDE_TO_TRAY:
+        /* NEVER HIDE INTO NOTHING. If the shell refused the icon -- Explorer
+         * crashed before its TaskbarCreated broadcast, a policy, a full
+         * notification area -- then hiding leaves the application with no
+         * surface whatsoever: not Alt+Tab, not Windows+B, nothing, while it is
+         * still recording. Refuse, and say why. */
+        if (!apr_tray_is_registered(c->tray)) {
+            say0(c, APR_S_UI_ANN_NO_TRAY);
+            return 1;
+        }
         ShowWindow(c->frame, SW_HIDE);
         apr_tray_notify(c->tray, APR_S_UI_TRAY_INFO_TITLE,
                         apr_str(APR_S_UI_TRAY_INFO_MINIMIZED));
@@ -1371,19 +1595,17 @@ static void on_canvas_say(void *user, const wchar_t *text)
     update_commands(c);
 }
 
-/* Tree caret -> canvas focus. A selection names a MODEL object by id
- * (ui_tree_panel.h), so neither view holds a handle from the other; this
- * translates one to the other and nothing more. */
-static void on_tree_select(HWND panel, const AprTreeSel *sel, void *user)
+/* Which canvas node a tree selection names, or -1. A selection names a MODEL
+ * object by id (ui_tree_panel.h), so neither view holds a handle from the
+ * other; this translates one to the other and nothing more. */
+static int canvas_node_for(AprController *c, const AprTreeSel *sel)
 {
-    AprController *c = (AprController *)user;
     size_t i, n;
     AprNodeKind want;
     uint32_t id;
     int sub = 0;
 
-    (void)panel;
-    if (!c || !c->canvas || !sel) return;
+    if (!c || !c->canvas || !sel) return -1;
 
     switch (sel->kind) {
     case APR_TREE_ROW_BUS:    want = APR_NODE_BUS;    id = sel->bus; break;
@@ -1393,7 +1615,7 @@ static void on_tree_select(HWND panel, const AprTreeSel *sel, void *user)
     default:
         /* A structural row names no model object. Ignore it rather than guess
          * -- ui_tree_panel.h asks for exactly that. */
-        return;
+        return -1;
     }
 
     n = apr_canvas_node_count(c->canvas);
@@ -1401,10 +1623,64 @@ static void on_tree_select(HWND panel, const AprTreeSel *sel, void *user)
         HWND w = apr_canvas_node_at(c->canvas, i);
         if (apr_node_kind(w) == want && apr_node_model_id(w) == id &&
             apr_node_sub_id(w) == sub) {
-            apr_canvas_focus_node(c->canvas, i);
-            return;
+            return (int)i;
         }
     }
+    return -1;
+}
+
+/* THE CARET MOVED. KEEP THE OTHER VIEW IN STEP AND DO NOT TOUCH FOCUS.
+ *
+ * This used to answer every caret move with an unconditional SetFocus on the
+ * canvas node, which made the Structure panel impossible to browse: F6 into
+ * the tree, press Down, and focus was yanked to the canvas -- the reader
+ * announced the canvas node instead of the row, and the next Down drove the
+ * canvas. Everything past the first row was unreachable, and the tree's
+ * sentences are the whole reason the panel exists.
+ *
+ * Setting the canvas's CURRENT node rather than its focus keeps the two views
+ * agreeing, keeps the node scrolled into view, and means that when focus does
+ * arrive at the canvas -- by F6, by Tab -- it lands on the node the user was
+ * standing on in the tree. Going there NOW is what apr_tree_panel activation
+ * is for, below. */
+static void on_tree_select(HWND panel, const AprTreeSel *sel, void *user)
+{
+    AprController *c = (AprController *)user;
+    int i = canvas_node_for(c, sel);
+
+    (void)panel;
+    if (i >= 0) apr_canvas_set_current_node(c->canvas, (size_t)i);
+}
+
+/* THE USER CHOSE THIS ROW -- Enter, or a double click. Now focus moves. */
+static void on_tree_activate(HWND panel, const AprTreeSel *sel, void *user)
+{
+    AprController *c = (AprController *)user;
+    int i = canvas_node_for(c, sel);
+
+    (void)panel;
+    if (i >= 0) apr_canvas_focus_node(c->canvas, (size_t)i);
+}
+
+/* THE CANVAS EDITED THE MODEL WITHOUT A COMMAND PASSING THROUGH HERE.
+ *
+ * Ctrl+Shift+E, plus and minus and a mouse click completing an edge all change
+ * the graph inside the canvas's own window procedure -- no accelerator, no
+ * WM_COMMAND, nothing that reaches apr_controller_command. The tree panel is a
+ * projection of the same model and had no way to hear, so it went on saying
+ * "Mic -- feeds Voice Mix" about an edge that had been cut.
+ *
+ * Only the TREE is rebuilt here, deliberately: ui_canvas.h forbids rebuilding
+ * the canvas from this callback, and the canvas has already re-synced itself
+ * anyway. */
+static void on_canvas_edit(void *user)
+{
+    AprController *c = (AprController *)user;
+
+    if (!c) return;
+    c->dirty = 1;
+    if (c->tree) apr_tree_panel_refresh(c->tree);
+    update_commands(c);
 }
 
 /* ==========================================================================
@@ -1435,6 +1711,7 @@ AprErr apr_controller_create(AprUiApp *app, AprController **out)
     (void)apr_tray_create(c->frame, &c->tray);
 
     c->fg_override = -1;   /* calloc gives 0, which would MEAN something */
+    c->close_wait_override = -1;
     apr_ui_app_set_command_handler(app, on_command, c);
     apr_ui_app_set_close_handler(app, on_close, c);
     apr_ui_app_set_message_handler(app, on_message, c);
@@ -1443,9 +1720,11 @@ AprErr apr_controller_create(AprUiApp *app, AprController **out)
         apr_canvas_set_announce(c->canvas, on_canvas_say, c);
         apr_canvas_set_graph(c->canvas, c->graph);
     }
+    if (c->canvas) apr_canvas_set_edit_sink(c->canvas, on_canvas_edit, c);
     if (c->tree) {
         apr_tree_panel_set_graph(c->tree, c->graph);
         apr_tree_panel_set_selection_sink(c->tree, on_tree_select, c);
+        apr_tree_panel_set_activate_sink(c->tree, on_tree_activate, c);
     }
 
     update_commands(c);
@@ -1469,8 +1748,13 @@ void apr_controller_destroy(AprController *c)
     c->recording = 0;
 
     if (c->canvas) apr_canvas_set_announce(c->canvas, NULL, NULL);
+    if (c->canvas) apr_canvas_set_edit_sink(c->canvas, NULL, NULL);
     if (c->canvas) apr_canvas_set_graph(c->canvas, NULL);
-    if (c->tree)   apr_tree_panel_set_graph(c->tree, NULL);
+    if (c->tree) {
+        apr_tree_panel_set_selection_sink(c->tree, NULL, NULL);
+        apr_tree_panel_set_activate_sink(c->tree, NULL, NULL);
+        apr_tree_panel_set_graph(c->tree, NULL);
+    }
 
     apr_tray_destroy(c->tray);
     apr_graph_destroy(c->graph);

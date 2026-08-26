@@ -116,6 +116,9 @@ typedef struct CanvasState {
     void               *announce_user;
     wchar_t             last[APR_CANVAS_TEXT_CCH];
 
+    AprCanvasEditFn     edited;
+    void               *edited_user;
+
     int rebuilding;
 } CanvasState;
 
@@ -343,6 +346,57 @@ void apr_canvas_set_announce(HWND canvas, AprCanvasAnnounceFn fn, void *user)
     if (!st) return;
     st->announce = fn;
     st->announce_user = user;
+}
+
+void apr_canvas_set_edit_sink(HWND canvas, AprCanvasEditFn fn, void *user)
+{
+    CanvasState *st = state_of(canvas);
+
+    if (!st) return;
+    st->edited = fn;
+    st->edited_user = user;
+}
+
+/* THE MODEL CHANGED UNDER US -- tell whoever owns the other views.
+ *
+ * Raised at the END of an edit, after this canvas has already rewritten its
+ * own names and descriptions, and never during one: a listener that rebuilt
+ * this canvas from inside an operation still in flight would be destroying the
+ * very node windows that operation is about to focus. So the contract is
+ * narrow on purpose -- ui_canvas.h states it -- and the controller answers it
+ * by refreshing the TREE, which is the view that had no other way to hear. */
+static void edited(CanvasState *st)
+{
+    if (st && st->edited) st->edited(st->edited_user);
+}
+
+/* Nonzero, having already SAID SO, when the graph must not be edited right
+ * now. graph.h forbids a shape change while a tick is in flight, and the
+ * canvas owns keys the frame's accelerator table never sees (Ctrl+Shift+E,
+ * plus and minus) -- so the controller's own busy() guard cannot cover them
+ * and this window has to refuse for itself.
+ *
+ * REFUSED IN WORDS. A refusal the user cannot hear is indistinguishable from
+ * a broken key, which is the defect class this file has produced four times. */
+static int canvas_busy(CanvasState *st)
+{
+    if (!st || !st->graph || !apr_graph_running(st->graph)) return 0;
+    say(st, APR_S_UI_ANN_BUSY_RECORDING, NULL, 0);
+    return 1;
+}
+
+/* The reason the model gave, in the catalog's frame. NEVER "that is not
+ * available yet" -- that sentence describes a feature nobody has written, and
+ * using it for a real refusal told the user the wrong thing about their own
+ * session while throwing the only diagnostic away. */
+static void say_edit_failed(CanvasState *st, const AprErr *e)
+{
+    const wchar_t *args[1];
+    wchar_t why[512];
+
+    apr_err_format(e, why, 512);
+    args[0] = why;
+    say(st, APR_S_UI_ANN_EDIT_FAILED, args, 1);
 }
 
 /* ==========================================================================
@@ -834,6 +888,7 @@ void apr_canvas_rebuild(HWND canvas)
     int keep_sub = 0, had_focus = 0, restore;
     /* The half-made connection, remembered the same way focus is. */
     int had_pending = 0, pending_disconnect = 0, pend_sub = 0;
+    int lost_pending = 0;
     AprNodeKind pend_kind = APR_NODE_SOURCE;
     uint32_t pend_id = 0;
     size_t i, j;
@@ -929,10 +984,24 @@ void apr_canvas_rebuild(HWND canvas)
             /* The node window is a new one, so the state it draws itself in
              * has to be put back on it as well as into the index. */
             apr_node_set_pending(st->node[p].hwnd, 1);
+        } else {
+            /* THE HELD END IS GONE FROM THE MODEL, so the gesture cannot be
+             * finished -- and that has to be SAID. A mode the user is in that
+             * ends without a word leaves them pressing the second half of a
+             * gesture that no longer exists, which is exactly how "Ctrl+E
+             * twice does nothing" was reported the first time. Same sentence
+             * Escape produces, because from where the user stands it is the
+             * same fact: the half-made connection is off. */
+            lost_pending = 1;
         }
     }
 
     st->rebuilding = 0;
+
+    /* AFTER `rebuilding` is cleared: say() reaches the controller's sink,
+     * which refreshes the other view, and re-entering this function with the
+     * guard still up would silently drop that refresh. */
+    if (lost_pending) say(st, APR_S_UI_ANN_CANCELLED, NULL, 0);
 }
 
 void apr_canvas_set_graph(HWND canvas, AprGraph *g)
@@ -996,6 +1065,28 @@ int apr_canvas_focus_node(HWND canvas, size_t index)
 
     if (!st || index >= (size_t)st->count) return 0;
     return focus_index(st, (int)index);
+}
+
+/* See ui_canvas.h. The focus test is "does this pane already hold it" rather
+ * than "did somebody ask us to" -- so a caret move in the tree updates the
+ * picture silently, while a caller who is already standing on the canvas is
+ * not left with the highlight on one node and the keyboard on another. */
+int apr_canvas_set_current_node(HWND canvas, size_t index)
+{
+    CanvasState *st = state_of(canvas);
+    HWND f;
+
+    if (!st || index >= (size_t)st->count) return 0;
+
+    f = GetFocus();
+    if (f && (f == st->hwnd || IsChild(st->hwnd, f))) {
+        return focus_index(st, (int)index);
+    }
+
+    st->cur = (int)index;
+    ensure_visible(st, (int)index);
+    InvalidateRect(st->hwnd, NULL, FALSE);
+    return 1;
 }
 
 /* ==========================================================================
@@ -1121,6 +1212,15 @@ static int begin_or_finish_edge(CanvasState *st, int disconnect)
         return 1;
     }
 
+    /* BEFORE THE GESTURE STARTS, not after it is half made. Ctrl+Shift+E is
+     * deliberately not a frame accelerator, so this is the only place that can
+     * refuse it while a recording runs -- and leaving a user holding one end
+     * of an edge they will not be allowed to finish is its own trap. */
+    if (canvas_busy(st)) {
+        clear_pending(st);
+        return 1;
+    }
+
     if (st->pending < 0) {
         /* First press: hold this end. Announce what is now half done and how
          * to get out of it -- a mode the user cannot hear is a trap. */
@@ -1179,7 +1279,7 @@ static int begin_or_finish_edge(CanvasState *st, int disconnect)
     if (apr_failed(&e)) {
         APR_LOG_ERR(APR_LOG_WARN, &e);
         clear_pending(st);
-        say(st, APR_S_UI_ANN_NOT_YET, NULL, 0);
+        say_edit_failed(st, &e);
         return 1;
     }
 
@@ -1203,6 +1303,7 @@ static int begin_or_finish_edge(CanvasState *st, int disconnect)
         int back = find_node(st, APR_NODE_SOURCE, st->node[src_i].model_id, 0);
         if (back >= 0) focus_index(st, back);
     }
+    edited(st);
     return 1;
 }
 
@@ -1217,6 +1318,7 @@ static int do_remove(CanvasState *st)
         say(st, APR_S_UI_ANN_CANVAS_EMPTY, NULL, 0);
         return 1;
     }
+    if (canvas_busy(st)) return 1;
 
     if (st->node[i].kind == APR_NODE_ACTION) {
         /* This used to be refused out loud, because bus.h had no "remove one
@@ -1243,6 +1345,7 @@ static int do_remove(CanvasState *st)
         args[0] = gone;
         say(st, APR_S_UI_ANN_REMOVED, args, 1);
         if (st->count > 0) focus_index(st, st->cur >= 0 ? st->cur : 0);
+        edited(st);
         return 1;
     }
 
@@ -1255,7 +1358,7 @@ static int do_remove(CanvasState *st)
     }
     if (apr_failed(&e)) {
         APR_LOG_ERR(APR_LOG_WARN, &e);
-        say(st, APR_S_UI_ANN_NOT_YET, NULL, 0);
+        say_edit_failed(st, &e);
         return 1;
     }
 
@@ -1265,6 +1368,7 @@ static int do_remove(CanvasState *st)
     args[0] = gone;
     say(st, APR_S_UI_ANN_REMOVED, args, 1);
     if (st->count > 0) focus_index(st, st->cur >= 0 ? st->cur : 0);
+    edited(st);
     return 1;
 }
 
@@ -1282,6 +1386,10 @@ static int do_gain(CanvasState *st, int step_db10)
         say(st, APR_S_UI_ANN_CANVAS_EMPTY, NULL, 0);
         return 1;
     }
+    /* A gain write races apr_graph_tick's read of the same edge array, so it
+     * is refused for the same reason connect is -- and out loud, for the same
+     * reason again. */
+    if (canvas_busy(st)) return 1;
     if (st->node[i].kind != APR_NODE_SOURCE) {
         /* "Main Mix feeds no bus" would be a lie about a bus. Two states, two
          * sentences. */
@@ -1307,7 +1415,14 @@ static int do_gain(CanvasState *st, int step_db10)
         AprBus *b = apr_graph_bus(st->graph, buses[k]);
         if (b) {
             AprErr e = apr_bus_set_gain(b, st->node[i].model_id, linear);
-            if (apr_failed(&e)) APR_LOG_ERR(APR_LOG_WARN, &e);
+            if (apr_failed(&e)) {
+                /* Swallowing this announced the NEW level while the edge kept
+                 * the old one -- the user is then told a number that is not
+                 * true of their session. */
+                APR_LOG_ERR(APR_LOG_WARN, &e);
+                say_edit_failed(st, &e);
+                return 1;
+            }
         }
     }
 
@@ -1318,6 +1433,7 @@ static int do_gain(CanvasState *st, int step_db10)
     args[0] = who;
     args[1] = db;
     say(st, APR_S_UI_ANN_GAIN, args, 2);
+    edited(st);
     return 1;
 }
 
@@ -1636,12 +1752,28 @@ static LRESULT CALLBACK canvas_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_SETFOCUS:
         /* A container hands focus on to its content. With no content it keeps
          * it, which is what keeps the pane named and focusable in an empty
-         * session -- the property tests/test_ui_a11y.c asserts. */
+         * session -- the property tests/test_ui_a11y.c asserts.
+         *
+         * POSTED, NOT CALLED. SetFocus from inside WM_SETFOCUS is swallowed:
+         * the outer SetFocus reasserts its own target as it unwinds, so the
+         * hand-off appears to work, reports success everywhere a proxy check
+         * can look, and leaves the keyboard on this window (design 6.3). The
+         * private message runs the same code one message later, when nothing
+         * is unwinding over it. */
         if (st && st->count > 0) {
-            focus_index(st, st->cur >= 0 ? st->cur : 0);
+            PostMessageW(hwnd, APR_CANVAS_WM_ENTER_PANE, 0, 0);
             return 0;
         }
         InvalidateRect(hwnd, NULL, FALSE);
+        return 0;
+
+    case APR_CANVAS_WM_ENTER_PANE:
+        /* Only if the pane itself still holds focus. Between the post and the
+         * delivery the user may already be somewhere else, and stealing focus
+         * back from wherever they went is worse than not forwarding at all. */
+        if (st && st->count > 0 && GetFocus() == hwnd) {
+            focus_index(st, st->cur >= 0 ? st->cur : 0);
+        }
         return 0;
 
     case WM_KILLFOCUS:
@@ -1667,6 +1799,9 @@ static LRESULT CALLBACK canvas_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case APR_CANVAS_WM_FOCUS_NODE:
         return apr_canvas_focus_node(hwnd, (size_t)wp);
+
+    case APR_CANVAS_WM_SET_CUR:
+        return apr_canvas_set_current_node(hwnd, (size_t)wp);
 
     case APR_CANVAS_WM_SET_GRAPH:
         apr_canvas_set_graph(hwnd, (AprGraph *)lp);

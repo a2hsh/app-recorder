@@ -77,6 +77,9 @@ static void none_destroy(void *state)
     free(state);
 }
 
+/* It writes no file, encodes nothing and has no numbers to refuse, so it has
+ * no check_config and the field is left off entirely -- which is exactly what
+ * "NULL means nothing to ask" is for (action.h). */
 static const AprActionVTable apr_action_none = {
     "none", APR_S_ACTION_NAME_NONE, L"",
     none_create, none_on_audio, none_finalize, none_destroy
@@ -121,18 +124,51 @@ const AprActionVTable *apr_action_at(size_t index)
     return index < apr_action_count() ? g_actions[index] : NULL;
 }
 
+/* ASCII lower-case, hand-written rather than tolower(): an id is ASCII by
+ * definition and the CRT's locale must not get a vote in whether "WAV" and
+ * "wav" are the same format. */
+static int id_eq_nocase(const char *a, const char *b)
+{
+    for (; *a && *b; a++, b++) {
+        char x = (*a >= 'A' && *a <= 'Z') ? (char)(*a + 32) : *a;
+        char y = (*b >= 'A' && *b <= 'Z') ? (char)(*b + 32) : *b;
+        if (x != y) return 0;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
 /* Matched on `id`, which is what a session file stores. Never on the display
  * name, which is prose, is not even a string here any more (it is an AprStrId)
- * and changes with the interface language. */
+ * and changes with the interface language.
+ *
+ * CASE-INSENSITIVELY, and that was a fix rather than a nicety: `--out x.WAV`
+ * resolved -- the extension pass has always been case-insensitive -- while
+ * `--format WAV` was refused as "a format this build cannot write", which is
+ * a sentence that is simply untrue. An id is a stable ASCII token; its CASE
+ * was never part of the contract, only its spelling. Callers should still
+ * store the vtable's own `id`, which is the canonical one. */
 const AprActionVTable *apr_action_find(const char *id)
 {
     size_t i, n = apr_action_count();
 
     if (!id) return NULL;
     for (i = 0; i < n; i++) {
-        if (g_actions[i] && g_actions[i]->id && strcmp(g_actions[i]->id, id) == 0) {
+        if (g_actions[i] && g_actions[i]->id &&
+            id_eq_nocase(g_actions[i]->id, id)) {
             return g_actions[i];
         }
     }
     return NULL;
+}
+
+/* The registry's side of the optional hook (action.h). One place decides what
+ * "no hook" means, so no caller has to test the pointer and none can forget
+ * to. */
+AprErr apr_action_check_config(const AprActionVTable *vt,
+                               const AprActionConfig *cfg)
+{
+    if (!vt)  return APR_ERR(APR_E_INVALID_ARG, L"no action to ask");
+    if (!cfg) return APR_ERR(APR_E_INVALID_ARG, L"no configuration to check");
+    if (!vt->check_config) return apr_ok();
+    return vt->check_config(cfg);
 }

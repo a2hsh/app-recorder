@@ -87,6 +87,7 @@
  */
 #include "action.h"
 #include "log.h"
+#include "outpath.h"
 #include "ringbuf.h"
 
 #include <windows.h>
@@ -550,23 +551,20 @@ static void wav_free(WavAction *st)
 
 /* --- vtable --------------------------------------------------------------- */
 
-static AprErr wav_create(const AprActionConfig *cfg, void **out_state)
+/* WHAT THIS FORMAT CAN BE ASKED FOR, in one place, asked twice: once by a
+ * front end before a recording starts, and once by create() below.
+ *
+ * `out_path` is deliberately not looked at -- writability is outpath.c's
+ * question and has its own answer at its own moment.
+ *
+ * bitrate_kbps and quality are lossy-codec knobs; float32 WAV has neither a
+ * bitrate to choose nor a quality to trade. Ignored, not rejected: a session
+ * file that carries them for every action must still load. */
+static AprErr wav_check_config(const AprActionConfig *cfg)
 {
-    WavAction    *st;
-    unsigned char hdr[WAV_HEADER_BYTES];
-    uint64_t      ring_frames, ring_bytes;
-    uint32_t      block_align;
-    size_t        path_cch, chunk;
-    AprErr        e;
+    uint32_t block_align;
 
-    if (!out_state) {
-        return APR_ERR(APR_E_INVALID_ARG, L"wav: no out_state");
-    }
-    *out_state = NULL;
-
-    if (!cfg || !cfg->out_path || !cfg->out_path[0]) {
-        return APR_ERR(APR_E_INVALID_ARG, L"wav: no output path");
-    }
+    if (!cfg) return APR_ERR(APR_E_INVALID_ARG, L"wav: no configuration");
     if (cfg->sample_rate == 0) {
         return APR_ERR(APR_E_INVALID_ARG, L"wav: sample rate is zero");
     }
@@ -588,10 +586,33 @@ static AprErr wav_create(const AprActionConfig *cfg, void **out_state)
                        L"wav: %u Hz x %u channels exceeds the 32-bit byte rate",
                        (unsigned)cfg->sample_rate, (unsigned)cfg->channels);
     }
+    return apr_ok();
+}
 
-    /* bitrate_kbps and quality are lossy-codec knobs; float32 WAV has neither
-     * a bitrate to choose nor a quality to trade. Ignored, not rejected: a
-     * session file that carries them for every action must still load. */
+static AprErr wav_create(const AprActionConfig *cfg, void **out_state)
+{
+    WavAction    *st;
+    unsigned char hdr[WAV_HEADER_BYTES];
+    uint64_t      ring_frames, ring_bytes;
+    uint32_t      block_align;
+    size_t        path_cch, chunk;
+    AprErr        e;
+
+    if (!out_state) {
+        return APR_ERR(APR_E_INVALID_ARG, L"wav: no out_state");
+    }
+    *out_state = NULL;
+
+    if (!cfg || !cfg->out_path || !cfg->out_path[0]) {
+        return APR_ERR(APR_E_INVALID_ARG, L"wav: no output path");
+    }
+    /* THE SAME FUNCTION A FRONT END ASKS BEFORE ANY OF THIS (action.h). Not a
+     * second copy of the limits: a copy that drifted would put the refusal
+     * back inside the recording, which is what it is here to prevent. */
+    e = wav_check_config(cfg);
+    if (apr_failed(&e)) return e;
+
+    block_align = (uint32_t)cfg->channels * WAV_BYTES_PER_SAMPLE;
 
     st = (WavAction *)calloc(1, sizeof *st);
     if (!st) return APR_ERR(APR_E_NO_MEMORY, L"wav: state");
@@ -602,10 +623,11 @@ static AprErr wav_create(const AprActionConfig *cfg, void **out_state)
     st->frame_bytes = block_align;
     st->patch_interval = (uint64_t)cfg->sample_rate * block_align;   /* ~1 s */
 
-    path_cch = wcslen(cfg->out_path) + 1;
+    /* +8: room for the "-9999" that a lost create race appends (outpath.h). */
+    path_cch = wcslen(cfg->out_path) + 8;
     st->path = (wchar_t *)malloc(path_cch * sizeof(wchar_t));
     if (!st->path) { wav_free(st); return APR_ERR(APR_E_NO_MEMORY, L"wav: path"); }
-    memcpy(st->path, cfg->out_path, path_cch * sizeof(wchar_t));
+    wcscpy_s(st->path, path_cch, cfg->out_path);
 
     /* Staging and silence buffers: one disk write each. */
     chunk = WAV_CHUNK_TARGET_BYTES / block_align;
@@ -634,12 +656,28 @@ static AprErr wav_create(const AprActionConfig *cfg, void **out_state)
     /* FILE_SHARE_READ so the recording can be inspected (or streamed) while
      * it is being written -- the periodic header rewrite is what makes that
      * worth allowing. */
-    st->file = CreateFileW(st->path, GENERIC_WRITE, FILE_SHARE_READ, NULL,
-                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (st->file == INVALID_HANDLE_VALUE) {
-        AprErr open_err = APR_ERR_LAST(L"creating \"%ls\"", st->path);
-        wav_free(st);
-        return open_err;
+    {
+        /* CREATE_NEW, THROUGH outpath.c, NEVER CreateFileW HERE.
+         *
+         * The name arrives already resolved against the directory, but "it
+         * did not exist a moment ago" is not the same claim as "this process
+         * made it": two apprecorders started in the same second by two
+         * scheduled tasks both passed that check and both truncated the same
+         * take with CREATE_ALWAYS. apr_out_open_new makes the create itself
+         * the claim and walks the "-2, -3, ..." ladder if it loses
+         * (outpath.h). */
+        wchar_t  actual[APR_OUT_PATH_CCH];
+        void    *h = NULL;
+        AprErr   oe = apr_out_open_new(st->path, actual, APR_OUT_PATH_CCH,
+                                       NULL, &h);
+        if (apr_failed(&oe)) { wav_free(st); return oe; }
+        st->file = (HANDLE)h;
+        if (wcscmp(actual, st->path) != 0) {
+            /* Lost the race. What is reported must be what was opened. */
+            APR_WARN(L"wav: \"%ls\" was claimed by another process; this take is \"%ls\"",
+                     st->path, actual);
+            if (wcslen(actual) < path_cch) wcscpy_s(st->path, path_cch, actual);
+        }
     }
 
     /* A complete header before a single frame of audio: from this moment the
@@ -705,6 +743,28 @@ static AprErr wav_on_audio(void *state, const float *pcm, size_t frames,
     return apr_ok();
 }
 
+/* A DISK THAT FELL BEHIND IS NOT A CLEAN RECORDING, and until this existed
+ * the only trace of it was a line in the log: the file was playable, the run
+ * exited 0, and nobody was told that seconds of the take are silence. The ring
+ * is four seconds deep, so reaching this means the disk stalled for longer
+ * than that -- antivirus, a sleeping drive, a network volume -- which is worth
+ * a sentence and worth an exit code.
+ *
+ * It is reported from finalize rather than from on_audio ON PURPOSE. An error
+ * out of on_audio drops the action from the bus's fan-out for the rest of the
+ * session (bus.h), which would turn a hole into a truncation. Reported here
+ * the run ends INCOMPLETE -- "recorded and playable, but something went
+ * wrong", which is exactly what happened. */
+static AprErr wav_loss(const WavAction *st)
+{
+    if (st->lost_frames == 0) return apr_ok();
+    return APR_ERR(APR_E_IO,
+                   L"wav: the disk fell behind on \"%ls\" and %llu frames are "
+                   L"silence; the file plays and stays aligned, but that much "
+                   L"audio is gone",
+                   st->path, (unsigned long long)st->lost_frames);
+}
+
 static AprErr wav_finalize(void *state)
 {
     WavAction *st = (WavAction *)state;
@@ -718,7 +778,7 @@ static AprErr wav_finalize(void *state)
     /* Idempotent, and it keeps returning the same verdict: finalize is called
      * from several exit paths and none of them should have to remember
      * whether another already ran. */
-    return st->failed ? st->io_err : apr_ok();
+    return st->failed ? st->io_err : wav_loss(st);
 }
 
 static void wav_destroy(void *state)
@@ -745,5 +805,6 @@ const AprActionVTable apr_action_wav = {
     wav_create,
     wav_on_audio,
     wav_finalize,
-    wav_destroy
+    wav_destroy,
+    wav_check_config
 };

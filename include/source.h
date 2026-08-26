@@ -85,8 +85,36 @@ typedef struct AprSourceReader AprSourceReader;
 AprErr apr_source_create(AprSourceId id, const wchar_t *name,
                          const AprCaptureConfig *cfg, AprSource **out);
 
-/* Stops the capture, releases the ring. Every reader must be closed first. */
-void apr_source_destroy(AprSource *s);
+/* Stops the capture, releases the ring. Every reader must be closed first.
+ *
+ * ===========================================================================
+ * IT CAN FAIL, AND WHEN IT DOES NOTHING AT ALL IS FREED.
+ *
+ *   apr_ok()  -- the capture is retired, the ring is gone, `s` is gone.
+ *
+ *   failure   -- the capture could not be retired inside its bounded join: a
+ *                pump wedged inside WASAPI is still memcpy-ing into this
+ *                source's ring. THE SOURCE, ITS RING AND ITS CAPTURE ARE ALL
+ *                DELIBERATELY LEAKED, and `s` remains a valid pointer.
+ *
+ *   This is the fix for the shape that produced four bugs (join.h): the
+ *   capture layer already detected the wedge and correctly declined to free
+ *   ITS allocation, but close() returned void, so the layer that owns the RING
+ *   never heard about it and called rb_destroy() anyway -- heap corruption
+ *   from an audio thread, minutes later, with a stack trace pointing
+ *   somewhere else.
+ *
+ *   Memory safety does not depend on the caller reading this value: the test
+ *   and the free are in this one function. The value is how a graph, a CLI or
+ *   a UI gets to SAY a source could not be retired instead of pretending it
+ *   was. A caller that ignores it leaks; it cannot corrupt.
+ *
+ *   Retrying later is legal and is how the leak is recovered when the pump
+ *   eventually unwedges: call it again with the same pointer.
+ * ===========================================================================
+ *
+ * A NULL source is apr_ok(). */
+AprErr apr_source_destroy(AprSource *s);
 
 AprErr apr_source_start(AprSource *s);
 void   apr_source_stop(AprSource *s);

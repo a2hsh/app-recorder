@@ -17,7 +17,13 @@
 #include <avrt.h>
 
 #include "wasapi_common.h"
+#include "join.h"
 #include "log.h"
+
+/* How long a close waits for the pump before concluding it is wedged inside
+ * WASAPI and abandoning it. A pump whose longest wait is 200 ms and that has
+ * not left the drain loop in 5 s is not merely slow. */
+#define APR_WASAPI_JOIN_MS 5000u
 
 /* ksmedia.h speaker positions, spelled out rather than pulled in. */
 #define APR_SPEAKER_FRONT_LEFT   0x1u
@@ -127,6 +133,59 @@ AprErr apr_wasapi_prepare(AprWasapiStream *s, IAudioClient *ac,
 }
 
 /* ---------------------------------------------------------------------------
+ * The packet timeline. See wasapi_common.h for why this is a pure function
+ * with its own tests rather than four lines inside drain().
+ * ------------------------------------------------------------------------- */
+
+uint64_t apr_wasapi_packet_start(uint64_t arrival_ticks, uint32_t frames,
+                                 uint64_t qpc_freq, uint32_t sample_rate)
+{
+    uint64_t span;
+
+    if (frames == 0 || qpc_freq == 0 || sample_rate == 0) return arrival_ticks;
+    span = apr_frames_to_ticks(frames, qpc_freq, sample_rate);
+    return span >= arrival_ticks ? 0 : arrival_ticks - span;
+}
+
+uint64_t apr_wasapi_packet_gap(AprClock *clock, uint64_t delivered,
+                               uint64_t arrival_ticks, uint32_t frames,
+                               DWORD flags)
+{
+    uint64_t start;
+    AprDrift d;
+
+    if (!clock || frames == 0) return 0;
+
+    /* When this packet's first frame was captured -- NOT when we saw it. */
+    start = apr_wasapi_packet_start(arrival_ticks, frames,
+                                    clock->qpc_freq, clock->sample_rate);
+
+    if (!apr_clock_anchored(clock)) {
+        uint64_t back;
+
+        /* A buffer with no usable timestamp must not set the anchor (design
+         * 5.2 step 4), so by the time one may, frames can already have been
+         * delivered. Walk back over them: the anchor is frame 0's capture
+         * time, not this packet's. */
+        if (flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) return 0;
+        back = apr_frames_to_ticks(delivered, clock->qpc_freq,
+                                   clock->sample_rate);
+        apr_clock_anchor(clock, back >= start ? 0 : start - back);
+        return 0;   /* nothing can be missing before frame 0 */
+    }
+
+    if (!(flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY)) return 0;
+    if (flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR)       return 0;
+
+    /* `delivered` counts everything up to but NOT including this packet, and
+     * `start` is when this packet's first frame was captured, so the two are
+     * measured at the same instant on the same timeline. Their difference is
+     * exactly what the engine failed to hand over. */
+    d = apr_clock_drift(clock, start, delivered);
+    return d.delta_frames > 0 ? (uint64_t)d.delta_frames : 0;
+}
+
+/* ---------------------------------------------------------------------------
  * The pump
  * ------------------------------------------------------------------------- */
 
@@ -167,7 +226,7 @@ static int drain(AprWasapiStream *s)
         UINT32 frames = 0;
         DWORD  flags  = 0;
         UINT64 devpos = 0, qpcpos = 0;  /* both deliberately ignored, see below */
-        uint64_t now;
+        uint64_t now, fill;
 
         hr = IAudioCaptureClient_GetBuffer(s->cc, &data, &frames, &flags,
                                            &devpos, &qpcpos);
@@ -184,46 +243,46 @@ static int drain(AprWasapiStream *s)
          * QPC read here, at arrival, is the only honest timestamp available. */
         now = apr_qpc_now();
 
-        if (frames > 0 && !apr_clock_anchored(&s->clock) &&
-            !(flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR))
-        {
-            apr_clock_anchor(&s->clock, now);
-            s->st->anchor_ticks = (LONG64)now;
-        }
+        /* Anchoring and gap measurement, in one place and on one timeline:
+         * the capture time of this packet's FIRST frame, which is `now` less
+         * the packet's own span. Reading the anchor off arrival instead put
+         * every source one packet late and made the two numbers below
+         * disagree whenever packet sizes differed. */
+        fill = apr_wasapi_packet_gap(&s->clock, s->frames, now, frames, flags);
+        if (apr_clock_anchored(&s->clock) && s->st->anchor_ticks == 0)
+            s->st->anchor_ticks = (LONG64)s->clock.anchor_ticks;
 
         if (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) {
             s->discont++;
             s->st->discontinuities = (LONG64)s->discont;
 
-            if (s->device_mode) {
-                /* Design 5.2 step 4: a real gap on a device capture. Everything
-                 * QPC says should have arrived and did not is filled with
-                 * silence, so the timeline stays sample-accurate and the core
-                 * resampler only has to deal with steady drift. */
-                if (apr_clock_anchored(&s->clock) &&
-                    !(flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR))
-                {
-                    AprDrift d = apr_clock_drift(&s->clock, now, s->frames);
-                    if (d.delta_frames > 0) {
-                        uint64_t fill = (uint64_t)d.delta_frames;
-                        uint64_t cap  = (uint64_t)rb_capacity_frames(s->rb);
-                        if (fill > cap) fill = cap;
-                        rb_write_silence(s->rb, (size_t)fill);
-                        s->frames += fill;
-                        s->st->frames_written = (LONG64)s->frames;
-                        APR_WARN(L"device gap: filled %llu frames of silence",
-                                 (unsigned long long)fill);
-                    }
-                } else {
-                    APR_WARN(L"device discontinuity with no usable timestamp; "
-                             L"not filling");
-                }
-            } else {
-                /* The spike saw this exactly never in ~190 s. If it ever fires
-                 * on a process tap, design 5.1 needs revisiting -- say so. */
-                APR_WARN(L"DATA_DISCONTINUITY on a process tap: design 5.1 says "
-                         L"this cannot happen");
+            if (!s->device_mode) {
+                /* The spike saw this exactly never in ~190 s of process
+                 * loopback, and design 5.1 says it cannot happen. It is still
+                 * filled -- see apr_wasapi_packet_gap: "arrives perfect" is a
+                 * measurement of an engine keeping up, not a promise about one
+                 * that has just reported dropping audio, and a process tap is
+                 * the REFERENCE timeline, so a silent shear there desyncs
+                 * every bus that reads it against every bus that does not. */
+                APR_WARN(L"DATA_DISCONTINUITY on a process tap: design 5.1 "
+                         L"says this cannot happen; filling %llu frames to "
+                         L"keep the reference timeline aligned",
+                         (unsigned long long)fill);
             }
+            if (fill == 0) {
+                APR_WARN(L"discontinuity with no usable timestamp or no "
+                         L"measurable gap; not filling");
+            }
+        }
+
+        if (fill > 0) {
+            uint64_t cap = (uint64_t)rb_capacity_frames(s->rb);
+            if (fill > cap) fill = cap;
+            rb_write_silence(s->rb, (size_t)fill);
+            s->frames += fill;
+            s->st->frames_written = (LONG64)s->frames;
+            APR_WARN(L"capture gap: filled %llu frames of silence",
+                     (unsigned long long)fill);
         }
 
         if (flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) {
@@ -402,6 +461,17 @@ AprErr apr_wasapi_thread_start(AprWasapiStream *s)
     return apr_ok();
 }
 
+/* Test seam; see wasapi_common.h. A file-static rather than a stream field so
+ * that a production build's AprWasapiStream is exactly what it was. */
+static AprWasapiRaceHook g_race_hook;
+static void             *g_race_user;
+
+void apr_wasapi_test_set_race_hook(AprWasapiRaceHook hook, void *user)
+{
+    g_race_hook = hook;
+    g_race_user = user;
+}
+
 AprErr apr_wasapi_call(AprWasapiStream *s, AprWasapiJob job, void *user)
 {
     AprErr e;
@@ -415,11 +485,23 @@ AprErr apr_wasapi_call(AprWasapiStream *s, AprWasapiJob job, void *user)
         return job ? job(user) : apr_ok();
 
     /* Between start() and stop() the thread is the pump and is not reading the
-     * queue. Say so instead of blocking forever. */
-    if (InterlockedCompareExchange(&s->running, 0, 0) != 0)
-        return APR_ERR(APR_E_STATE, L"the capture thread is pumping");
+     * queue. Say so instead of blocking forever.
+     *
+     * THE TEST IS INSIDE THE LOCK, and that is the whole of it. Read outside,
+     * it was a TOCTOU against apr_wasapi_start(): both would find `running`
+     * clear, start would win the lock, post APR_WJ_RUN and turn the thread
+     * into the pump, and this call would then post a job into a queue nobody
+     * was serving and wait on it forever -- post() waits INFINITE by design,
+     * because a job that has been accepted always completes. start() raises
+     * `running` BEFORE it takes the lock, so whoever gets the lock second sees
+     * the truth. */
+    if (g_race_hook) g_race_hook(s, g_race_user);
 
     EnterCriticalSection(&s->lock);
+    if (InterlockedCompareExchange(&s->running, 0, 0) != 0) {
+        LeaveCriticalSection(&s->lock);
+        return APR_ERR(APR_E_STATE, L"the capture thread is pumping");
+    }
     s->job_fn   = job;
     s->job_user = user;
     e = post(s, APR_WJ_CALL);
@@ -450,8 +532,6 @@ AprErr apr_wasapi_start(AprWasapiStream *s)
 
 void apr_wasapi_stop(AprWasapiStream *s)
 {
-    HANDLE w[2];
-
     InterlockedExchange(&s->running, 0);
     if (s->stop_ev) SetEvent(s->stop_ev);
 
@@ -463,14 +543,15 @@ void apr_wasapi_stop(AprWasapiStream *s)
     if (GetCurrentThreadId() == s->thread_id) return;
 
     EnterCriticalSection(&s->lock);
-    w[0] = s->idle_ev;
-    w[1] = s->thread;
-    if (WaitForMultipleObjects(2, w, FALSE, 5000) == WAIT_TIMEOUT) {
+    if (apr_join_wait2(s->idle_ev, s->thread, APR_WASAPI_JOIN_MS) ==
+        APR_JOIN_ABANDONED)
+    {
         /* A pump whose longest wait is 200 ms and that has not left the drain
          * loop in 5 s is wedged inside WASAPI. Killing it mid-write would
          * corrupt the ring, so mark the stream unfreeable instead: leaking a
          * COM reference and a thread is survivable, a use-after-free under an
-         * audio thread is not. */
+         * audio thread is not. close() turns this into an AprErr the layer
+         * that owns the ring is handed -- see join.h. */
         s->pump_stuck = 1;
         APR_ERROR(L"capture pump did not exit within 5 s; leaking the "
                   L"stream rather than freeing it under a live thread");
@@ -493,11 +574,12 @@ static AprErr close_job(void *user)
     return apr_ok();
 }
 
-void apr_wasapi_close(AprWasapiStream *s, AprWasapiJob teardown, void *user)
+AprErr apr_wasapi_close(AprWasapiStream *s, AprWasapiJob teardown, void *user)
 {
     apr_wasapi_stop(s);
 
-    if (s->pump_stuck) return;   /* see apr_wasapi_stop; nothing may be freed */
+    /* see apr_wasapi_stop; nothing may be freed */
+    if (s->pump_stuck) return APR_ERR_ABANDONED(L"the capture pump");
 
     /* A capture cannot retire the thread it is running on. Nothing does this,
      * but hanging is a worse way to find out than a log line is. */
@@ -505,7 +587,9 @@ void apr_wasapi_close(AprWasapiStream *s, AprWasapiJob teardown, void *user)
         s->pump_stuck = 1;
         APR_ERROR(L"close() called from the capture's own thread; leaking the "
                   L"stream rather than joining a thread with itself");
-        return;
+        return APR_ERR(APR_E_STATE,
+                       L"close() was called from the capture's own thread; "
+                       L"the stream is leaked rather than joined with itself");
     }
 
     if (s->thread) {
@@ -519,11 +603,11 @@ void apr_wasapi_close(AprWasapiStream *s, AprWasapiJob teardown, void *user)
         (void)post(s, APR_WJ_QUIT);
         LeaveCriticalSection(&s->lock);
 
-        if (WaitForSingleObject(s->thread, 5000) != WAIT_OBJECT_0) {
+        if (apr_join_wait(s->thread, APR_WASAPI_JOIN_MS) == APR_JOIN_ABANDONED) {
             s->pump_stuck = 1;
             APR_ERROR(L"capture thread did not exit within 5 s; leaking the "
                       L"stream rather than freeing it under a live thread");
-            return;
+            return APR_ERR_ABANDONED(L"the capture thread");
         }
         close_handle(&s->thread);
         s->thread_id = 0;
@@ -542,4 +626,5 @@ void apr_wasapi_close(AprWasapiStream *s, AprWasapiJob teardown, void *user)
     close_handle(&s->job_ev);
     close_handle(&s->done_ev);
     close_handle(&s->idle_ev);
+    return apr_ok();
 }

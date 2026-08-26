@@ -160,8 +160,31 @@ int apr_controller_command(AprController *c, int command_id);
  * window is not in front, 1 it is. */
 void apr_controller_test_set_foreground(AprController *c, int state);
 
+/* TEST ONLY. How long "stop recording and close" waits for the encoders before
+ * it gives up. -1 restores the real thirty seconds.
+ *
+ * The give-up path is otherwise thirty seconds of stalled disk away, and what
+ * it SAYS is the thing worth asserting: it used to replay "the window will
+ * close once the files are written" and then never close, which is
+ * indistinguishable from a hung application. */
+void apr_controller_test_set_close_wait_ms(AprController *c, int ms);
+
 size_t apr_controller_last_announcement(const AprController *c,
                                         wchar_t *buf, size_t cch);
+
+/* TEST ONLY. The last sentence sent to the notification area, and how many
+ * have been sent.
+ *
+ * "It went out on the channel that can actually reach the user" is the whole
+ * of the tray contract, and it was otherwise unassertable: the events that
+ * matter most happen while the window is HIDDEN, and every test runs with
+ * APPRECORDER_NO_TRAY set (AGENTS.md rule 1) so there is no shell icon to
+ * watch. The count is the other half -- a balloon raised while the window is
+ * in FRONT is a duplicate a screen reader reads twice, and that has to be
+ * assertable too. */
+size_t apr_controller_last_balloon(const AprController *c,
+                                   wchar_t *buf, size_t cch);
+unsigned apr_controller_balloon_count(const AprController *c);
 
 /* ---------------------------------------------------------------------------
  * Pure

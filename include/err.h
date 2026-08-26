@@ -47,7 +47,15 @@ typedef enum AprErrKind {
     APR_E_UNSUPPORTED,   /* well-formed request this build cannot serve */
     APR_E_TIMEOUT,       /* waited long enough */
     APR_E_OVERRUN,       /* a consumer fell behind and data was dropped */
-    APR_E_IO             /* file or stream failure with no better code */
+    APR_E_IO,            /* file or stream failure with no better code */
+
+    /* Right call, wrong moment, AND THE MOMENT WILL PASS. Distinct from
+     * APR_E_STATE because a caller answers it differently: APR_E_STATE is a
+     * programming error to report, APR_E_BUSY is "not while a recording is
+     * running", which has its own sentence in the catalog and is the honest
+     * answer to a keystroke rather than a failure. Appended at the end of the
+     * enum on purpose -- every value above it is unchanged. */
+    APR_E_BUSY
 } AprErrKind;
 
 typedef struct AprErr {

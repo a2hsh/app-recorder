@@ -52,10 +52,17 @@
 #include "capture_internal.h"
 #include "capture_fake.h"
 #include "clock.h"
+#include "join.h"
 #include "log.h"
 
 #define FAKE_CHUNK_FRAMES 512u
 #define FAKE_PACE_MS        5u
+
+/* Bounded, like every other capture's join. Short because the pacing thread
+ * never blocks on anything but its own sleep: if it has not left in 250 ms it
+ * is not going to, and a test proving the abandonment path should not take
+ * five seconds to do it. */
+#define FAKE_JOIN_MS      250u
 
 typedef struct FakeImpl {
     AprCapStatus st;
@@ -90,6 +97,10 @@ typedef struct FakeImpl {
     DWORD    thread_id;
     volatile LONG running;
     int      ever_started;   /* driven mode is refused once this is set */
+
+    /* Test seam (capture_fake.h): behave like a pump wedged inside WASAPI --
+     * refuse to stop, refuse to be retired, keep writing into the ring. */
+    volatile LONG wedged;
 } FakeImpl;
 
 /* ---------------------------------------------------------------------------
@@ -241,6 +252,14 @@ static DWORD WINAPI fake_thread(LPVOID param)
     FakeImpl *f = (FakeImpl *)param;
     for (;;) {
         advance_locked(f, apr_qpc_now());
+        if (InterlockedCompareExchange(&f->wedged, 0, 0) != 0) {
+            /* stop_ev is deliberately ignored, which is what a pump stuck
+             * inside GetBuffer looks like from the outside: still running,
+             * still writing into a ring somebody upstairs is about to decide
+             * it may free. */
+            Sleep(FAKE_PACE_MS);
+            continue;
+        }
         if (WaitForSingleObject(f->stop_ev, FAKE_PACE_MS) == WAIT_OBJECT_0) break;
     }
     advance_locked(f, apr_qpc_now());
@@ -367,6 +386,11 @@ static void fake_stop(AprCapture *c)
 
     if (GetCurrentThreadId() == f->thread_id) return;
 
+    /* Wedged (test seam): the thread is ignoring stop_ev, so an INFINITE wait
+     * here would hang the caller instead of reaching the bounded join in
+     * fake_close. Leave the handle in place for close to judge. */
+    if (InterlockedCompareExchange(&f->wedged, 0, 0) != 0) return;
+
     th = InterlockedExchangePointer((PVOID volatile *)&f->thread, NULL);
     if (th) {
         WaitForSingleObject(th, INFINITE);   /* it only ever sleeps; it will exit */
@@ -383,12 +407,24 @@ static void fake_status(const AprCapture *c, AprCaptureStatus *out)
     apr_capstat_read(&f->st, out);
 }
 
-static void fake_close(AprCapture *c)
+static AprErr fake_close(AprCapture *c)
 {
     FakeImpl *f = (FakeImpl *)c->impl;
-    if (!f) return;
+    if (!f) return apr_ok();
 
     fake_stop(c);
+
+    /* The same bounded join every real capture makes, and the same answer when
+     * it fails: the thread is still writing into the caller's ring, so nothing
+     * -- not the ring, not this struct -- may be freed. c->impl is left set so
+     * a later close can retry once the thread does leave. */
+    if (f->thread) {
+        if (apr_join_wait(f->thread, FAKE_JOIN_MS) == APR_JOIN_ABANDONED)
+            return APR_ERR_ABANDONED(L"the fake source's pacing thread");
+        CloseHandle(f->thread);
+        f->thread    = NULL;
+        f->thread_id = 0;
+    }
 
     if (f->stop_ev) { CloseHandle(f->stop_ev); f->stop_ev = NULL; }
     free(f->period);
@@ -396,6 +432,7 @@ static void fake_close(AprCapture *c)
 
     c->impl = NULL;
     free(f);
+    return apr_ok();
 }
 
 static const AprCaptureVTable g_fake_vtable = {
@@ -444,4 +481,25 @@ uint64_t apr_capture_fake_tick_rate(const AprCapture *c)
 {
     const FakeImpl *f = as_fake(c);
     return f ? f->tick_rate : 0;
+}
+
+AprErr apr_capture_fake_wedge(AprCapture *c)
+{
+    FakeImpl *f = as_fake(c);
+    if (!f) return APR_ERR(APR_E_INVALID_ARG, L"not an open fake source");
+    if (!f->thread)
+        return APR_ERR(APR_E_STATE,
+                       L"this fake source has no pacing thread to wedge; "
+                       L"start() it first");
+    InterlockedExchange(&f->wedged, 1);
+    return apr_ok();
+}
+
+AprErr apr_capture_fake_unwedge(AprCapture *c)
+{
+    FakeImpl *f = as_fake(c);
+    if (!f) return APR_ERR(APR_E_INVALID_ARG, L"not an open fake source");
+    InterlockedExchange(&f->wedged, 0);
+    if (f->stop_ev) SetEvent(f->stop_ev);
+    return apr_ok();
 }

@@ -883,7 +883,9 @@ TEST(an_overrun_becomes_silence_so_the_timeline_survives)
     e = apr_action_mp3.finalize(st);
     apr_mp3_test_write_gate = NULL;
     CloseHandle(gate);
-    ASSERT_FALSE(apr_failed(&e));
+    /* AND FINALIZE SAYS SO -- see the WAV suite for why it is reported here
+     * and not out of on_audio. */
+    ASSERT_TRUE(apr_failed(&e));
     apr_action_mp3.destroy(st);
 
     tp_decode_file(path, &dec);

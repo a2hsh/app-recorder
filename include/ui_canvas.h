@@ -251,6 +251,24 @@ void apr_canvas_set_announce(HWND canvas, AprCanvasAnnounceFn fn, void *user);
 /* The most recent announcement, or an empty string. Returns its length. */
 size_t apr_canvas_last_announcement(HWND canvas, wchar_t *buf, size_t cch);
 
+/* "I changed the model." Raised AFTER an edit has completed and this canvas
+ * has already rewritten its own names, descriptions and node windows -- never
+ * from inside one.
+ *
+ * WHY IT EXISTS: the canvas owns keys the frame's accelerator table does not
+ * claim (Ctrl+Shift+E disconnects, plus and minus change a level) and it
+ * completes a connection on a mouse click. Every one of those edits the graph
+ * without any WM_COMMAND reaching the controller, so the OTHER view -- the
+ * tree panel -- had no way to hear about it and went on describing edges that
+ * no longer existed.
+ *
+ * THE LISTENER MUST NOT REBUILD THIS CANVAS. The canvas has already re-synced
+ * itself; destroying its node windows from here would pull them out from under
+ * the operation that is about to put focus on one. Refresh the other views. */
+typedef void (*AprCanvasEditFn)(void *user);
+
+void apr_canvas_set_edit_sink(HWND canvas, AprCanvasEditFn fn, void *user);
+
 /* Adopt a model. Borrowed, not owned; pass NULL to show an empty canvas.
  * Rebuilds the node windows immediately. */
 void apr_canvas_set_graph(HWND canvas, AprGraph *g);
@@ -270,6 +288,23 @@ HWND   apr_canvas_node_at(HWND canvas, size_t index);
 /* The node that has focus, or the one that would take it. NULL when empty. */
 HWND apr_canvas_focused_node(HWND canvas);
 int  apr_canvas_focus_node(HWND canvas, size_t index);
+
+/* AGREE WITH THE OTHER VIEW WITHOUT STEALING THE KEYBOARD.
+ *
+ * Move the canvas's idea of "the current node" to `index`, scroll it into
+ * view, repaint -- and DO NOT call SetFocus unless this pane already had it.
+ *
+ * This exists because the tree panel emits a selection on EVERY caret move,
+ * and answering that with a focus change made the Structure panel unusable:
+ * press Down in the tree, focus was yanked onto a canvas node, the reader
+ * announced the canvas instead of the row, and the next Down drove the canvas.
+ * Every row past the first was unreachable.
+ *
+ * Focus follows only a real ACTIVATION -- Enter, or a double click -- which is
+ * what apr_tree_panel_set_activate_sink reports separately. Because focus
+ * arriving at this pane later lands on `cur`, setting it here is also what
+ * makes F6 from the tree land on the row the user was standing on. */
+int apr_canvas_set_current_node(HWND canvas, size_t index);
 
 /* Perform `op`. Returns nonzero when it was handled -- including when it was
  * handled by refusing and saying why, which is the interesting case. */
@@ -318,5 +353,12 @@ HWND apr_canvas_pending_node(HWND canvas);
 #define APR_CANVAS_WM_PERFORM    (WM_APP + 0x10)  /* wParam: AprCanvasOp     */
 #define APR_CANVAS_WM_FOCUS_NODE (WM_APP + 0x11)  /* wParam: node index      */
 #define APR_CANVAS_WM_SET_GRAPH  (WM_APP + 0x12)  /* lParam: AprGraph *      */
+#define APR_CANVAS_WM_SET_CUR    (WM_APP + 0x13)  /* wParam: node index      */
+
+/* Private, and posted to ourselves rather than acted on directly: SetFocus
+ * called from inside WM_SETFOCUS is SWALLOWED -- the outer SetFocus reasserts
+ * its own target as it unwinds (design 6.3). The frame does the same thing
+ * with its own private message. */
+#define APR_CANVAS_WM_ENTER_PANE (WM_APP + 0x14)
 
 #endif /* APPRECORDER_UI_CANVAS_H */

@@ -586,7 +586,13 @@ TEST(an_overrun_becomes_silence_so_the_timeline_survives)
     e = apr_action_wav.finalize(st);
     apr_wav_test_write_gate = NULL;
     CloseHandle(gate);
-    ASSERT_FALSE(apr_failed(&e));
+    /* AND FINALIZE SAYS SO. The file is playable and still aligned, but
+     * seconds of it are silence that used to leave no trace anywhere except a
+     * log line -- the run exited 0 and nobody was told. finalize is where it
+     * is reported, not on_audio: an error out of on_audio would drop this
+     * output from the bus for the rest of the session and turn a hole into a
+     * truncation. */
+    ASSERT_TRUE(apr_failed(&e));
     apr_action_wav.destroy(st);
 
     file = slurp(path, &len);
@@ -878,4 +884,59 @@ TEST(an_unopenable_path_is_reported_not_crashed)
     e = apr_action_wav.create(&cfg, &st);
     ASSERT_TRUE(apr_failed(&e));
     ASSERT_NULL(st);
+}
+
+/* ========================================================================
+ * The name is claimed by the create, not by a check that preceded it (M13)
+ * ====================================================================== */
+
+/* A bus resolves the name against the directory and then hands it here, and
+ * "it did not exist a moment ago" is not the same claim as "this process made
+ * it". Two apprecorders started in the same second by two scheduled tasks with
+ * the same template both passed that check, and CREATE_ALWAYS then let both of
+ * them truncate the same take and interleave their writes.
+ *
+ * The action opens with CREATE_NEW now and walks the collision ladder if it
+ * loses. This case IS the race: the file is already there when create() runs,
+ * exactly as it would be if the other process had won by a microsecond. */
+TEST(a_take_already_on_disk_is_never_truncated_by_the_next_create)
+{
+    wchar_t path[MAX_PATH], moved[MAX_PATH];
+    AprActionConfig cfg;
+    void   *st = NULL;
+    HANDLE  h;
+    DWORD   wrote = 0;
+    size_t  len;
+    AprErr  e;
+
+    tmp_path(path, MAX_PATH, L"claimed");
+
+    /* Somebody else got the name first, and put a byte in it. */
+    h = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_NEW,
+                    FILE_ATTRIBUTE_NORMAL, NULL);
+    ASSERT_TRUE(h != INVALID_HANDLE_VALUE);
+    ASSERT_TRUE(WriteFile(h, "not ours", 8, &wrote, NULL) != 0);
+    CloseHandle(h);
+
+    cfg = cfg_of(path, 48000, 2);
+    e = apr_action_wav.create(&cfg, &st);
+    ASSERT_FALSE(apr_failed(&e));
+    ASSERT_NOT_NULL(st);
+    e = apr_action_wav.finalize(st);
+    ASSERT_FALSE(apr_failed(&e));
+    apr_action_wav.destroy(st);
+
+    /* THE PROPERTY: the eight bytes that were there are still there. Before
+     * this fix they were a WAV header. */
+    ASSERT_EQ_U64(8, file_size(path));
+
+    /* And this recording went to the next name down the ladder, where it is a
+     * complete empty WAV rather than nothing at all. */
+    len = wcslen(path);
+    wcscpy_s(moved, MAX_PATH, path);
+    wcscpy_s(moved + len - 4, MAX_PATH - (len - 4), L"-2.wav");
+    ASSERT_EQ_U64(WAV_HDR_BYTES, file_size(moved));
+
+    DeleteFileW(path);
+    DeleteFileW(moved);
 }

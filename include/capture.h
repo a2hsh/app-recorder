@@ -22,7 +22,10 @@
  *   A capture owns a thread, so it owns its apartment as well: WASAPI process
  *   loopback requires the MTA (design 4.1 note 7), so the implementation makes
  *   one on its own thread and performs every COM call there -- activation,
- *   IAudioClient setup, the pump, the mute poll, and every Release.
+ *   IAudioClient setup, the pump, and every Release. (A process tap owns a
+ *   SECOND such thread for its mute poll, which is an unbounded cross-process
+ *   RPC and must not sit between two audio packets. Same promise: the caller's
+ *   apartment is still nobody's business but the capture's.)
  *
  *   THIS IS A PROMISE, NOT AN IMPLEMENTATION DETAIL, and it was learned the
  *   hard way. An earlier version called CoInitializeEx(MTA) on the caller's
@@ -121,7 +124,13 @@ typedef struct AprCaptureStatus {
     uint64_t anchor_ticks;
 
     uint64_t frames_written;
-    uint64_t discontinuities;   /* device sources only; process taps never gap */
+    /* Gaps the ENGINE reported (AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY).
+     * Overwhelmingly a device thing -- a process tap was measured never to
+     * raise one in ~190 s (design 5.1) -- but not "device sources only": if
+     * the engine says it dropped audio on a process tap, that is counted here
+     * and filled, because a silent shear on the reference timeline is the one
+     * failure the clock design exists to prevent. */
+    uint64_t discontinuities;
 
     /* 0 once the source is known dead. Process loopback keeps emitting silence
      * forever after the target exits and WASAPI never reports it, so process
@@ -151,16 +160,26 @@ typedef struct AprCaptureVTable {
     /* Hands the capture thread to the pump. Frames begin arriving in rb. */
     AprErr (*start)(AprCapture *c);
 
-    /* Idempotent. Returns once the pump has stopped. Safe to call from any
-     * thread, including from inside the capture's own callbacks. */
+    /* Idempotent. Returns once the pump has stopped, or once the bounded wait
+     * for it gave up. Safe to call from any thread, including from inside the
+     * capture's own callbacks.
+     *
+     * Deliberately still void: stop() frees nothing, so a wedged pump has
+     * nothing to warn this caller about that close() will not say again, at
+     * the one place where it matters. */
     void (*stop)(AprCapture *c);
 
     /* Never blocks and never allocates -- safe on a mixer tick. */
     void (*status)(const AprCapture *c, AprCaptureStatus *out);
 
     /* Implies stop(), then retires the capture thread. Does not free the
-     * RingBuf. Need not be called from the thread that called open(). */
-    void (*close)(AprCapture *c);
+     * RingBuf. Need not be called from the thread that called open().
+     *
+     * RETURNS apr_ok() ONLY WHEN THE CAPTURE IS FULLY RETIRED -- when every
+     * thread it owns has exited and the caller may now free the ring buffer
+     * it lent us. See the abandonment note on apr_capture_destroy below; this
+     * return value is the whole reason that note can be honoured. */
+    AprErr (*close)(AprCapture *c);
 } AprCaptureVTable;
 
 struct AprCapture {
@@ -169,11 +188,49 @@ struct AprCapture {
 };
 
 /* Builds the right implementation for cfg->kind. The only place in the codebase
- * permitted to switch on AprSourceKind. */
+ * permitted to switch on AprSourceKind.
+ *
+ * ON FAILURE `*out` IS NORMALLY NULL -- AND IS NOT ALWAYS. A capture that
+ * fails to open has already created its own thread (the WASAPI kinds make it
+ * before they touch COM), so retiring that half-open capture is a join like
+ * any other and can be abandoned like any other. In that one case `*out` is
+ * left holding the abandoned capture even though the call failed, because a
+ * non-NULL pointer here is how the caller learns THE RING IT LENT US IS STILL
+ * BEING WRITTEN INTO and must not be freed. Check `*out`, not just the error:
+ *
+ *     e = apr_capture_create(cfg, rb, &cap);
+ *     if (apr_failed(&e)) { if (!cap) rb_destroy(rb); return e; }
+ *
+ * Retrying apr_capture_destroy on that pointer later is how the leak is
+ * recovered if the wedged thread ever unwedges. */
 AprErr apr_capture_create(const AprCaptureConfig *cfg, RingBuf *rb,
                           AprCapture **out);
 
-void apr_capture_destroy(AprCapture *c);
+/* Closes the capture and frees it.
+ *
+ * ===========================================================================
+ * IT CAN FAIL, AND THE CALLER OWNS A RING BUFFER THAT DEPENDS ON THE ANSWER.
+ *
+ *   apr_ok()  -- every thread this capture owned has exited. Nothing is left
+ *                running, and the RingBuf passed to open() may now be freed.
+ *
+ *   failure   -- a bounded wait for one of those threads timed out (a pump
+ *                wedged inside WASAPI is the case this exists for; see
+ *                join.h). NOTHING WAS FREED: not the implementation, not the
+ *                AprCapture, and above all NOT the caller's ring, which that
+ *                thread may still be memcpy-ing into. Leaking a thread, a COM
+ *                reference and 96 KB is survivable; a use-after-free from an
+ *                audio thread is heap corruption whose stack trace points
+ *                somewhere else entirely.
+ *
+ *   Freeing the ring after a failure here is the bug this signature exists to
+ *   make impossible to write by accident. apr_source_destroy() reads it and
+ *   leaks in step; a front end that only wants to report may ignore it and
+ *   leak, but cannot corrupt.
+ * ===========================================================================
+ *
+ * A NULL capture is apr_ok() -- there was nothing to retire. */
+AprErr apr_capture_destroy(AprCapture *c);
 
 #ifdef __cplusplus
 }

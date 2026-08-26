@@ -27,8 +27,16 @@
 
 #include "action.h"
 #include "clock.h"
+#include "join.h"
 #include "log.h"
 #include "strings.h"
+
+/* How long apr_runner_destroy waits for a SYNCHRONOUS run to finish before it
+ * concludes the loop is stuck and abandons the runner rather than freeing it
+ * under a live thread (join.h). Generous on purpose: the tail of a normal run
+ * is one lookbehind block plus every action's finalize, and finalize is
+ * allowed to touch the disk. */
+#define APR_RUNNER_DESTROY_JOIN_MS 30000u
 
 /* --------------------------------------------------------------------------
  * State
@@ -68,6 +76,16 @@ struct AprRunner {
     HANDLE stop_event;        /* the one actually waited on */
     int    stop_event_owned;
     HANDLE finished_event;    /* manual reset, set once files are closed */
+
+    /* Set as the LAST act of apr_runner_run(), which is later than
+     * finished_event: that one means "the files are closed", and the loop
+     * still touches this struct after it (the STOPPED notice). Destroy has to
+     * wait for the loop to be out of the struct, not merely out of the files,
+     * and for a SYNCHRONOUS run there is no thread handle to wait on instead.
+     * Manual reset. */
+    HANDLE loop_left;
+    volatile LONG in_run;     /* 1 while apr_runner_run() is on the stack */
+
     HANDLE thread;
 
     volatile LONG   stop_requested;
@@ -254,6 +272,8 @@ AprErr apr_runner_run(AprRunner *r)
     }
 
     ResetEvent(r->finished_event);
+    ResetEvent(r->loop_left);
+    InterlockedExchange(&r->in_run, 1);
     freq = apr_qpc_freq();
 
     e = apr_graph_start(r->graph, apr_qpc_now());
@@ -321,6 +341,12 @@ AprErr apr_runner_run(AprRunner *r)
     SetEvent(r->finished_event);
 
     notice(r, APR_RUN_EV_STOPPED, SIZE_MAX, SIZE_MAX, SIZE_MAX, NULL, NULL);
+
+    /* LAST. Nothing below this line may touch `r`: a destroy waiting on
+     * loop_left is free to return the instant it is set, and freeing is
+     * exactly what it does next. */
+    InterlockedExchange(&r->in_run, 0);
+    SetEvent(r->loop_left);
     return apr_ok();
 }
 
@@ -375,7 +401,8 @@ AprErr apr_runner_create(const AprRunnerConfig *cfg, AprRunner **out)
         r->stop_event_owned = 1;
     }
     r->finished_event = CreateEventW(NULL, TRUE, FALSE, NULL);
-    if (!r->stop_event || !r->finished_event) {
+    r->loop_left      = CreateEventW(NULL, TRUE, TRUE, NULL);
+    if (!r->stop_event || !r->finished_event || !r->loop_left) {
         AprErr e = APR_ERR_LAST(L"could not create the recorder's events");
         apr_runner_destroy(r);
         return e;
@@ -406,22 +433,49 @@ AprErr apr_runner_create(const AprRunnerConfig *cfg, AprRunner **out)
     return apr_ok();
 }
 
-void apr_runner_destroy(AprRunner *r)
+AprErr apr_runner_destroy(AprRunner *r)
 {
-    if (!r) return;
+    if (!r) return apr_ok();
 
     /* NEVER abandon a running recording. An action that is not finalized is an
      * unplayable file; a slow destroy is merely slow. */
     apr_runner_request_stop(r);
+
     if (r->thread) {
+        /* The async case: we own the thread, so we can join it outright. It
+         * always ends -- the loop's longest wait is one tick. */
         WaitForSingleObject(r->thread, INFINITE);
         CloseHandle(r->thread);
         r->thread = NULL;
     }
 
+    /* THE SYNCHRONOUS CASE, which this used to miss entirely. apr_runner_run()
+     * executes on the CALLER's thread and the runner holds no handle for it,
+     * so `r->thread` above is NULL and there was nothing to wait on -- destroy
+     * fell straight through to free() while a live loop on another thread was
+     * still writing into this allocation and had not yet finalized a single
+     * file.
+     *
+     * loop_left and not finished_event: finished_event means "the files are
+     * closed", and the loop still reads `r` after setting it (the STOPPED
+     * notice). Waiting on the wrong one narrows the window instead of closing
+     * it. The bound is what stops a destroy hanging for ever on a loop that is
+     * itself stuck -- and when it fires, nothing is freed (join.h). */
+    if (load32(&r->in_run)) {
+        if (apr_join_wait(r->loop_left, APR_RUNNER_DESTROY_JOIN_MS) ==
+            APR_JOIN_ABANDONED)
+        {
+            AprErr e = APR_ERR_ABANDONED(L"the recording loop");
+            APR_LOG_ERR(APR_LOG_ERROR, &e);
+            return e;   /* free NOTHING: the loop still holds `r` */
+        }
+    }
+
     if (r->stop_event && r->stop_event_owned) CloseHandle(r->stop_event);
     if (r->finished_event) CloseHandle(r->finished_event);
+    if (r->loop_left) CloseHandle(r->loop_left);
     free(r);
+    return apr_ok();
 }
 
 /* --------------------------------------------------------------------------

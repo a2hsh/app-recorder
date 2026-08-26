@@ -257,6 +257,7 @@ const wchar_t *apr_err_kind_name(AprErrKind kind)
     case APR_E_TIMEOUT:     return L"APR_E_TIMEOUT";
     case APR_E_OVERRUN:     return L"APR_E_OVERRUN";
     case APR_E_IO:          return L"APR_E_IO";
+    case APR_E_BUSY:        return L"APR_E_BUSY";
     }
     return L"APR_E_?";
 }

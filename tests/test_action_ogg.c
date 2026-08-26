@@ -1189,7 +1189,9 @@ TEST(an_overrun_becomes_silence_so_the_timeline_survives)
     e = apr_action_ogg.finalize(st);
     apr_ogg_test_write_gate = NULL;
     CloseHandle(gate);
-    ASSERT_FALSE(apr_failed(&e));
+    /* AND FINALIZE SAYS SO -- see the WAV suite for why it is reported here
+     * and not out of on_audio. */
+    ASSERT_TRUE(apr_failed(&e));
     apr_action_ogg.destroy(st);
 
     to_decode_file(path, &dec);
@@ -1433,5 +1435,197 @@ TEST(a_disk_that_refuses_from_the_first_byte_fails_at_create)
     /* An empty file is the honest outcome; a header claiming audio it does
      * not have would not be. */
     ASSERT_EQ_U64(0, to_file_size(path));
+    DeleteFileW(path);
+}
+
+/* ========================================================================
+ * Granule positions, and the 6.5 ms that used to stay inside the encoder
+ * ====================================================================== */
+
+/* THE SHAPE OF THE BUG (M5), in two halves that hid each other.
+ *
+ * The granule position was written as `pre_skip + samples fed in`. RFC 7845
+ * defines it as the samples DECODABLE so far, and a packet decodes to exactly
+ * 960 samples, so after k packets the true number is 960k -- 312 fewer than
+ * what was written. EVERY PAGE overstated by 6.5 ms, which is a mid-stream
+ * seek landing early. A duration check cannot see that: the last page's error
+ * is often absorbed by the padding on the final frame, so the file measures
+ * 1.000 s and is still wrong all the way through.
+ *
+ * And the encoder's lookahead was never flushed, so the last 312 samples fed
+ * in were still inside libopus when the stream closed. That one shows up only
+ * when the final partial frame leaves less than 312 samples of padding to
+ * absorb it -- a remainder above 648 of 960, which is a third of all possible
+ * stop positions, and is where "roughly one stop in three" comes from.
+ *
+ * So there are two checks below, and the file needs both to be honest:
+ * granule_overstatement() for the per-page claim, and an exact frame count for
+ * the tail.
+ */
+
+/* The largest amount by which any packet's granule position exceeds what a
+ * decoder will have produced by then. Zero or less is correct; the old code
+ * returned +312 on every page. */
+static long long to_granule_overstatement(const wchar_t *path, int *out_packets)
+{
+    ogg_sync_state   oy;
+    ogg_stream_state os;
+    ogg_page         og;
+    ogg_packet       op;
+    unsigned char   *data;
+    size_t           len = 0, off = 0;
+    int              ready = 0, headers = 0, packets = 0;
+    long long        worst = -1000000;
+
+    if (out_packets) *out_packets = 0;
+    data = to_slurp(path, &len);
+    if (!data) return worst;
+
+    memset(&os, 0, sizeof os);
+    ogg_sync_init(&oy);
+    while (off < len) {
+        size_t take = len - off;
+        char  *dst;
+        if (take > 4096) take = 4096;
+        dst = ogg_sync_buffer(&oy, (long)take);
+        if (!dst) break;
+        memcpy(dst, data + off, take);
+        ogg_sync_wrote(&oy, (long)take);
+        off += take;
+
+        while (ogg_sync_pageout(&oy, &og) == 1) {
+            if (!ready) {
+                if (ogg_page_bos(&og) == 0) continue;
+                if (ogg_stream_init(&os, ogg_page_serialno(&og)) != 0) goto done;
+                ready = 1;
+            }
+            if (ogg_page_serialno(&og) != os.serialno) continue;
+            if (ogg_stream_pagein(&os, &og) != 0) continue;
+            for (;;) {
+                int r = ogg_stream_packetout(&os, &op);
+                if (r == 0) break;
+                if (r < 0) continue;
+                if (headers < 2) { headers++; continue; }
+                packets++;
+                if (op.granulepos >= 0) {
+                    long long over = (long long)op.granulepos -
+                                     (long long)packets * TO_FRAME;
+                    if (over > worst) worst = over;
+                }
+            }
+        }
+    }
+done:
+    if (ready) ogg_stream_clear(&os);
+    ogg_sync_clear(&oy);
+    free(data);
+    if (out_packets) *out_packets = packets;
+    return worst;
+}
+
+static void to_granule_report(const wchar_t *label, const wchar_t *path,
+                              const ToPcm *pcm)
+{
+    int       packets = 0;
+    long long over = to_granule_overstatement(path, &packets);
+
+    printf("      %ls: packets=%d decodable=%lld last_granule=%lld "
+           "pre_skip=%d frames=%llu worst_page_overstatement=%+lld\n",
+           label, packets, (long long)packets * TO_FRAME,
+           (long long)pcm->last_granule, pcm->pre_skip,
+           (unsigned long long)pcm->frames, over);
+}
+
+/* One second in, one second out, and no page claiming a sample the stream does
+ * not hold. 48000 is a whole number of packets, so this is the case where the
+ * duration comes out right EITHER WAY -- what it catches is the per-page
+ * overstatement that a duration check walks straight past. */
+TEST(no_page_ever_claims_a_sample_the_stream_does_not_hold)
+{
+    wchar_t path[MAX_PATH];
+    ToPcm   pcm;
+    ToProbe pr;
+    AprErr  e;
+
+    to_path(path, MAX_PATH, L"exact48");
+    e = to_record_tone(path, 48000, 2, 1.0, 440.0, 0, 0);
+    ASSERT_FALSE(apr_failed(&e));
+
+    to_decode_file(path, &pcm);
+    ASSERT_EQ_INT(0, pcm.decode_error);
+    ASSERT_EQ_INT(1, pcm.saw_eos);
+    to_granule_report(L"48 kHz, one second", path, &pcm);
+
+    /* THE RFC RULE, on every page and not merely on the last: the old code
+     * scored +312 here, which is 6.5 ms of seek error throughout the file. */
+    ASSERT_LE_INT(0, to_granule_overstatement(path, NULL));
+
+    ASSERT_EQ_INT(48000, (long long)pcm.frames);
+    ASSERT_NEAR(440.0, to_peak_hz(&pcm, 300.0, 700.0), 2.0);
+
+    to_probe(path, &pr);
+    if (pr.ran) ASSERT_NEAR(1.0, pr.duration, 0.01);
+
+    to_pcm_free(&pcm);
+    DeleteFileW(path);
+}
+
+/* THE TAIL, and the length that exposes it.
+ *
+ * 48900 samples is 50 whole packets and 900 samples of a 51st, so the padding
+ * on the final frame is 60 samples -- far less than the 312 the encoder is
+ * still holding. Before the flush existed the file claimed 48900 and held
+ * 48648: 252 samples, 5.25 ms of the take, gone. Any remainder above 648 of
+ * 960 does this, which is a third of all stop positions. */
+TEST(the_last_six_milliseconds_do_not_stay_inside_the_encoder)
+{
+    wchar_t path[MAX_PATH];
+    ToPcm   pcm;
+    AprErr  e;
+
+    to_path(path, MAX_PATH, L"tail");
+    e = to_record_tone(path, 48000, 2, 48900.0 / 48000.0, 440.0, 0, 0);
+    ASSERT_FALSE(apr_failed(&e));
+
+    to_decode_file(path, &pcm);
+    ASSERT_EQ_INT(0, pcm.decode_error);
+    to_granule_report(L"48 kHz, 48900 frames", path, &pcm);
+
+    ASSERT_EQ_INT(48900, (long long)pcm.frames);
+    ASSERT_LE_INT(0, to_granule_overstatement(path, NULL));
+
+    to_pcm_free(&pcm);
+    DeleteFileW(path);
+}
+
+/* m15: the resampler holds half a kernel of lookahead, and finalize primes it
+ * with silence so the last few milliseconds of real audio come out. Counting
+ * what came out as the recording's LENGTH then included the priming. The
+ * length of a recording is the frames that came off the ring, converted --
+ * arithmetic that cannot drift -- and never the resampler's output count. */
+TEST(the_resamplers_priming_silence_is_not_part_of_the_duration)
+{
+    wchar_t path[MAX_PATH];
+    ToPcm   pcm;
+    ToProbe pr;
+    AprErr  e;
+
+    to_path(path, MAX_PATH, L"exact44");
+    e = to_record_tone(path, 44100, 1, 1.0, 440.0, 0, 0);
+    ASSERT_FALSE(apr_failed(&e));
+
+    to_decode_file(path, &pcm);
+    ASSERT_EQ_INT(0, pcm.decode_error);
+    to_granule_report(L"44.1 kHz, one second", path, &pcm);
+
+    /* 44100 frames at 44.1 kHz is 48000 frames at 48 kHz. To the sample. */
+    ASSERT_EQ_INT(48000, (long long)pcm.frames);
+    ASSERT_LE_INT(0, to_granule_overstatement(path, NULL));
+    ASSERT_NEAR(440.0, to_peak_hz(&pcm, 300.0, 700.0), 2.0);
+
+    to_probe(path, &pr);
+    if (pr.ran) ASSERT_NEAR(1.0, pr.duration, 0.01);
+
+    to_pcm_free(&pcm);
     DeleteFileW(path);
 }

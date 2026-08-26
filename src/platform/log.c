@@ -11,6 +11,7 @@
  */
 #include "log.h"
 #include "err.h"
+#include "join.h"
 
 #include <windows.h>
 #include <intrin.h>
@@ -46,6 +47,12 @@ static volatile LONG64 g_dropped;
 
 static volatile LONG g_level = APR_LV_OFF;   /* OFF until init: see log.h */
 static volatile LONG g_running;
+
+/* How long apr_log_shutdown waits for the drain thread. Its loop wakes every
+ * 250 ms and the only thing that can hold it longer is a sink or a file write,
+ * so 2 s already means something downstream is stuck -- and when it is, the
+ * answer is to leave the log alone, not to free out from under it. */
+#define APR_LOG_JOIN_MS 2000u
 
 static AprLogSink g_sink;
 static void      *g_sink_user;
@@ -295,9 +302,14 @@ static DWORD WINAPI drain_thread(LPVOID unused)
 
 AprErr apr_log_init(const AprLogConfig *cfg)
 {
-    AprErr err = apr_ok();
+    AprErr err = apr_log_shutdown();
 
-    apr_log_shutdown();
+    /* A shutdown that could not retire the drain thread means that thread is
+     * still walking g_ring. The memset below would pull it out from under it,
+     * so this refuses instead -- the log carries on working with its previous
+     * configuration, which is a far better outcome than a torn record or a
+     * write to a closed handle. */
+    if (apr_failed(&err)) return err;
     if (!cfg) return APR_ERR(APR_E_INVALID_ARG, L"apr_log_init(NULL)");
 
     memset((void *)g_ring, 0, sizeof g_ring);
@@ -331,14 +343,27 @@ AprErr apr_log_init(const AprLogConfig *cfg)
     return err;
 }
 
-void apr_log_shutdown(void)
+AprErr apr_log_shutdown(void)
 {
     HANDLE thread = g_thread;
 
     g_running = 0;
+
+    /* EVERYTHING AFTER THIS JOIN ASSUMES THE JOIN SUCCEEDED, and that is the
+     * bug this return value exists to stop. The old code waited 2 s, ignored
+     * the result, and then closed the file handle, cleared the sink pointer
+     * and drained the ring -- while a drain thread that had not yet left was
+     * inside emit_line() doing all three. Two consumers on a single-consumer
+     * ring, a WriteFile to a closed handle, and a sink pointer swapped under
+     * a live call.
+     *
+     * g_thread and g_wake are deliberately KEPT on failure so a later call can
+     * finish the job; that is what makes retrying meaningful rather than a
+     * second leak. */
     if (thread) {
         if (g_wake) SetEvent(g_wake);
-        (void)WaitForSingleObject(thread, 2000);
+        if (apr_join_wait(thread, APR_LOG_JOIN_MS) == APR_JOIN_ABANDONED)
+            return APR_ERR_ABANDONED(L"the log drain thread");
         CloseHandle(thread);
         g_thread = NULL;
     }
@@ -355,4 +380,5 @@ void apr_log_shutdown(void)
     g_to_debugger = 0;
     g_to_stderr   = 0;
     apr_log_set_level(APR_LOG_OFF);
+    return apr_ok();
 }

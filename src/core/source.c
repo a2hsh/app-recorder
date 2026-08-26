@@ -130,22 +130,49 @@ AprErr apr_source_create(AprSourceId id, const wchar_t *name,
     if (apr_failed(&e)) { free(s); return e; }
 
     e = apr_capture_create(cfg, s->rb, &s->cap);
-    if (apr_failed(&e)) { rb_destroy(s->rb); free(s); return e; }
+    if (apr_failed(&e)) {
+        /* capture.h: a non-NULL capture after a FAILED create means the
+         * half-open capture could not be retired and is still writing into
+         * this ring. Leak both rather than free either. */
+        if (s->cap) {
+            APR_WARN(L"source %u leaked (ring included): its capture could "
+                     L"not be retired after a failed open", id);
+            return e;
+        }
+        rb_destroy(s->rb);
+        free(s);
+        return e;
+    }
 
     *out = s;
     return apr_ok();
 }
 
-void apr_source_destroy(AprSource *s)
+AprErr apr_source_destroy(AprSource *s)
 {
-    if (!s) return;
+    AprErr e;
+
+    if (!s) return apr_ok();
     if (s->refcount != 0) {
         APR_WARN(L"source %u destroyed with %d reader(s) still open",
                  s->id, s->refcount);
     }
-    apr_capture_destroy(s->cap);   /* implies stop */
+
+    /* THE ONE LINE THIS WHOLE MECHANISM EXISTS FOR. apr_capture_destroy makes
+     * the bounded join and reports whether the capture thread actually left.
+     * Until it says yes, that thread is still writing into s->rb, so the ring
+     * is not ours to free and neither is anything holding it. See source.h. */
+    e = apr_capture_destroy(s->cap);   /* implies stop */
+    if (apr_failed(&e)) {
+        APR_LOG_ERR(APR_LOG_ERROR, &e);
+        APR_WARN(L"source %u leaked (ring included) rather than freed under a "
+                 L"live capture thread", s->id);
+        return e;
+    }
+
     rb_destroy(s->rb);
     free(s);
+    return apr_ok();
 }
 
 AprErr apr_source_start(AprSource *s)

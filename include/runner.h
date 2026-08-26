@@ -188,8 +188,23 @@ AprErr apr_runner_create(const AprRunnerConfig *cfg, AprRunner **out);
 
 /* Requests a stop, waits for the loop to finish, and frees. Safe with NULL.
  * NEVER abandons a running recording: an unfinalized action is an unplayable
- * file, which is worse than a slow exit. */
-void apr_runner_destroy(AprRunner *r);
+ * file, which is worse than a slow exit.
+ *
+ * IT WAITS FOR A SYNCHRONOUS RUN TOO, and it used to wait only for the thread
+ * apr_runner_run_async() creates. apr_runner_run() executes the whole
+ * recording on the CALLER's thread, and a runner has no handle for that
+ * thread, so destroy simply did not see it: a second thread calling destroy
+ * freed the runner out from under a live recording loop that was still writing
+ * to r->elapsed_ms and about to finalize the files. What made it latent is
+ * that today's callers happen to destroy from the same thread they ran on --
+ * which is to say the safety net has never been under load.
+ *
+ * RETURNS apr_ok() when the runner was actually freed, and a failure when the
+ * loop would not finish inside the bounded wait -- in which case NOTHING IS
+ * FREED and `r` remains valid, because the loop thread still holds it (see
+ * join.h). Retrying later is legal. A caller that ignores the value leaks; it
+ * cannot corrupt. */
+AprErr apr_runner_destroy(AprRunner *r);
 
 /* The whole recording, on the calling thread. Returns apr_ok() even when
  * sources died or actions failed -- ask apr_runner_incomplete() for that. A

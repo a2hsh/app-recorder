@@ -112,6 +112,12 @@ int apr_out_has_tokens(const wchar_t *tmpl)
            has_token(tmpl, L"n");
 }
 
+int apr_out_has_token(const wchar_t *tmpl, const wchar_t *name)
+{
+    if (!name || !name[0]) return 0;
+    return has_token(tmpl, name);
+}
+
 /* One expansion pass. `take` is what {n} becomes. */
 static AprErr expand_with(const wchar_t *tmpl, const AprOutContext *ctx,
                           const SYSTEMTIME *lt, unsigned take,
@@ -233,6 +239,31 @@ static void split_extension(const wchar_t *path, size_t *stem_len)
     *stem_len = (size_t)(dot - path);
 }
 
+/* "dir\mix.wav" + take 3 -> "dir\mix-3.wav". Take 1 is the name itself, so
+ * that "the first candidate" and "the next one" are one ladder rather than
+ * two spellings of it -- apr_out_resolve walks it against the directory,
+ * apr_out_open_new walks it against CreateFileW. */
+static AprErr take_name(const wchar_t *base, size_t stem, unsigned take,
+                        wchar_t *out, size_t cch)
+{
+    int n;
+
+    if (take == 1) {
+        if (wcslen(base) + 1 > cch) {
+            return APR_ERR(APR_E_NO_MEMORY, L"\"%ls\" does not fit", base);
+        }
+        wcscpy_s(out, cch, base);
+        return apr_ok();
+    }
+    n = _snwprintf_s(out, cch, _TRUNCATE, L"%.*ls-%u%ls",
+                     (int)stem, base, take, base + stem);
+    if (n < 0) {
+        return APR_ERR(APR_E_NO_MEMORY, L"\"%ls\" leaves no room for a take number",
+                       base);
+    }
+    return apr_ok();
+}
+
 AprErr apr_out_resolve(const wchar_t *tmpl, const AprOutContext *ctx,
                        wchar_t *out, size_t cch, int *out_collided)
 {
@@ -281,17 +312,80 @@ AprErr apr_out_resolve(const wchar_t *tmpl, const AprOutContext *ctx,
         split_extension(base, &stem);
 
         for (take = 2; take <= APR_OUT_MAX_TAKES; take++) {
-            int n = _snwprintf_s(out, cch, _TRUNCATE, L"%.*ls-%u%ls",
-                                 (int)stem, base, take, base + stem);
-            if (n < 0) {
-                return APR_ERR(APR_E_NO_MEMORY,
-                               L"\"%ls\" leaves no room for a take number", base);
-            }
+            e = take_name(base, stem, take, out, cch);
+            if (apr_failed(&e)) return e;
             if (!exists(out)) return apr_ok();
         }
     }
     return APR_ERR(APR_E_STATE, L"every take of \"%ls\" up to %d already exists",
                    tmpl, APR_OUT_MAX_TAKES);
+}
+
+/* ---------------------------------------------------------------------------
+ * THE ATOMIC HALF OF THE COLLISION POLICY
+ *
+ * apr_out_resolve answers "which name is free", and between that answer and
+ * the CreateFileW that used it there was a window: two apprecorder processes
+ * started in the same second by two scheduled tasks both saw the same name
+ * free, both created it with CREATE_ALWAYS, and both wrote into it. That is
+ * not a rename gone wrong, it is one corrupt take and -- if the policy had
+ * already moved an earlier take aside -- a second file that is now garbage
+ * under the name the earlier take used to have.
+ *
+ * There is no lock that fixes that, because the two processes share nothing.
+ * What fixes it is making THE CREATE ITSELF the claim: CREATE_NEW fails with
+ * ERROR_FILE_EXISTS if anybody won the race, and the loser walks the same
+ * "-2, -3, ..." ladder apr_out_resolve walks. The promise in the header --
+ * a name that is taken is never overwritten -- is then a property of the file
+ * system rather than of how little time passes between two calls.
+ * ------------------------------------------------------------------------- */
+
+AprErr apr_out_open_new(const wchar_t *path, wchar_t *out_final, size_t cch,
+                        int *out_collided, void **out_handle)
+{
+    wchar_t  base[APR_OUT_PATH_CCH];
+    size_t   stem = 0;
+    unsigned take;
+
+    if (out_collided) *out_collided = 0;
+    if (out_handle)   *out_handle = NULL;
+    if (out_final && cch) out_final[0] = L'\0';
+
+    if (!path || !path[0] || !out_final || cch == 0 || !out_handle) {
+        return APR_ERR(APR_E_INVALID_ARG, L"apr_out_open_new: no path or no room");
+    }
+    if (wcslen(path) + 1 > APR_OUT_PATH_CCH) {
+        return APR_ERR(APR_E_NO_MEMORY, L"\"%ls\" is longer than a path may be", path);
+    }
+    wcscpy_s(base, APR_OUT_PATH_CCH, path);
+    split_extension(base, &stem);
+
+    for (take = 1; take <= APR_OUT_MAX_TAKES; take++) {
+        HANDLE h;
+        DWORD  err;
+        AprErr e = take_name(base, stem, take, out_final, cch);
+
+        if (apr_failed(&e)) return e;
+
+        /* FILE_SHARE_READ, matching every action: a recording in progress may
+         * be inspected, never written by a second hand. */
+        SetLastError(0);
+        h = CreateFileW(out_final, GENERIC_WRITE, FILE_SHARE_READ, NULL,
+                        CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h != INVALID_HANDLE_VALUE) {
+            *out_handle = (void *)h;
+            if (take > 1 && out_collided) *out_collided = 1;
+            return apr_ok();
+        }
+        err = GetLastError();
+        if (err != ERROR_FILE_EXISTS && err != ERROR_ALREADY_EXISTS) {
+            SetLastError(err);
+            return APR_ERR_LAST(L"creating \"%ls\"", out_final);
+        }
+    }
+    out_final[0] = L'\0';
+    return APR_ERR(APR_E_STATE, L"every take of \"%ls\" up to %d already exists",
+                   path, APR_OUT_MAX_TAKES);
 }
 
 AprErr apr_out_validate(const wchar_t *tmpl, const AprOutContext *ctx,

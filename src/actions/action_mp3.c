@@ -119,6 +119,7 @@
  */
 #include "action.h"
 #include "log.h"
+#include "outpath.h"
 #include "ringbuf.h"
 
 #include "lame.h"
@@ -563,6 +564,54 @@ static void mp3_free(Mp3Action *st)
 
 /* --- vtable --------------------------------------------------------------- */
 
+/* WHAT THIS FORMAT CAN BE ASKED FOR, in one place, asked twice: once by a
+ * front end before a recording starts, and once by create() below.
+ *
+ * The bitrate ceiling is the one that mattered. `--bitrate 400` is a number
+ * the command line used to accept (its own range is 0..1152, which is MPEG's
+ * widest, not MP3's), and until this existed the only thing that knew better
+ * was lame_init_params inside create() -- which runs at apr_bus_start, where
+ * a refusal is downgraded to a skipped output and the recording carries on
+ * writing nothing.
+ *
+ * `out_path` is deliberately not looked at -- writability is outpath.c's
+ * question and has its own answer at its own moment. What is still NOT
+ * knowable here is whether libmp3lame will accept a particular rate/bitrate
+ * pairing at init; that stays a create()-time failure, and the front ends
+ * treat a run whose every output failed to open as a failure rather than as a
+ * recording (cli.h). */
+static AprErr mp3_check_config(const AprActionConfig *cfg)
+{
+    int kbps;
+
+    if (!cfg) return APR_ERR(APR_E_INVALID_ARG, L"mp3: no configuration");
+    if (cfg->sample_rate == 0) {
+        return APR_ERR(APR_E_INVALID_ARG, L"mp3: sample rate is zero");
+    }
+    if (cfg->channels == 0) {
+        return APR_ERR(APR_E_INVALID_ARG, L"mp3: channel count is zero");
+    }
+    /* See the header comment: rate is resampled, channels are not invented. */
+    if (cfg->channels > 2) {
+        return APR_ERR(APR_E_UNSUPPORTED,
+                       L"mp3: MPEG audio carries mono or stereo, not %u channels",
+                       (unsigned)cfg->channels);
+    }
+    if (cfg->quality < 0 || cfg->quality > 10) {
+        return APR_ERR(APR_E_INVALID_ARG,
+                       L"mp3: quality %d is outside 0 (CBR) to 10 (VBR V9)",
+                       cfg->quality);
+    }
+
+    kbps = cfg->bitrate_kbps ? cfg->bitrate_kbps : MP3_DEFAULT_KBPS;
+    if (kbps < 8 || kbps > MP3_MAX_KBPS) {
+        return APR_ERR(APR_E_UNSUPPORTED,
+                       L"mp3: %d kbps is outside the 8 to %d the format allows",
+                       cfg->bitrate_kbps, MP3_MAX_KBPS);
+    }
+    return apr_ok();
+}
+
 static AprErr mp3_create(const AprActionConfig *cfg, void **out_state)
 {
     Mp3Action *st;
@@ -580,32 +629,14 @@ static AprErr mp3_create(const AprActionConfig *cfg, void **out_state)
     if (!cfg || !cfg->out_path || !cfg->out_path[0]) {
         return APR_ERR(APR_E_INVALID_ARG, L"mp3: no output path");
     }
-    if (cfg->sample_rate == 0) {
-        return APR_ERR(APR_E_INVALID_ARG, L"mp3: sample rate is zero");
-    }
-    if (cfg->channels == 0) {
-        return APR_ERR(APR_E_INVALID_ARG, L"mp3: channel count is zero");
-    }
-    /* See the header comment: rate is resampled, channels are not invented. */
-    if (cfg->channels > 2) {
-        return APR_ERR(APR_E_UNSUPPORTED,
-                       L"mp3: MPEG audio carries mono or stereo, not %u channels",
-                       (unsigned)cfg->channels);
-    }
+    /* THE SAME FUNCTION A FRONT END ASKS BEFORE ANY OF THIS (action.h). This
+     * is the check whose absence cost an hour-long take: 400 kbps parsed,
+     * passed --dry-run, and was refused only here, an hour too late. */
+    e = mp3_check_config(cfg);
+    if (apr_failed(&e)) return e;
 
     quality = cfg->quality;
-    if (quality < 0 || quality > 10) {
-        return APR_ERR(APR_E_INVALID_ARG,
-                       L"mp3: quality %d is outside 0 (CBR) to 10 (VBR V9)",
-                       quality);
-    }
-
-    kbps = cfg->bitrate_kbps ? cfg->bitrate_kbps : MP3_DEFAULT_KBPS;
-    if (kbps < 8 || kbps > MP3_MAX_KBPS) {
-        return APR_ERR(APR_E_UNSUPPORTED,
-                       L"mp3: %d kbps is outside the 8 to %d the format allows",
-                       cfg->bitrate_kbps, MP3_MAX_KBPS);
-    }
+    kbps    = cfg->bitrate_kbps ? cfg->bitrate_kbps : MP3_DEFAULT_KBPS;
 
     frame_bytes = (uint32_t)cfg->channels * (uint32_t)sizeof(float);
 
@@ -620,10 +651,11 @@ static AprErr mp3_create(const AprActionConfig *cfg, void **out_state)
     st->vbr_q        = quality > 0 ? quality - 1 : 0;
     st->bitrate_kbps = kbps;
 
-    path_cch = wcslen(cfg->out_path) + 1;
+    /* +8: room for the "-9999" that a lost create race appends (outpath.h). */
+    path_cch = wcslen(cfg->out_path) + 8;
     st->path = (wchar_t *)malloc(path_cch * sizeof(wchar_t));
     if (!st->path) { mp3_free(st); return APR_ERR(APR_E_NO_MEMORY, L"mp3: path"); }
-    memcpy(st->path, cfg->out_path, path_cch * sizeof(wchar_t));
+    wcscpy_s(st->path, path_cch, cfg->out_path);
 
     /* Staging, silence and encoder-output buffers: one encode call each. */
     chunk = MP3_CHUNK_TARGET_BYTES / frame_bytes;
@@ -696,12 +728,28 @@ static AprErr mp3_create(const AprActionConfig *cfg, void **out_state)
     /* FILE_SHARE_READ so the recording can be inspected (or streamed) while it
      * is being written -- an MP3 is decodable from its first frame, so that is
      * genuinely useful here and not just a courtesy. */
-    st->file = CreateFileW(st->path, GENERIC_WRITE, FILE_SHARE_READ, NULL,
-                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (st->file == INVALID_HANDLE_VALUE) {
-        AprErr open_err = APR_ERR_LAST(L"creating \"%ls\"", st->path);
-        mp3_free(st);
-        return open_err;
+    {
+        /* CREATE_NEW, THROUGH outpath.c, NEVER CreateFileW HERE.
+         *
+         * The name arrives already resolved against the directory, but "it
+         * did not exist a moment ago" is not the same claim as "this process
+         * made it": two apprecorders started in the same second by two
+         * scheduled tasks both passed that check and both truncated the same
+         * take with CREATE_ALWAYS. apr_out_open_new makes the create itself
+         * the claim and walks the "-2, -3, ..." ladder if it loses
+         * (outpath.h). */
+        wchar_t  actual[APR_OUT_PATH_CCH];
+        void    *h = NULL;
+        AprErr   oe = apr_out_open_new(st->path, actual, APR_OUT_PATH_CCH,
+                                       NULL, &h);
+        if (apr_failed(&oe)) { mp3_free(st); return oe; }
+        st->file = (HANDLE)h;
+        if (wcscmp(actual, st->path) != 0) {
+            /* Lost the race. What is reported must be what was opened. */
+            APR_WARN(L"mp3: \"%ls\" was claimed by another process; this take is \"%ls\"",
+                     st->path, actual);
+            if (wcslen(actual) < path_cch) wcscpy_s(st->path, path_cch, actual);
+        }
     }
 
     st->wake = CreateEventW(NULL, FALSE, FALSE, NULL);   /* auto-reset */
@@ -764,6 +812,28 @@ static AprErr mp3_on_audio(void *state, const float *pcm, size_t frames,
     return apr_ok();
 }
 
+/* A DISK THAT FELL BEHIND IS NOT A CLEAN RECORDING, and until this existed
+ * the only trace of it was a line in the log: the file was playable, the run
+ * exited 0, and nobody was told that seconds of the take are silence. The ring
+ * is four seconds deep, so reaching this means the disk stalled for longer
+ * than that -- antivirus, a sleeping drive, a network volume -- which is worth
+ * a sentence and worth an exit code.
+ *
+ * It is reported from finalize rather than from on_audio ON PURPOSE. An error
+ * out of on_audio drops the action from the bus's fan-out for the rest of the
+ * session (bus.h), which would turn a hole into a truncation. Reported here
+ * the run ends INCOMPLETE -- "recorded and playable, but something went
+ * wrong", which is exactly what happened. */
+static AprErr mp3_loss(const Mp3Action *st)
+{
+    if (st->lost_frames == 0) return apr_ok();
+    return APR_ERR(APR_E_IO,
+                   L"mp3: the disk fell behind on \"%ls\" and %llu frames are "
+                   L"silence; the file plays and stays aligned, but that much "
+                   L"audio is gone",
+                   st->path, (unsigned long long)st->lost_frames);
+}
+
 static AprErr mp3_finalize(void *state)
 {
     Mp3Action *st = (Mp3Action *)state;
@@ -777,7 +847,7 @@ static AprErr mp3_finalize(void *state)
     /* Idempotent, and it keeps returning the same verdict: finalize is called
      * from several exit paths and none of them should have to remember whether
      * another already ran. */
-    return st->failed ? st->io_err : apr_ok();
+    return st->failed ? st->io_err : mp3_loss(st);
 }
 
 static void mp3_destroy(void *state)
@@ -804,5 +874,6 @@ const AprActionVTable apr_action_mp3 = {
     mp3_create,
     mp3_on_audio,
     mp3_finalize,
-    mp3_destroy
+    mp3_destroy,
+    mp3_check_config
 };

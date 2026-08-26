@@ -107,20 +107,35 @@
  *
  * The granule position of every audio page is then
  *
- *     pre_skip + (48 kHz frames of real audio encoded so far)
+ *     960 x (packets completed on this page and before it)
  *
  * which is exactly what RFC 7845 asks for: "the total number of samples
  * decodable from the beginning of the stream up to the end of the page,
- * INCLUDING the pre-skip". Two consequences fall out of it for free:
+ * INCLUDING the pre-skip". DECODABLE is the load-bearing word, and an earlier
+ * version of this file got it wrong: it wrote `pre_skip + samples fed in`,
+ * which is 312 samples more than any decoder can produce at that point,
+ * because 312 of them are still inside the encoder. Every page overstated by
+ * 6.5 ms -- so a mid-stream seek landed early -- and the last page claimed a
+ * length the file did not contain.
  *
- *   - Duration is exact even though the stream is VBR. Subtracting pre_skip
- *     from the last granule position gives the sample count, with no seek
- *     table to write and nothing to patch in finalize. This is the structural
- *     difference from MP3, which had to default to CBR precisely because a
- *     VBR file whose Xing tag never got written lies about its length.
- *   - The final partial frame's silence padding is trimmed by arithmetic: the
- *     last packet decodes to 960 samples but the granule position only claims
- *     the real ones, and a decoder is required to drop the difference.
+ * TWO THINGS MAKE THE DURATION COME OUT EXACT ANYWAY:
+ *
+ *   - The end-of-stream packet's granule position is CAPPED at
+ *     pre_skip + the real audio, so the final partial frame's silence padding
+ *     is trimmed by arithmetic: the last packet decodes to 960 samples but the
+ *     granule position claims only the real ones, and a decoder is required to
+ *     drop the difference. A cap can only ever shorten; it cannot reintroduce
+ *     the overstatement.
+ *   - finalize FLUSHES THE ENCODER'S LOOKAHEAD before that packet, by feeding
+ *     pre_skip samples of silence, so the real tail actually comes out and the
+ *     cap has something to cap. Without it the last 6.5 ms of every recording
+ *     stayed inside libopus and the file was that much shorter than it said.
+ *
+ * Duration is therefore exact even though the stream is VBR: subtracting
+ * pre_skip from the last granule position gives the sample count, with no seek
+ * table to write and nothing to patch in finalize. This is the structural
+ * difference from MP3, which had to default to CBR precisely because a VBR
+ * file whose Xing tag never got written lies about its length.
  *
  * -------------------------------------------------------------------------
  * WHAT A KILL -9 MID-RECORDING LEAVES BEHIND
@@ -199,7 +214,9 @@
  * action_mp3.c draws, for the same reason.
  */
 #include "action.h"
+#include "clock.h"
 #include "log.h"
+#include "outpath.h"
 #include "resample.h"
 #include "ringbuf.h"
 
@@ -323,7 +340,17 @@ typedef struct OggAction {
     unsigned char *packet;     /* one encoded Opus packet               */
 
     uint32_t       pre_skip;   /* 48 kHz samples a player must discard  */
-    uint64_t       enc_frames; /* real 48 kHz frames handed to Opus     */
+    /* THE THREE COUNTERS GRANULE POSITIONS ARE BUILT FROM, and they are three
+     * different quantities that a single "frames encoded" once conflated:
+     *   out_samples  what a decoder will produce: 960 per packet, no more and
+     *                no less, and therefore the ceiling on any granule value;
+     *   acc_total    what has been handed to the accumulator, real audio and
+     *                priming silence alike -- how the flush knows when it has
+     *                pushed enough;
+     *   in_frames    session-rate frames taken from the ring, which is the
+     *                only honest measure of how long the recording IS. */
+    uint64_t       out_samples;/* 48 kHz samples a decoder will produce */
+    uint64_t       acc_total;  /* 48 kHz samples handed to the accumulator */
     uint64_t       in_frames;  /* session-rate frames taken from the ring */
     uint64_t       lost_frames;/* frames replaced by silence            */
     ogg_int64_t    packetno;
@@ -428,13 +455,37 @@ static void ogg_flush_pages(OggAction *st)
     }
 }
 
+/* How many 48 kHz samples this recording IS, from the session-rate frames that
+ * came off the ring. Not from the resampler's output count: priming it costs
+ * a few frames of silence at each end, and counting those would inflate the
+ * duration of every non-48 kHz recording by a millisecond or two. The
+ * arithmetic is the definition, so it cannot drift. */
+static uint64_t ogg_real_samples(const OggAction *st)
+{
+    if (st->sample_rate == OGG_OPUS_RATE) return st->in_frames;
+    return apr_mul_div_u64(st->in_frames, OGG_OPUS_RATE, st->sample_rate, NULL);
+}
+
 /* Encode one 20 ms frame sitting in `acc` and hand the packet to libogg.
- * `real_frames` is how many of the 960 are audio rather than end padding; the
- * granule position counts only those, which is what trims the padding back off
- * at the decoder (header comment). */
-static void ogg_emit_frame(OggAction *st, size_t real_frames, int eos)
+ *
+ * THE GRANULE POSITION IS WHAT A DECODER WILL HAVE PRODUCED, not what was fed
+ * in, and the difference is the bug this replaced. RFC 7845 defines it as the
+ * count of samples decodable from the start of the stream INCLUDING the
+ * pre-skip, and a packet decodes to exactly 960 samples -- so after k packets
+ * that number is 960k and nothing else. Writing `pre_skip + samples_fed`
+ * instead claimed 312 samples that were still inside the encoder: every page
+ * overstated by 6.5 ms, so a mid-stream seek landed early, and the final page
+ * claimed a length the file did not contain.
+ *
+ * The end-of-stream packet is the one exception, and it is a CAP rather than a
+ * different rule: the last frame is padded with silence, so the value is
+ * trimmed back to pre_skip + the real audio, which is what makes the file's
+ * duration the audio's duration. It can only ever trim, never inflate --
+ * claiming more than 960k would be the same lie in a different place. */
+static void ogg_emit_frame(OggAction *st, int eos)
 {
     ogg_packet op;
+    uint64_t   gp;
     int        n;
 
     if (st->failed) return;
@@ -448,14 +499,20 @@ static void ogg_emit_frame(OggAction *st, size_t real_frames, int eos)
         return;
     }
 
-    st->enc_frames += real_frames;
+    st->out_samples += OGG_FRAME_SAMPLES;
+
+    gp = st->out_samples;
+    if (eos) {
+        uint64_t claim = (uint64_t)st->pre_skip + ogg_real_samples(st);
+        if (claim < gp) gp = claim;
+    }
 
     memset(&op, 0, sizeof op);
     op.packet     = st->packet;
     op.bytes      = n;
     op.b_o_s      = 0;
     op.e_o_s      = eos;
-    op.granulepos = (ogg_int64_t)(st->pre_skip + st->enc_frames);
+    op.granulepos = (ogg_int64_t)gp;
     op.packetno   = st->packetno++;
 
     if (ogg_stream_packetin(&st->os, &op) != 0) {
@@ -480,12 +537,13 @@ static void ogg_accumulate(OggAction *st, const float *pcm, size_t frames)
         size_t take = frames < room ? frames : room;
 
         memcpy(st->acc + st->acc_fill * ch, pcm, take * ch * sizeof(float));
-        st->acc_fill += take;
-        pcm          += take * ch;
-        frames       -= take;
+        st->acc_fill  += take;
+        st->acc_total += take;
+        pcm           += take * ch;
+        frames        -= take;
 
         if (st->acc_fill == OGG_FRAME_SAMPLES) {
-            ogg_emit_frame(st, OGG_FRAME_SAMPLES, 0);
+            ogg_emit_frame(st, 0);
             st->acc_fill = 0;
         }
     }
@@ -726,6 +784,30 @@ static void ogg_shutdown(OggAction *st)
             }
         }
 
+        /* FLUSH THE ENCODER'S OWN LOOKAHEAD, which is the other half of the
+         * granule-position fix and the half that was missing outright.
+         *
+         * Opus holds `pre_skip` samples (312, 6.5 ms) inside its filters: the
+         * last samples pushed in have not come out yet, and nothing downstream
+         * notices, because the decoder simply produces fewer samples than the
+         * file claims. Feeding pre_skip samples of silence pushes the real
+         * tail through. Expressed as "top the accumulator up to what the file
+         * must contain" rather than as "push 312 more", so it is right whether
+         * or not the resampler flush above already produced some of them.
+         *
+         * The silence is never heard: the end-of-stream granule position caps
+         * the file at pre_skip + the real audio, and a decoder drops the
+         * rest. */
+        {
+            uint64_t need = (uint64_t)st->pre_skip + ogg_real_samples(st);
+            while (st->acc_total < need && !st->failed) {
+                uint64_t missing = need - st->acc_total;
+                size_t   n = missing > (uint64_t)st->chunk_frames
+                           ? st->chunk_frames : (size_t)missing;
+                ogg_accumulate(st, st->silence, n);
+            }
+        }
+
         /* Pad the final partial frame with silence. The granule position
          * claims only the real samples, so a decoder trims the difference --
          * this is what makes the file's duration the audio's duration and not
@@ -734,15 +816,17 @@ static void ogg_shutdown(OggAction *st)
         if (real > 0) {
             memset(st->acc + real * st->channels, 0,
                    (OGG_FRAME_SAMPLES - real) * st->channels * sizeof(float));
+            st->acc_total += OGG_FRAME_SAMPLES - real;
         }
         else {
             memset(st->acc, 0, OGG_FRAME_SAMPLES * st->channels * sizeof(float));
+            st->acc_total += OGG_FRAME_SAMPLES;
         }
         /* Always emit one last packet, so the stream always carries an
          * end-of-stream page. When there was nothing pending it claims zero
          * new samples and is trimmed away entirely, which is the same
          * mechanism as the padding above. */
-        ogg_emit_frame(st, real, 1);
+        ogg_emit_frame(st, 1);
         st->acc_fill = 0;
     }
 
@@ -766,10 +850,13 @@ static void ogg_shutdown(OggAction *st)
         st->file = INVALID_HANDLE_VALUE;
     }
 
-    APR_INFO(L"ogg: closed \"%ls\" -- %llu frames in at %u Hz, %llu frames "
-             L"encoded at 48 kHz, %llu bytes out, %llu frames lost to silence",
+    APR_INFO(L"ogg: closed \"%ls\" -- %llu frames in at %u Hz, %llu samples of "
+             L"audio at 48 kHz, %llu samples a decoder will produce, %llu bytes "
+             L"out, %llu frames lost to silence",
              st->path, (unsigned long long)st->in_frames,
-             (unsigned)st->sample_rate, (unsigned long long)st->enc_frames,
+             (unsigned)st->sample_rate,
+             (unsigned long long)ogg_real_samples(st),
+             (unsigned long long)st->out_samples,
              (unsigned long long)st->file_bytes,
              (unsigned long long)st->lost_frames);
 }
@@ -816,24 +903,21 @@ static uint32_t ogg_serialno(void)
     return (uint32_t)mix & 0x7FFFFFFFu;
 }
 
-static AprErr ogg_create(const AprActionConfig *cfg, void **out_state)
+/* WHAT THIS FORMAT CAN BE ASKED FOR, in one place, asked twice: once by a
+ * front end before a recording starts, and once by create() below. Opus
+ * refuses more than the other two -- more than two channels under mapping
+ * family 0, and any bitrate outside 6..510 -- and every one of those refusals
+ * used to happen at apr_bus_start(), where it is downgraded to a skipped
+ * output and the session records nothing into that file for as long as it
+ * runs.
+ *
+ * `out_path` is deliberately not looked at -- writability is outpath.c's
+ * question and has its own answer at its own moment. */
+static AprErr ogg_check_config(const AprActionConfig *cfg)
 {
-    OggAction *st;
-    uint64_t   ring_frames, ring_bytes;
-    uint32_t   frame_bytes;
-    size_t     path_cch, chunk;
-    int        kbps, quality, err = OPUS_OK;
-    opus_int32 lookahead = 0;
-    AprErr     e;
+    int kbps;
 
-    if (!out_state) {
-        return APR_ERR(APR_E_INVALID_ARG, L"ogg: no out_state");
-    }
-    *out_state = NULL;
-
-    if (!cfg || !cfg->out_path || !cfg->out_path[0]) {
-        return APR_ERR(APR_E_INVALID_ARG, L"ogg: no output path");
-    }
+    if (!cfg) return APR_ERR(APR_E_INVALID_ARG, L"ogg: no configuration");
     if (cfg->sample_rate == 0) {
         return APR_ERR(APR_E_INVALID_ARG, L"ogg: sample rate is zero");
     }
@@ -855,11 +939,10 @@ static AprErr ogg_create(const AprActionConfig *cfg, void **out_state)
                        (unsigned)OGG_MIN_SESSION_RATE,
                        (unsigned)OGG_MAX_SESSION_RATE);
     }
-
-    quality = cfg->quality;
-    if (quality < 0 || quality > 11) {
+    if (cfg->quality < 0 || cfg->quality > 11) {
         return APR_ERR(APR_E_INVALID_ARG,
-                       L"ogg: quality %d is outside 0 (default) to 11", quality);
+                       L"ogg: quality %d is outside 0 (default) to 11",
+                       cfg->quality);
     }
 
     kbps = cfg->bitrate_kbps;
@@ -871,6 +954,39 @@ static AprErr ogg_create(const AprActionConfig *cfg, void **out_state)
         return APR_ERR(APR_E_UNSUPPORTED,
                        L"ogg: %d kbps is outside the %d to %d Opus allows",
                        cfg->bitrate_kbps, OGG_MIN_KBPS, OGG_MAX_KBPS);
+    }
+    return apr_ok();
+}
+
+static AprErr ogg_create(const AprActionConfig *cfg, void **out_state)
+{
+    OggAction *st;
+    uint64_t   ring_frames, ring_bytes;
+    uint32_t   frame_bytes;
+    size_t     path_cch, chunk;
+    int        kbps, quality, err = OPUS_OK;
+    opus_int32 lookahead = 0;
+    AprErr     e;
+
+    if (!out_state) {
+        return APR_ERR(APR_E_INVALID_ARG, L"ogg: no out_state");
+    }
+    *out_state = NULL;
+
+    if (!cfg || !cfg->out_path || !cfg->out_path[0]) {
+        return APR_ERR(APR_E_INVALID_ARG, L"ogg: no output path");
+    }
+    /* THE SAME FUNCTION A FRONT END ASKS BEFORE ANY OF THIS (action.h). Not a
+     * second copy of the limits: a copy that drifted would put the refusal
+     * back inside the recording, which is what it is here to prevent. */
+    e = ogg_check_config(cfg);
+    if (apr_failed(&e)) return e;
+
+    quality = cfg->quality;
+    kbps    = cfg->bitrate_kbps;
+    if (kbps == 0) {
+        kbps = (cfg->channels == 1) ? OGG_DEFAULT_KBPS_MONO
+                                    : OGG_DEFAULT_KBPS_STEREO;
     }
 
     frame_bytes = (uint32_t)cfg->channels * (uint32_t)sizeof(float);
@@ -885,10 +1001,11 @@ static AprErr ogg_create(const AprActionConfig *cfg, void **out_state)
     st->bitrate_bps = kbps * 1000;
     st->complexity  = quality > 0 ? quality - 1 : 10;
 
-    path_cch = wcslen(cfg->out_path) + 1;
+    /* +8: room for the "-9999" that a lost create race appends (outpath.h). */
+    path_cch = wcslen(cfg->out_path) + 8;
     st->path = (wchar_t *)malloc(path_cch * sizeof(wchar_t));
     if (!st->path) { ogg_free(st); return APR_ERR(APR_E_NO_MEMORY, L"ogg: path"); }
-    memcpy(st->path, cfg->out_path, path_cch * sizeof(wchar_t));
+    wcscpy_s(st->path, path_cch, cfg->out_path);
 
     chunk = OGG_CHUNK_TARGET_BYTES / frame_bytes;
     if (chunk < OGG_CHUNK_MIN_FRAMES) chunk = OGG_CHUNK_MIN_FRAMES;
@@ -970,12 +1087,28 @@ static AprErr ogg_create(const AprActionConfig *cfg, void **out_state)
     /* FILE_SHARE_READ so the recording can be inspected while it is being
      * written -- an Ogg stream is decodable from its first pages, so that is
      * genuinely useful here and not just a courtesy. */
-    st->file = CreateFileW(st->path, GENERIC_WRITE, FILE_SHARE_READ, NULL,
-                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (st->file == INVALID_HANDLE_VALUE) {
-        AprErr open_err = APR_ERR_LAST(L"creating \"%ls\"", st->path);
-        ogg_free(st);
-        return open_err;
+    {
+        /* CREATE_NEW, THROUGH outpath.c, NEVER CreateFileW HERE.
+         *
+         * The name arrives already resolved against the directory, but "it
+         * did not exist a moment ago" is not the same claim as "this process
+         * made it": two apprecorders started in the same second by two
+         * scheduled tasks both passed that check and both truncated the same
+         * take with CREATE_ALWAYS. apr_out_open_new makes the create itself
+         * the claim and walks the "-2, -3, ..." ladder if it loses
+         * (outpath.h). */
+        wchar_t  actual[APR_OUT_PATH_CCH];
+        void    *h = NULL;
+        AprErr   oe = apr_out_open_new(st->path, actual, APR_OUT_PATH_CCH,
+                                       NULL, &h);
+        if (apr_failed(&oe)) { ogg_free(st); return oe; }
+        st->file = (HANDLE)h;
+        if (wcscmp(actual, st->path) != 0) {
+            /* Lost the race. What is reported must be what was opened. */
+            APR_WARN(L"ogg: \"%ls\" was claimed by another process; this take is \"%ls\"",
+                     st->path, actual);
+            if (wcslen(actual) < path_cch) wcscpy_s(st->path, path_cch, actual);
+        }
     }
 
     if (ogg_stream_init(&st->os, (int)ogg_serialno()) != 0) {
@@ -1057,6 +1190,28 @@ static AprErr ogg_on_audio(void *state, const float *pcm, size_t frames,
     return apr_ok();
 }
 
+/* A DISK THAT FELL BEHIND IS NOT A CLEAN RECORDING, and until this existed
+ * the only trace of it was a line in the log: the file was playable, the run
+ * exited 0, and nobody was told that seconds of the take are silence. The ring
+ * is four seconds deep, so reaching this means the disk stalled for longer
+ * than that -- antivirus, a sleeping drive, a network volume -- which is worth
+ * a sentence and worth an exit code.
+ *
+ * It is reported from finalize rather than from on_audio ON PURPOSE. An error
+ * out of on_audio drops the action from the bus's fan-out for the rest of the
+ * session (bus.h), which would turn a hole into a truncation. Reported here
+ * the run ends INCOMPLETE -- "recorded and playable, but something went
+ * wrong", which is exactly what happened. */
+static AprErr ogg_loss(const OggAction *st)
+{
+    if (st->lost_frames == 0) return apr_ok();
+    return APR_ERR(APR_E_IO,
+                   L"ogg: the disk fell behind on \"%ls\" and %llu frames are "
+                   L"silence; the file plays and stays aligned, but that much "
+                   L"audio is gone",
+                   st->path, (unsigned long long)st->lost_frames);
+}
+
 static AprErr ogg_finalize(void *state)
 {
     OggAction *st = (OggAction *)state;
@@ -1070,7 +1225,7 @@ static AprErr ogg_finalize(void *state)
     /* Idempotent, and it keeps returning the same verdict: finalize is called
      * from several exit paths and none of them should have to remember whether
      * another already ran. */
-    return st->failed ? st->io_err : apr_ok();
+    return st->failed ? st->io_err : ogg_loss(st);
 }
 
 static void ogg_destroy(void *state)
@@ -1105,5 +1260,6 @@ const AprActionVTable apr_action_ogg = {
     ogg_create,
     ogg_on_audio,
     ogg_finalize,
-    ogg_destroy
+    ogg_destroy,
+    ogg_check_config
 };

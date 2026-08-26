@@ -4982,3 +4982,281 @@ overwriting it — announced while it happens.
 - The wording pass (*"write file to"* → *"save file to"*) and filename
   templating were in the same brief and are **not confirmed done** — verify.
 - The `command` action for Gemini transcription is approved and queued.
+
+---
+
+## 2026-08-26 — Bug-tracker pass: CLI / session / actions / outpath / registry
+
+One of three agents working the `BUGS.md` tracker in parallel. This one owned
+`src/cli/*`, `src/session/*`, `src/actions/*`, `src/platform/outpath.c`,
+`src/core/registry.c` and their headers and tests. The other two were live in
+`src/capture/*` + `src/core/{source,graph,bus,runner}.c` and in `src/ui/*`, so
+nothing here touches those files.
+
+### Fixed — majors
+
+| ID | What changed |
+|---|---|
+| **M1** | `AprActionVTable` grew an optional `check_config(cfg)` (last field, so an older vtable still compiles and still means "nothing to ask") plus `apr_action_check_config()` in `registry.c`. Each action's implementation IS the precondition block its own `create()` already ran, called from both, so the numbers cannot fork. `apr_cli_resolve()` asks it per output — so `--bitrate 400 --out x.mp3` is exit 2 in milliseconds instead of an hour of recording nothing. Second half: a run whose EVERY output failed to open is now exit **4**, not 6, and its `--json` says `"failed": true` and `"seconds": 0` instead of listing a duration for a file that does not exist. |
+| **M2** | **The rule chosen:** under `--allow-missing` a bus left with no sources is dropped, out loud, and the rest of the run proceeds; the run is refused only when no bus survives. The bus takes its outputs with it (an empty file is a worse lie than a missing one) and the run ends INCOMPLETE. `record` only — never `save-session`, where it would be M14 again. |
+| **M5** | Confirmed against a real file, then fixed. Granule positions are now `960 x packets` (what a decoder produces) with the EOS packet capped at `pre_skip + real audio`; finalize flushes the encoder's lookahead. Measured with ffmpeg: a 48900-frame take decoded to **48460 samples before, 48900 after**. `ffprobe` reported 1.025250 s in BOTH cases — it reads duration from the number that was wrong, so only decoding shows it. |
+| **M13** | New `apr_out_open_new()`: CREATE_NEW, retrying through the same `-2, -3, ...` ladder `apr_out_resolve` walks (one shared `take_name()`). All three actions open through it instead of `CreateFileW(..., CREATE_ALWAYS, ...)`. |
+| **M14** | `save-session` with more than 64 distinct sources is now a refusal naming the source that did not fit, and writes no file. It used to `continue`, exit 0, and report `"sources": 64`. |
+
+### Fixed — minors
+
+m13 (`--json` had no document on a session-resolve failure), m14 (a disk stall
+that became silence now ends the run at exit 6, reported from `finalize` and
+NOT from `on_audio` — an error there would drop the output for the rest of
+the session and turn a hole into a truncation), m15, m16 (`--format WAV`),
+m17 (`take{n}.wav` on two buses), m18 (`prescan` reading another option's
+value), m19 (`CTRL_CLOSE` now waits `INFINITE`), m20 (control characters in
+session PATH fields — deliberately not in display names, so a session that
+round-tripped still does), m21 (silent truncation in `tok_wstr`; and every
+failure path in that loop used to leave `out` unterminated).
+
+### New API, for whoever touches these next
+
+- `action.h`: `check_config` on the vtable, `apr_action_check_config()`.
+- `outpath.h`: `apr_out_open_new()`, `apr_out_has_token()`.
+- `cli.h`: `apr_cli_test_close_wait_ms()` (test seam pinning the INFINITE wait).
+- New catalog ids: `ERR_OUTPUT_UNSUPPORTED`, `ERR_NOTHING_WAS_WRITTEN`,
+  `WARN_BUS_DROPPED`, `WARN_OUTPUT_DEGRADED`, `ERR_SESSION_NOT_USABLE`
+  (English written, Arabic left explicitly untranslated, as the .rc requires).
+
+### One residual, and it belongs to `src/core/bus.c`
+
+If the M13 create race actually happens, the action lands on `mix-2.wav` while
+the bus's `current` still says `mix.wav`, so the REPORTED name is wrong for
+that run. The audio is safe, which was the point. The clean finish is one line
+in `open_action()` — take the final name back from the action — and
+`AprActionConfig` gaining an optional out-path field. Not done here because
+`bus.c` is another agent's file this pass.
+
+### Build and test at handoff
+
+`build.cmd Debug test` and `build.cmd Release test`: **31 of 33 suites pass in
+both**, identically. The two failures are `test_ui_behaviour`
+(`recording_starts_stops_and_announces_both`) and `test_ui_dialogs`
+(`ok_in_the_add_output_dialog_never_silently_does_nothing`), which are the UI
+agent's M8/m6 work in flight and were failing before this pass touched
+anything. Every
+suite this pass owns — `test_cli`, `test_session`, `test_action_wav`,
+`test_action_mp3`, `test_action_ogg`, `test_outpath`, `test_registry` —
+passes in both configurations.
+
+Nothing was rendered to an audio device at any point: every recording in these
+suites is `--fake` / `APR_SRC_FAKE`, and every file produced was deleted.
+
+---
+
+## 2026-08-26 — core + capture bug pass (BUGS.md: root pattern, C1, C4 model half, M3, M6, m12, m26, m27, m28)
+
+Ran in parallel with the UI pass and the CLI/session/actions pass. Files owned:
+`src/capture/*`, `src/core/{source,graph,bus,runner}.c`, `src/platform/log.c`,
+their headers and tests.
+
+### The root pattern is now a module, not a habit
+
+`include/join.h` + `src/platform/join.c`. Every bounded join in the tree goes
+through it. The rule it states — **the code that frees must be the code that
+reads the join result, and an abandoned join frees nothing** — is what makes
+this safe in C, where a return value alone cannot be forced on a caller.
+`AprCaptureVTable::close`, `apr_capture_destroy`, `apr_source_destroy`,
+`apr_log_shutdown` and `apr_runner_destroy` all return `AprErr` now; a caller
+that ignores one leaks and cannot corrupt.
+
+### API changes other passes should know about
+
+- **`APR_E_BUSY`** — new `AprErrKind`, appended (nothing above it moved). It is
+  what every graph/bus shape change returns while `apr_graph_running()`. The UI
+  should match on this, not `APR_E_STATE`, for the "not while a recording is
+  running" sentence. (The UI pass has already wired it up:
+  `editing_is_refused_out_loud_while_a_recording_runs` passes.)
+- **`apr_source_destroy` / `apr_capture_destroy` return `AprErr`.** A failure
+  means nothing was freed and the pointer is still valid; retrying later is how
+  the leak is recovered.
+- **`apr_capture_create` may leave `*out` non-NULL after a failure.** That is
+  the signal that the caller's ring is still being written into. Documented in
+  `capture.h`; `apr_source_create` honours it.
+- **`apr_runner_destroy` returns `AprErr`** and now waits for a *synchronous*
+  run as well, on a new `loop_left` event (not `finished_event`, which fires
+  while the loop is still touching the runner).
+- **`apr_log_shutdown` returns `AprErr`**, and `apr_log_init` refuses while an
+  abandoned shutdown is outstanding.
+- **`apr_wasapi_close` returns `AprErr`**; `pump_stuck` stays for diagnostics
+  but is no longer the only way to find out.
+- New internal headers: `src/capture/capture_process.h` (test probe),
+  and two seams — `apr_capture_fake_wedge/unwedge` and
+  `apr_wasapi_test_set_race_hook`.
+
+### Two design points settled
+
+- **A process tap now has TWO threads.** Mute polling moved off the pump onto
+  its own MTA thread with its own COM objects. Design 4.2.1 is unchanged: the
+  rule is that a capture owns its apartment so the CALLER never has to think
+  about one, and no object crosses between the two threads.
+- **Design 5.1 is narrowed, deliberately.** A process tap now fills a gap the
+  engine explicitly reports (`DATA_DISCONTINUITY`). It still synthesizes
+  nothing speculatively — with no flag, not one sample is invented and no
+  resampler is allocated. "Arrives perfect" was measured under an engine that
+  was keeping up; it is not a promise about one that has just said it dropped
+  audio, and on the reference timeline a silent shear is the worst failure in
+  the system.
+
+### One existing test changed
+
+`test_sync.c`'s "a source added mid-session" became "a source that *starts*
+mid-session": building an edge on a running graph is now `APR_E_BUSY`. The
+property it tests (reader placement) is unchanged; see the C4 entry in BUGS.md.
+
+### Build and test at handoff
+
+`build.cmd Debug test` and `build.cmd Release test`: **33 of 33 suites pass in
+both**, 100%, no warnings under /W4 /WX.
+
+(Intermediate runs during this pass showed `test_ui_behaviour`,
+`test_ui_dialogs` and once `test_cli` failing, with a different set each time.
+Those were the other two passes mid-edit, on announcement-queue and temp-file
+assertions; `test_ui_behaviour` never starts a recording at all, so the new
+`APR_E_BUSY` guard cannot fire in it. All three are green in the final run.)
+
+Suites this pass owns — `test_capture_timeline` (new, 14), `test_capture_abandon`
+(new, 9), `test_graph_guard` (new, 10), `test_graph`, `test_sync`, `test_log`,
+`test_run_loop`, `test_capture_fake`, `test_capture_wasapi`,
+`test_capture_apartment`, `test_ringbuf`, `test_clock` — pass in both.
+
+Every fix was watched go red with itself reverted; BUGS.md names the failing
+case for each.
+
+Nothing was rendered to any audio device. Every source is `APR_SRC_FAKE` except
+one process-loopback tap on the test process's own PID, whose tree renders
+nothing (AGENTS.md rule 1).
+
+
+---
+
+# 2026-08-26 — UI pass (C2, C3, C4-UI, M4, M7–M10, M12, M15 + 15 minors)
+
+Owned this pass: `src/ui/*`, `src/uiapp/main.c`, the `ui_*.h` headers and the UI
+test suites. Ran alongside the core+capture pass and the CLI/session pass;
+`include/strings.h` and `res/strings.rc` were edited additively and merged.
+
+## The one that mattered most, and what it teaches
+
+**M4 — "greyed AND spoken" had never once spoken.** `TranslateAccelerator` does
+not send `WM_COMMAND` for an accelerator whose menu item is disabled: it eats
+the key and delivers nothing. So `busy()` never ran, and mid-recording every
+editing key was TOTAL SILENCE — which for this author is indistinguishable from
+a broken application.
+
+The design was right. The delivery was absent. And the reason it survived is
+worth keeping: **it lived in an inlined message loop that no test could reach.**
+The loop is now `apr_ui_app_pretranslate()`, a function, and it resolves the
+keystroke against the accelerator table itself — a key bound to a DISABLED
+command is dispatched anyway and the handler refuses it out loud. Enabled state
+decides how the menu LOOKS; it no longer decides, silently, whether a key
+exists.
+
+**Four more of the same shape were found by looking for it**, all now fixed: a
+dialog that could not be CREATED folded into "the user cancelled" (m5); a
+half-made connection whose end left the model ending with no word (m9); every
+real refusal from the model announced as "that is not available yet" with the
+`AprErr` discarded (m4); and two sentences that were true of a *different*
+situation, which is its own kind of silence (m2, m3).
+
+## The other two criticals
+
+**C2 — the Structure panel could not be browsed.** The tree's selection sink
+fires on every caret move and the controller answered it with an unconditional
+`SetFocus` on a canvas node, so one Down took the keyboard away and everything
+past the first row was unreachable. Selection and ACTIVATION are now two
+separate signals: `apr_canvas_set_current_node()` keeps the views agreeing
+quietly, and `apr_tree_panel_set_activate_sink()` (Enter, double click) is what
+moves focus. Enter needed the TreeView subclassed — `IsDialogMessage` eats it
+before any control sees it (design 6.1).
+
+Neither existing suite could have caught this: `test_ui_tree.c` drives a live
+tree with no controller, and `test_ui_behaviour.c` had never opened the tree.
+**The defect was in the wire between them, and nothing tested the wire.**
+
+**C3 — stop-and-close left a zombie process.** The close-wait drain dispatched
+every message with no `WM_QUIT` check, so it swallowed the very `WM_QUIT` that
+`DestroyWindow` had just produced. Window gone, process alive, tray icon
+ghosted. It now re-posts and stops pumping; that is safe by construction,
+because the only thing that posts the `WM_CLOSE` this drain dispatches is
+`recording_finished()`.
+
+## New public seams, and why each exists
+
+| Seam | Why it had to exist |
+|---|---|
+| `apr_canvas_set_current_node()` | agree with the other view without taking the keyboard |
+| `apr_canvas_set_edit_sink()` | the canvas edits the graph with no command reaching the controller; contract FORBIDS the listener rebuilding the canvas |
+| `apr_tree_panel_set_activate_sink()` | moving is not choosing |
+| `apr_ui_app_pretranslate()` / `_accel_command()` / `_command_enabled()` | make the message loop a testable function; separate "bound" from "greyed" |
+| `apr_tray_is_registered()` | never hide the window into nothing |
+| `apr_dlg_last_failed()` | "it did not open" is not "the user cancelled" |
+| `apr_dlg_button_width()` | never size a control to fit its English string, as a property a test can hold |
+| `apr_controller_last_balloon()` / `_balloon_count()` | every test runs with `APPRECORDER_NO_TRAY`, so there is no icon to watch |
+| `apr_controller_test_set_close_wait_ms()` | the give-up path is 30 s of stalled disk away |
+| `apr_dlg_test_fail_next()` / `apr_dlg_test_set_session_path()` | a system modal owns the thread that opened it — File > Open was a route no test could enter |
+
+## Two things found by tests rather than by reading
+
+- **An ordering bug this pass introduced and then caught.** M8's
+  `refresh_views()` was first placed between `c->recording = 1` and the
+  "recording started" announcement. Rebuilding two views destroys and recreates
+  every node window, which takes long enough that an observer watching
+  `apr_controller_recording()` sees the state a measurable time before the
+  sentence exists. The two are now published adjacently, and `refresh_views()`
+  runs last.
+- **`test_ui_dialogs.c` had a latent version of the same race** — its own
+  comment says so about the STOP case and it used `wait_for_said` there, but
+  the START case polled the flag and then read the sentence. Now both use
+  `wait_for_said`.
+
+## Honest residue
+
+- **m6's stated case is unreachable.** The guards are in, but the FORMAT combo
+  cannot be empty in a build with encoders and the BUS combo is guarded a step
+  earlier. The sweep was right about the shape and wrong about the reachability.
+- **m8's canvas half is not independently reproducible.** Reverting it fails no
+  test; the nested `SetFocus` takes on this build. Applied for consistency with
+  the case `tree_panel.c` measured, not because it was observed.
+- **m10 and m22 are fixed by inspection with no test** — a common-dialog flag,
+  and a digit that renders identically until the Arabic-Indic decision differs.
+- **M11 is NOT fixed** (error reasons are English prose in a translated frame).
+  It is a `platform/err.c` change and belongs to whoever owns that file. m4 and
+  M12 remove its two worst UI symptoms.
+- **M8's related note is still open**: `UI_PANE_RECORDING`,
+  `UI_DESC_RECORDING`, `UI_HEALTH_*` and `UI_STATUS_IDLE` are still referenced
+  nowhere. They look like design decisions rather than defects, and this pass
+  left them alone rather than inventing a use.
+
+## Catalog
+
+**33 new ids**, English written, every Arabic slot explicitly `/* not
+translated yet */` so the completeness gate stays honest: `UI_ANN_EDIT_FAILED`,
+`UI_ANN_CLOSE_TIMEOUT`, `UI_ANN_NO_TRAY`, `UI_DLG_NO_OUTPUTS`,
+`UI_DLG_SESSION_CANCELLED`, `UI_DLG_DISCARD_*`, `UI_DLG_FORMAT_NEEDED`,
+`UI_DLG_CREATE_FAILED`, `UI_TRAY_INFO_ARM_FAILED`,
+`UI_TRAY_INFO_OUTPUT_RENAMED`, and 17 `UI_KEYNAME_*`. **No Arabic was written**
+— 500+ strings still await the author's pass.
+
+## Build and test at handoff
+
+`build.cmd Debug test` and `build.cmd Release test`: **33 of 33 suites pass in
+both**, 100%, no warnings under /W4 /WX.
+
+`test_ui_behaviour.c` grew from 13 cases to **37**; `test_ui_dialogs.c` from 21
+to **23**. Every fix except the four named under "Honest residue" was watched go
+red with itself reverted, one at a time; BUGS.md names the failing case for each.
+
+**Safety (AGENTS.md rule 1):** nothing was rendered to any audio device. Every
+source in these suites is `APR_SRC_FAKE`. Tray registration stays suppressed by
+`APPRECORDER_NO_TRAY`, wired in CMake — which the M10 test now depends on, so a
+future change that removed it would fail loudly rather than start notifying the
+author again. Three cases call `ShowWindow(SW_SHOWNOACTIVATE)` because focus
+cannot enter a pane of a window that was never shown; `NOACTIVATE` means the
+foreground is never taken from whoever is at the machine.

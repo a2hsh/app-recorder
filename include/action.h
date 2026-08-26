@@ -66,13 +66,51 @@ typedef struct AprActionVTable {
     AprErr (*finalize)(void *state);
 
     void (*destroy)(void *state);
+
+    /* CAN THIS FORMAT BE WRITTEN WITH THESE SETTINGS? Asked with no file and
+     * no side effects, so a front end can refuse a plan BEFORE a recording
+     * starts. `cfg->out_path` is not consulted and may be NULL.
+     *
+     * THIS FIELD EXISTS BECAUSE A WHOLE TAKE WAS ONCE LOST TO ITS ABSENCE.
+     * `--bitrate 400 --out meeting.mp3 --duration 3600` parsed, passed
+     * --dry-run, and then recorded for an hour into nothing: LAME refuses 400
+     * kbps, but the only place that refusal could happen was create(), which
+     * runs at apr_bus_start() -- after the recording has begun, where a failed
+     * action is downgraded to a per-output skip. An encoder's limits are
+     * knowable from the numbers alone; the only thing missing was somewhere to
+     * ask.
+     *
+     * Every implementation is the SAME function its own create() calls for
+     * these checks, never a second copy of the numbers -- a copy that drifted
+     * would put the refusal back where it was.
+     *
+     * NULL means "nothing to ask": the format accepts every config create()
+     * would. It is LAST in this struct on purpose, so that a vtable written
+     * before this existed still compiles and still means exactly that.
+     *
+     * Cheap and synchronous. Never resolves a string and never touches disk. */
+    AprErr (*check_config)(const AprActionConfig *cfg);
 } AprActionVTable;
 
 /* --- registry (core/registry.c) ------------------------------------------ */
 
-const AprActionVTable *apr_action_find(const char *id);   /* NULL if unknown */
+/* Matched on `id`, case-insensitively: `id` is a stable ASCII wire value, and
+ * "WAV" is the same format as "wav" whether it was typed after --format or
+ * hand-edited into a session file. The canonical spelling is the vtable's own
+ * and is what a caller should store. NULL if unknown. */
+const AprActionVTable *apr_action_find(const char *id);
 size_t                 apr_action_count(void);
 const AprActionVTable *apr_action_at(size_t index);
+
+/* Ask an action whether it can be written with `cfg` -- the registry's side of
+ * the vtable's check_config, so that no caller has to know that the hook is
+ * optional. An action with no hook accepts anything create() would.
+ *
+ * Call this at plan time (apr_cli_resolve, --dry-run, an Add Output dialog).
+ * Getting a refusal here is the difference between a message and a lost
+ * recording. */
+AprErr apr_action_check_config(const AprActionVTable *vt,
+                               const AprActionConfig *cfg);
 
 #ifdef __cplusplus
 }

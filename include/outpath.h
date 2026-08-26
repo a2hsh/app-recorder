@@ -107,6 +107,17 @@ typedef struct AprOutContext {
  * A path with none is a literal path and behaves exactly as it always did. */
 int apr_out_has_tokens(const wchar_t *tmpl);
 
+/* Nonzero when ONE named token appears in `tmpl`. `name` is the token spelled
+ * without its braces and in lower case -- "n", "bus", "date", "time", "ext" --
+ * and the match is case-insensitive on the template side, exactly as the
+ * expander's is.
+ *
+ * It exists because "{n}" changes what a template MEANS: a caller comparing
+ * two output names has to know that "take{n}.wav" on two buses is two files
+ * and not one, which comparing their expansions cannot tell it (both expand to
+ * "take1" until the disk is consulted). */
+int apr_out_has_token(const wchar_t *tmpl, const wchar_t *name);
+
 /* Expand the tokens once, with the CURRENT local time. Touches no disk, so
  * {n} expands to 1 here; use apr_out_resolve when the answer has to be a name
  * that is actually free. */
@@ -125,6 +136,31 @@ AprErr apr_out_expand(const wchar_t *tmpl, const AprOutContext *ctx,
  * a number is the answer, not a surprise. */
 AprErr apr_out_resolve(const wchar_t *tmpl, const AprOutContext *ctx,
                        wchar_t *out, size_t cch, int *out_collided);
+
+/* CREATE THE FILE, and make the create itself the claim on the name.
+ *
+ * apr_out_resolve answers "which name is free"; this OPENS one, with
+ * CREATE_NEW, and walks the same "-2, -3, ..." ladder when the file system
+ * says somebody else got there first. That closes the window between the two,
+ * which was not theoretical: two apprecorder processes started in the same
+ * second with the same template both passed the existence check and then both
+ * truncated the same file with CREATE_ALWAYS. "A take is never overwritten"
+ * is a promise the file system now keeps, not one that depends on how little
+ * time passes between two calls.
+ *
+ * This is what every action's create() calls INSTEAD of CreateFileW. It is
+ * not a replacement for apr_out_resolve: the bus still resolves the template
+ * first, because that is what it reports as the recording's name and what the
+ * rename notice is raised from. In the ordinary case the name resolve chose is
+ * still free here and this opens it on the first try.
+ *
+ * `path` is already expanded -- no tokens. `out_final` receives the name that
+ * was actually created, which differs from `path` only when the race happened.
+ * `out_collided` is optional and is set in exactly that case. `out_handle`
+ * receives a Win32 HANDLE opened GENERIC_WRITE / FILE_SHARE_READ, which the
+ * caller closes. */
+AprErr apr_out_open_new(const wchar_t *path, wchar_t *out_final, size_t cch,
+                        int *out_collided, void **out_handle);
 
 /* Can a file be created at `path`? Creates nothing that was not already
  * there -- a file it had to create is deleted again -- which is what makes it

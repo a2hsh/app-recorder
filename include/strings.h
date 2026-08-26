@@ -242,7 +242,9 @@
     X(ERR_TOO_MANY_OUTPUTS,        1117)                                      \
     X(ERR_CAPTURE_START,           1118)                                      \
     X(ERR_DUPLICATE_OUTPUT,        1119)                                      \
-    X(ERR_OPTION_NOT_FOR_COMMAND,  1120)
+    X(ERR_OPTION_NOT_FOR_COMMAND,  1120)                                     \
+    X(ERR_OUTPUT_UNSUPPORTED,      1121)                                     \
+    X(ERR_NOTHING_WAS_WRITTEN,     1122)
 
 /* ---- the command line: warnings, progress, and the two listings. ---- */
 #define APR_STR_LIST_CLI_MSG(X)                                                \
@@ -275,7 +277,9 @@
     X(SOURCE_KIND_SYSTEM_MINUS_TREE, 1161)                                    \
     X(SOURCE_KIND_DEVICE,          1162)                                      \
     X(SOURCE_KIND_FAKE,            1163)                                      \
-    X(CLI_DEFAULT_BUS_NAME,        1164)
+    X(CLI_DEFAULT_BUS_NAME,        1164)                                     \
+    X(WARN_BUS_DROPPED,            1165)                                     \
+    X(WARN_OUTPUT_DEGRADED,        1166)
 
 /* ---- the window: menu commands, pane names, and what a screen reader
  * reads. Menu text carries its accelerator after a tab so a translator keeps
@@ -368,7 +372,8 @@
     X(UI_ANN_CANVAS_EMPTY,         1444)                                      \
     X(UI_ANN_NOT_YET,              1445)                                      \
     X(UI_ANN_CONNECT_NOT_SOURCE,   1446)                                      \
-    X(UI_ANN_GAIN_NOT_SOURCE,      1447)
+    X(UI_ANN_GAIN_NOT_SOURCE,      1447)                                      \
+    X(UI_ANN_EDIT_FAILED,          1448)
 
 /* ---- one line per canvas operation, for Help > Keyboard Shortcuts.
  *
@@ -395,7 +400,24 @@
     X(UI_KEY_GAIN_UP,              1474)                                      \
     X(UI_KEY_GAIN_DOWN,            1475)                                      \
     X(UI_KEY_CANCEL,               1476)                                      \
-    X(UI_KEY_DESCRIBE,             1477)
+    X(UI_KEY_DESCRIBE,             1477)                                      \
+    X(UI_KEYNAME_TAB,              1480)                                      \
+    X(UI_KEYNAME_ENTER,            1481)                                      \
+    X(UI_KEYNAME_SPACE,            1482)                                      \
+    X(UI_KEYNAME_DELETE,           1483)                                      \
+    X(UI_KEYNAME_ESCAPE,           1484)                                      \
+    X(UI_KEYNAME_HOME,             1485)                                      \
+    X(UI_KEYNAME_END,              1486)                                      \
+    X(UI_KEYNAME_LEFT,             1487)                                      \
+    X(UI_KEYNAME_RIGHT,            1488)                                      \
+    X(UI_KEYNAME_UP,               1489)                                      \
+    X(UI_KEYNAME_DOWN,             1490)                                      \
+    X(UI_KEYNAME_PLUS,             1491)                                      \
+    X(UI_KEYNAME_MINUS,            1492)                                      \
+    X(UI_KEYNAME_NUM_PLUS,         1493)                                      \
+    X(UI_KEYNAME_NUM_MINUS,        1494)                                      \
+    X(UI_KEYNAME_PERIOD,           1495)                                      \
+    X(UI_KEYNAME_FUNCTION,         1496)
 
 /* ---- the structure panel: what the TreeView says out loud.
  *
@@ -479,7 +501,8 @@
     X(WARN_SESSION_DEVICE_BY_NAME,   1548)                                    \
     X(WARN_SESSION_DROPPED,          1549)                                    \
     X(STATUS_SESSION_LOADED,         1550)                                    \
-    X(STATUS_SESSION_SAVED,          1551)
+    X(STATUS_SESSION_SAVED,          1551)                                   \
+    X(ERR_SESSION_NOT_USABLE,        1552)
 
 
 /* ---- recording: what the window and the notification area say while a
@@ -520,7 +543,9 @@
     X(UI_CLOSE_KEEP_RECORDING,      1624)                                 \
     X(UI_CLOSE_TO_TRAY,             1625)                                 \
     X(UI_ANN_CLOSING_FILES,         1626)                                 \
-    X(UI_ANN_OUTPUT_RENAMED,        1627)
+    X(UI_ANN_OUTPUT_RENAMED,        1627)                                  \
+    X(UI_ANN_CLOSE_TIMEOUT,         1628)                                  \
+    X(UI_ANN_NO_TRAY,               1629)
 
 
 /* ---- the dialogs: the half of the product that turns "navigate a graph" into
@@ -615,7 +640,14 @@
     X(UI_DLG_PICK_OUTPUT,           1725)                                 \
     X(UI_DLG_OUTPUT_ROW,            1726)                                      \
     X(UI_DLG_RESOLVE_CONSENT,     1727)                                    \
-    X(UI_DLG_OUT_PATH_TOKENS,     1728)
+    X(UI_DLG_OUT_PATH_TOKENS,     1728)                                     \
+    X(UI_DLG_NO_OUTPUTS,          1729)                                     \
+    X(UI_DLG_SESSION_CANCELLED,   1730)                                     \
+    X(UI_DLG_DISCARD_TITLE,       1731)                                     \
+    X(UI_DLG_DISCARD_BODY,        1732)                                     \
+    X(UI_DLG_DISCARD_OK,          1733)                                     \
+    X(UI_DLG_FORMAT_NEEDED,       1734)                                     \
+    X(UI_DLG_CREATE_FAILED,       1735)
 
 
 /* ---- the notification area.
@@ -649,7 +681,9 @@
     X(UI_TRAY_INFO_SOURCE_DIED,     1762)                                 \
     X(UI_TRAY_INFO_SOURCE_MUTED,    1763)                                 \
     X(UI_TRAY_INFO_ACTION_FAILED,   1764)                                 \
-    X(UI_TRAY_INFO_MINIMIZED,       1765)
+    X(UI_TRAY_INFO_MINIMIZED,       1765)                                 \
+    X(UI_TRAY_INFO_ARM_FAILED,      1766)                                 \
+    X(UI_TRAY_INFO_OUTPUT_RENAMED,  1767)
 
 /* Every plain string, in declaration order. This is what C, the generated
  * enum and tests/test_strings.c walk; the groups above exist only so that

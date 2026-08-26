@@ -183,6 +183,21 @@ int apr_tree_panel_select(HWND panel, const AprTreeSel *sel);
 typedef void (*AprTreeSelFn)(HWND panel, const AprTreeSel *sel, void *user);
 void apr_tree_panel_set_selection_sink(HWND panel, AprTreeSelFn fn, void *user);
 
+/* Called when the user ACTIVATES a row -- Enter, or a double click. Never for
+ * a caret move and never for apr_tree_panel_select.
+ *
+ * THE TWO SIGNALS ARE SEPARATE BECAUSE MOVING IS NOT CHOOSING, and conflating
+ * them made this panel unbrowsable. A listener that answered every caret move
+ * by moving focus meant one Down moved the caret, focus jumped to the other
+ * view, and the next Down drove that view instead: every row past the first
+ * was out of reach, and these rows' sentences are the panel's entire purpose.
+ *
+ * So: answer the SELECTION sink by keeping the other view's highlight in step
+ * -- quietly, without touching focus -- and answer THIS one by going there.
+ * A structural row (kind APR_TREE_ROW_UNASSIGNED / _EMPTY) names no model
+ * object and never reaches this sink at all. */
+void apr_tree_panel_set_activate_sink(HWND panel, AprTreeSelFn fn, void *user);
+
 /* The TreeView itself. For tests and for anything that needs to talk to the
  * control directly; the panel keeps owning it. */
 HWND apr_tree_panel_treeview(HWND panel);

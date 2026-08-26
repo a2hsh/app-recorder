@@ -4,6 +4,7 @@
  */
 #include "bus.h"
 
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -163,6 +164,27 @@ double apr_bus_lookbehind_frames(const AprBus *b) { return b ? b->lookbehind_fra
  * Edges
  * ------------------------------------------------------------------------- */
 
+/* A GAIN THAT IS NOT A FINITE NUMBER IS REFUSED, and infinity is the half
+ * that used to get through.
+ *
+ * NaN was already caught here, and NaN is the mild case: core/mix.c scrubs it
+ * on the way into every integer format, so a NaN gain renders as silence --
+ * wrong, but quiet. +-Inf does not scrub to silence. Inf * anything nonzero is
+ * Inf, mix.c clamps it, and the file comes out as SUSTAINED DIGITAL FULL
+ * SCALE, for as long as the recording runs, on a machine whose owner is
+ * wearing headphones and cannot see a meter. AGENTS.md rule 1 makes that the
+ * worse failure by a distance, so the check that caught the tidier one now
+ * catches both -- and in one function, so the two call sites cannot drift
+ * apart again.
+ *
+ * isfinite() is C99 and covers both halves in one test; hand-rolling it out of
+ * comparisons against FLT_MAX invites a constant that folds to infinity and a
+ * /W4 overflow warning. */
+static int gain_is_finite(float g)
+{
+    return isfinite((double)g) != 0;
+}
+
 static size_t find_edge(const AprBus *b, AprSourceId id)
 {
     size_t i;
@@ -178,7 +200,13 @@ AprErr apr_bus_add_source(AprBus *b, AprSource *s, float gain)
     AprErr           e;
 
     if (!b || !s) return APR_ERR(APR_E_INVALID_ARG, L"bus or source is null");
-    if (!(gain == gain)) return APR_ERR(APR_E_INVALID_ARG, L"gain is not a number");
+    if (b->running) {
+        return APR_ERR(APR_E_BUSY,
+                       L"a source cannot be added to bus %u while it is "
+                       L"recording", b->id);
+    }
+    if (!gain_is_finite(gain))
+        return APR_ERR(APR_E_INVALID_ARG, L"gain is not a finite number");
     if (apr_source_rate(s) != b->rate) {
         /* Sources are opened at the session rate; a mismatch means the graph
          * was built wrong, and silently resampling it would hide that. */
@@ -210,6 +238,11 @@ AprErr apr_bus_remove_source(AprBus *b, AprSourceId id)
     size_t i;
 
     if (!b) return APR_ERR(APR_E_INVALID_ARG, L"null bus");
+    if (b->running) {
+        return APR_ERR(APR_E_BUSY,
+                       L"a source cannot be removed from bus %u while it is "
+                       L"recording", b->id);
+    }
     i = find_edge(b, id);
     if (i == (size_t)-1) {
         return APR_ERR(APR_E_NOT_FOUND, L"source %u does not feed bus %u", id, b->id);
@@ -242,10 +275,19 @@ AprErr apr_bus_set_gain(AprBus *b, AprSourceId id, float gain)
     size_t i;
 
     if (!b) return APR_ERR(APR_E_INVALID_ARG, L"null bus");
-    /* A NaN gain would turn the whole bus into NaN, and every integer encoder
-     * downstream would render that as silence rather than audio. Refuse it
-     * here, where there is still a caller to tell. */
-    if (!(gain == gain)) return APR_ERR(APR_E_INVALID_ARG, L"gain is not a number");
+    /* See gain_is_finite: NaN renders as silence, infinity renders as
+     * sustained full scale, and only one of the two used to be refused. */
+    if (!gain_is_finite(gain))
+        return APR_ERR(APR_E_INVALID_ARG, L"gain is not a finite number");
+    /* The mixer reads this array on the runner's thread; the canvas writes it
+     * on the UI thread. A float store is not the hazard -- rewriting a gain
+     * the user cannot then hear applied, mid-take, is. Refuse and say so
+     * (graph.h). */
+    if (b->running) {
+        return APR_ERR(APR_E_BUSY,
+                       L"the gain on bus %u cannot be changed while it is "
+                       L"recording", b->id);
+    }
     i = find_edge(b, id);
     if (i == (size_t)-1) {
         return APR_ERR(APR_E_NOT_FOUND, L"source %u does not feed bus %u", id, b->id);

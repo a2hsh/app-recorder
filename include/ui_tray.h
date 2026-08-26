@@ -100,6 +100,15 @@ int apr_tray_on_message(AprTray *t, WPARAM wp, LPARAM lp);
  * Returns nonzero when the message was that one. */
 int apr_tray_on_taskbar_created(AprTray *t, UINT msg);
 
+/* Nonzero when the shell is actually showing our icon right now.
+ *
+ * Ask before hiding the window. apr_tray_create() treats a refused NIM_ADD as
+ * non-fatal on purpose, so "the tray object exists" does not mean "there is
+ * something in the notification area" -- and a window hidden with nothing in
+ * the notification area cannot be reached by any means at all while it goes
+ * on recording. */
+int apr_tray_is_registered(const AprTray *t);
+
 /* Update the live tooltip. `elapsed` is the already-formatted duration and is
  * ignored unless the state is RECORDING. Cheap enough to call every second,
  * which is what the frame does. */

@@ -64,10 +64,13 @@
 #include "graph.h"
 #include "outpath.h"
 #include "strings.h"
+#include "session.h"
 #include "ui_app.h"
 #include "ui_canvas.h"
 #include "ui_controller.h"
+#include "ui_dialogs.h"
 #include "ui_node.h"
+#include "ui_tree_panel.h"
 
 static const CLSID kCLSID_CUIAutomation =
     { 0xff48dba4, 0x60ef, 0x4201, { 0xaa, 0x87, 0x54, 0x10, 0x3e, 0xef, 0x59, 0x4e } };
@@ -95,6 +98,17 @@ typedef struct Setup {
     int         built;
     AprErr      err;
     wchar_t     out_path[MAX_PATH];
+
+    /* A SESSION OPENED AFTER THE FIXTURE IS READY BUT BEFORE THE LOOP RUNS.
+     *
+     * apr_controller_open_session is modal when it has anything to report, and
+     * a modal owns the thread that opened it -- so the only way to answer one
+     * is from another thread, which means the asserting thread has to be
+     * running by then. The UI thread therefore signals `ready` FIRST and opens
+     * the session second; the test finds the dialog and answers it. */
+    wchar_t open_path[MAX_PATH];
+    AprErr  open_err;
+    volatile LONG open_done;
 } Setup;
 
 typedef struct UiHost {
@@ -106,6 +120,8 @@ typedef struct UiHost {
     AprGraph      *graph;
     HWND           frame;
     HWND           canvas;
+    HWND           tree;     /* the Structure PANE (our host window) */
+    HWND           tv;       /* the TreeView inside it                */
     HWND           status;
     Setup          setup;
     int            failed;
@@ -191,10 +207,19 @@ static DWORD WINAPI ui_thread(LPVOID param)
 
     h->frame  = apr_ui_app_hwnd(h->app);
     h->canvas = apr_ui_app_pane(h->app, APR_PANE_CANVAS);
+    h->tree   = apr_ui_app_pane(h->app, APR_PANE_TREE);
+    h->tv     = h->tree ? apr_tree_panel_treeview(h->tree) : NULL;
     h->status = apr_ui_app_status_bar(h->app);
 
     build_setup(h);
     SetEvent(h->ready);
+
+    /* See Setup::open_path. */
+    if (h->setup.open_path[0]) {
+        h->setup.open_err =
+            apr_controller_open_session(h->ctl, h->setup.open_path, 1);
+        InterlockedIncrement(&h->setup.open_done);
+    }
 
     apr_ui_app_run(h->app);
 
@@ -1101,6 +1126,1327 @@ TEST(a_writable_name_is_accepted_at_add_time_and_still_creates_nothing)
 
     fix_down(&f);
     DeleteFileW(expect);
+}
+
+
+/* ==========================================================================
+ * THE STRUCTURE PANEL, DRIVEN BY THE KEYBOARD, WITH A REAL CONTROLLER BEHIND IT
+ *
+ * Two sweeps found this independently and no suite could have caught it:
+ * test_ui_tree.c drives a live tree with NO controller wired to it, and this
+ * suite had never opened the tree at all. The wire between the two was the one
+ * thing nothing tested, and the defect is in the wire.
+ * ======================================================================== */
+
+/* Focus, as the thread that owns the window sees it. GetGUIThreadInfo rather
+ * than UIA's GetFocusedElement: the latter is per-desktop and needs the window
+ * to be foreground, which a test launched by a build system is not. */
+static HWND focus_on_ui_thread(UiHost *h)
+{
+    GUITHREADINFO gti;
+
+    memset(&gti, 0, sizeof gti);
+    gti.cbSize = sizeof gti;
+    if (!GetGUIThreadInfo(GetThreadId(h->thread), &gti)) return NULL;
+    return gti.hwndFocus;
+}
+
+/* Hand focus to the frame and wait for it to reach the tree, the way it does
+ * for a user arriving at the window. */
+static int focus_the_tree(UiHost *h)
+{
+    int round, t;
+
+    /* THE FRAME HAS TO BE ON SCREEN FIRST. cycle_pane only hands focus to a
+     * VISIBLE pane, and a child of a window that was never shown is not one --
+     * so a fixture that never calls ShowWindow can never put focus in a pane,
+     * which is exactly the state this suite was in. SW_SHOWNOACTIVATE: real
+     * and visible, without taking the foreground from whoever is at the
+     * machine. */
+    ShowWindow(h->frame, SW_SHOWNOACTIVATE);
+
+    /* F6, WHICH IS THE AUTHOR'S OWN GESTURE. Posted into the UI thread's queue
+     * so it travels through apr_ui_app_run's pre-translate filter and reaches
+     * cycle_pane on the thread that owns the windows -- a SetFocus from here
+     * would do nothing, silently, and a synthetic WM_SETFOCUS does not move
+     * focus at all. F6 cycles, so a few presses reach whichever pane. */
+    for (round = 0; round < APR_PANE_COUNT + 1; ++round) {
+        PostMessageW(h->frame, WM_KEYDOWN, VK_F6, 0);
+        PostMessageW(h->frame, WM_KEYUP, VK_F6, 0);
+        for (t = 0; t < 40; ++t) {
+            if (focus_on_ui_thread(h) == h->tv) return 1;
+            Sleep(15);
+        }
+    }
+    return 0;
+}
+
+/* The row the caret is on, as its lParam index, or -1. */
+static int tv_caret_row(HWND tv)
+{
+    HTREEITEM cur = (HTREEITEM)SendMessageW(tv, TVM_GETNEXTITEM, TVGN_CARET, 0);
+    TVITEMW it;
+
+    if (!cur) return -1;
+    memset(&it, 0, sizeof it);
+    it.mask = TVIF_PARAM;
+    it.hItem = cur;
+    if (!SendMessageW(tv, TVM_GETITEMW, 0, (LPARAM)&it)) return -1;
+    return (int)it.lParam;
+}
+
+/* Every item's text, in display order, so the LIVE control can be compared
+ * against what the model says it should be saying. */
+static size_t tv_texts(HWND tv, wchar_t out[][512], size_t cap)
+{
+    HTREEITEM stack[256];
+    size_t n = 0, top = 0;
+    HTREEITEM it;
+
+    it = (HTREEITEM)SendMessageW(tv, TVM_GETNEXTITEM, TVGN_ROOT, 0);
+    while (it || top > 0) {
+        TVITEMW q;
+        HTREEITEM kid, next;
+
+        if (!it) { it = stack[--top]; continue; }
+
+        memset(&q, 0, sizeof q);
+        q.mask = TVIF_TEXT;
+        q.hItem = it;
+        q.pszText = out[n < cap ? n : 0];
+        q.cchTextMax = 512;
+        if (n < cap && SendMessageW(tv, TVM_GETITEMW, 0, (LPARAM)&q)) n++;
+
+        next = (HTREEITEM)SendMessageW(tv, TVM_GETNEXTITEM, TVGN_NEXT,
+                                       (LPARAM)it);
+        kid = (HTREEITEM)SendMessageW(tv, TVM_GETNEXTITEM, TVGN_CHILD,
+                                      (LPARAM)it);
+        if (kid) {
+            if (next && top < 256) stack[top++] = next;
+            it = kid;
+        } else {
+            it = next;
+        }
+    }
+    return n;
+}
+
+TEST(arrowing_down_the_structure_panel_does_not_yank_focus_out_of_it)
+{
+    /* THE AUTHOR CANNOT REACH PAST THE FIRST ROW.
+     *
+     * The tree's selection sink fires on EVERY caret move, and the controller
+     * answered it with an unconditional SetFocus on the matching canvas node.
+     * So: F6 into the tree, press Down, and focus is yanked to the canvas --
+     * the reader announces the canvas node instead of the row, and the next
+     * Down drives the canvas. Everything past the first row is unreachable,
+     * and these rows' sentences are the entire purpose of the panel. */
+    Fix f;
+    int visited[APR_TREE_MAX_ROWS];
+    size_t want_rows;
+    int i, tries, reached = 0;
+
+    if (!fix_up(&f, 1, 1, 1, 1)) { fix_down(&f); return; }
+    if (!f.h.tv) {
+        printf("      SKIPPED: no tree panel in this build\n");
+        fix_down(&f);
+        return;
+    }
+
+    want_rows = apr_tree_panel_rows(f.g, NULL, 0);
+    ASSERT_GT_INT(1, (int)want_rows);   /* a one-row tree would prove nothing */
+    memset(visited, 0, sizeof visited);
+
+    if (!focus_the_tree(&f.h)) {
+        printf("      SKIPPED: focus never reached the tree control\n");
+        fix_down(&f);
+        return;
+    }
+
+    SendMessageW(f.h.tv, WM_KEYDOWN, VK_HOME, 0);
+    SendMessageW(f.h.tv, WM_KEYUP, VK_HOME, 0);
+
+    for (tries = 0; tries < (int)want_rows * 3 + 8; ++tries) {
+        HWND focus = focus_on_ui_thread(&f.h);
+        int row;
+
+        /* THE ASSERTION THAT FAILS WITHOUT THE FIX, and it fails on the very
+         * first Down: after moving the caret, the keyboard must still be in
+         * the tree. */
+        if (focus != f.h.tv) {
+            printf("      focus left the tree after %d moves: %p "
+                   "(tree %p, canvas %p)\n", tries, (void *)focus,
+                   (void *)f.h.tv, (void *)f.h.canvas);
+        }
+        ASSERT_TRUE(focus == f.h.tv);
+
+        row = tv_caret_row(f.h.tv);
+        if (row >= 0 && row < APR_TREE_MAX_ROWS && !visited[row]) {
+            visited[row] = 1;
+            reached++;
+        }
+        SendMessageW(f.h.tv, WM_KEYDOWN, VK_DOWN, 0);
+        SendMessageW(f.h.tv, WM_KEYUP, VK_DOWN, 0);
+    }
+
+    printf("      Down Arrow reached %d of %d rows without losing focus\n",
+           reached, (int)want_rows);
+    for (i = 0; i < (int)want_rows; ++i) ASSERT_TRUE(visited[i]);
+
+    fix_down(&f);
+}
+
+TEST(the_caret_moves_the_canvas_quietly_and_only_enter_takes_the_keyboard_there)
+{
+    /* The other half of the same fix. Moving the caret must still keep the two
+     * views AGREEING -- the canvas's current node follows the tree, so F6 back
+     * to the canvas lands where the user was standing -- and ACTIVATING a row
+     * is what actually goes there. */
+    Fix f;
+    AprTreeSel sel;
+    int bus_node, t;
+
+    if (!fix_up(&f, 1, 1, 1, 1)) { fix_down(&f); return; }
+    if (!f.h.tv) { printf("      SKIPPED: no tree panel\n"); fix_down(&f); return; }
+    if (!focus_the_tree(&f.h)) {
+        printf("      SKIPPED: focus never reached the tree control\n");
+        fix_down(&f);
+        return;
+    }
+
+    bus_node = node_index(&f.h, APR_NODE_BUS, BUS(&f), 0);
+    ASSERT_GE_INT(0, bus_node);
+
+    /* The caret on the first row, which apr_tree_panel_rows makes the bus. */
+    SendMessageW(f.h.tv, WM_KEYDOWN, VK_HOME, 0);
+    SendMessageW(f.h.tv, WM_KEYUP, VK_HOME, 0);
+    Sleep(50);
+
+    ASSERT_EQ_INT(1, apr_tree_panel_get_selection(f.h.tree, &sel));
+    ASSERT_EQ_INT((int)APR_TREE_ROW_BUS, (int)sel.kind);
+
+    /* The canvas agrees -- without having taken the keyboard. */
+    ASSERT_TRUE(apr_canvas_focused_node(f.h.canvas) ==
+                apr_canvas_node_at(f.h.canvas, (size_t)bus_node));
+    ASSERT_TRUE(focus_on_ui_thread(&f.h) == f.h.tv);
+
+    /* NOW activate it. IsDialogMessage eats Enter unless the control claims
+     * it, so this also proves the claim works. */
+    SendMessageW(f.h.tv, WM_KEYDOWN, VK_RETURN, 0);
+    SendMessageW(f.h.tv, WM_KEYUP, VK_RETURN, 0);
+    for (t = 0; t < 60; ++t) {
+        if (focus_on_ui_thread(&f.h) ==
+            apr_canvas_node_at(f.h.canvas, (size_t)bus_node)) {
+            break;
+        }
+        Sleep(15);
+    }
+    printf("      after Enter, focus is %p (the bus node is %p)\n",
+           (void *)focus_on_ui_thread(&f.h),
+           (void *)apr_canvas_node_at(f.h.canvas, (size_t)bus_node));
+    ASSERT_TRUE(focus_on_ui_thread(&f.h) ==
+                apr_canvas_node_at(f.h.canvas, (size_t)bus_node));
+
+    fix_down(&f);
+}
+
+/* ==========================================================================
+ * "GREYED AND SPOKEN" -- THE SPOKEN HALF, WHICH HAD NEVER RUN
+ * ======================================================================== */
+
+TEST(an_editing_key_pressed_while_recording_says_why_it_was_refused)
+{
+    /* THE DEFECT CLASS THAT BURNED THIS AUTHOR FOUR TIMES THIS WEEK: the
+     * design was right and the delivery was silently absent.
+     *
+     * ui_controller.h promises that an editing command refused during a
+     * recording is "greyed AND spoken, because grey alone says nothing to this
+     * application's first user". TranslateAccelerator does not send WM_COMMAND
+     * for an accelerator whose menu item is disabled -- it swallows the key and
+     * delivers nothing -- so busy() never ran, and the sentence at
+     * UI_ANN_BUSY_RECORDING had never once played. Mid-recording the key was
+     * TOTAL SILENCE, which for this author is a broken application.
+     *
+     * The key is POSTED into the UI thread's own queue, so it travels through
+     * apr_ui_app_run and the real pre-translate filter -- not as a WM_COMMAND,
+     * which is precisely the message that never arrived. F2 and Delete carry
+     * no modifier, and a synthetic message does not move the keyboard state,
+     * so the modifier read is 0 and deterministic. */
+    Fix f;
+    wchar_t got[512], want[512];
+    int waited;
+    static const struct { UINT vk; int cmd; const char *what; } keys[] = {
+        { VK_F2,     APR_CMD_RENAME_BUS, "F2 (rename bus)" },
+        { VK_DELETE, APR_CMD_REMOVE,     "Delete (remove node)" }
+    };
+    size_t k;
+
+    if (!fix_up(&f, 1, 1, 1, 1)) { fix_down(&f); return; }
+
+    /* The binding and the menu state are separate questions now, and both have
+     * to hold: the key IS bound, and the item IS greyed. */
+    for (k = 0; k < sizeof keys / sizeof keys[0]; ++k) {
+        ASSERT_EQ_INT(keys[k].cmd, apr_ui_app_accel_command(keys[k].vk, 0));
+    }
+
+    accel(&f.h, APR_CMD_RECORD_START);
+    if (!apr_controller_recording(f.h.ctl)) {
+        fix_down(&f);
+        FAIL("the recording did not start");
+    }
+
+    apr_str_format(APR_S_UI_ANN_BUSY_RECORDING, want, 512, NULL, 0);
+
+    for (k = 0; k < sizeof keys / sizeof keys[0]; ++k) {
+        /* Greyed. */
+        ASSERT_FALSE(apr_ui_app_command_enabled(f.h.app, keys[k].cmd));
+
+        /* And SPOKEN. Something else is said first, so a stale sentence
+         * cannot pass for this one. */
+        SendMessageW(f.h.frame, WM_COMMAND,
+                     MAKEWPARAM(APR_CMD_RECORD_START, 1), 0);
+
+        PostMessageW(f.h.frame, WM_KEYDOWN, (WPARAM)keys[k].vk, 0);
+        PostMessageW(f.h.frame, WM_KEYUP, (WPARAM)keys[k].vk, 0);
+
+        for (waited = 0; waited < 5000; waited += 10) {
+            if (wcscmp(want, said(&f.h, got, 512)) == 0) break;
+            Sleep(10);
+        }
+        printf("      %-22s said: \"%ls\"\n", keys[k].what, got);
+        ASSERT_WSTR_EQ(want, got);
+    }
+
+    accel(&f.h, APR_CMD_RECORD_STOP);
+    for (waited = 0; waited < 25000 && apr_controller_recording(f.h.ctl);
+         waited += 10) {
+        Sleep(10);
+    }
+
+    fix_down(&f);
+}
+
+TEST(a_canvas_key_that_would_rewire_a_running_graph_is_refused_in_words)
+{
+    /* C4's UI half. Disconnect is deliberately NOT a frame accelerator -- the
+     * canvas claims Ctrl+Shift+E through its own binding table -- so it
+     * bypassed the controller's busy() check entirely and reached the model as
+     * a raw keystroke while the runner was iterating the same edge arrays.
+     * This asserts the user HEARS the refusal rather than watching the gesture
+     * quietly do nothing.
+     *
+     * Driven through the canvas's own message form (ui_canvas.h), which runs
+     * exactly the function a keystroke runs, on the thread it requires. */
+    Fix f;
+    wchar_t got[512], want[512];
+    int si, waited;
+
+    if (!fix_up(&f, 1, 1, 1, 1)) { fix_down(&f); return; }
+    ASSERT_TRUE(apr_graph_connected(f.g, SRC(&f), BUS(&f)) != 0);
+
+    si = node_index(&f.h, APR_NODE_SOURCE, SRC(&f), 0);
+    ASSERT_TRUE(focus_node(&f.h, si));
+
+    accel(&f.h, APR_CMD_RECORD_START);
+    if (!apr_controller_recording(f.h.ctl)) {
+        fix_down(&f);
+        FAIL("the recording did not start");
+    }
+
+    SendMessageW(f.h.canvas, APR_CANVAS_WM_PERFORM,
+                 (WPARAM)APR_CANVAS_OP_DISCONNECT, 0);
+
+    apr_str_format(APR_S_UI_ANN_BUSY_RECORDING, want, 512, NULL, 0);
+    printf("      disconnect said: \"%ls\"\n", said(&f.h, got, 512));
+    ASSERT_WSTR_EQ(want, got);
+    /* Refused means refused: no half-made gesture left behind, and nothing in
+     * the model moved. */
+    ASSERT_TRUE(apr_canvas_pending_node(f.h.canvas) == NULL);
+    ASSERT_TRUE(apr_graph_connected(f.g, SRC(&f), BUS(&f)) != 0);
+
+    /* The level keys take the same route and get the same answer. */
+    SendMessageW(f.h.canvas, APR_CANVAS_WM_PERFORM,
+                 (WPARAM)APR_CANVAS_OP_GAIN_UP, 0);
+    printf("      plus said:       \"%ls\"\n", said(&f.h, got, 512));
+    ASSERT_WSTR_EQ(want, got);
+
+    accel(&f.h, APR_CMD_RECORD_STOP);
+    for (waited = 0; waited < 25000 && apr_controller_recording(f.h.ctl);
+         waited += 10) {
+        Sleep(10);
+    }
+
+    fix_down(&f);
+}
+
+/* ==========================================================================
+ * THE CLOSE THAT LEFT THE PROCESS BEHIND
+ * ======================================================================== */
+
+TEST(stop_recording_and_close_actually_ends_the_process)
+{
+    /* THE NORMAL CASE OF THE CLOSE PATH, AND IT NEVER EXITED.
+     *
+     * "Stop recording and close" pumps messages while the encoders flush --
+     * which is right, because a frozen window is a window a screen reader
+     * cannot read. But the drain dispatched EVERY message with no WM_QUIT
+     * check: recording_finished posts WM_CLOSE, the same drain dispatches it,
+     * DestroyWindow runs, WM_DESTROY calls PostQuitMessage -- and then the
+     * drain retrieved that WM_QUIT and dropped it. Window gone, process alive,
+     * apr_controller_destroy never run, tray icon ghosted, and a second launch
+     * coexisting with the first.
+     *
+     * The assertion is simply: does the UI thread END. */
+    Fix f;
+    HWND dlg;
+    DWORD wait;
+    int waited;
+
+    if (!fix_up(&f, 1, 1, 1, 1)) { fix_down(&f); return; }
+
+    accel(&f.h, APR_CMD_RECORD_START);
+    if (!apr_controller_recording(f.h.ctl)) {
+        fix_down(&f);
+        FAIL("the recording did not start");
+    }
+    Sleep(200);
+
+    PostMessageW(f.h.frame, WM_CLOSE, 0, 0);
+    dlg = wait_for_dialog(&f.h, 15000);
+    if (!dlg) {
+        accel(&f.h, APR_CMD_RECORD_STOP);
+        for (waited = 0; waited < 25000 && apr_controller_recording(f.h.ctl);
+             waited += 10) {
+            Sleep(10);
+        }
+        fix_down(&f);
+        FAIL("closing while recording asked no question");
+    }
+
+    /* "Stop the recording and close" is the default button (dialogs.c). */
+    PostMessageW(dlg, WM_COMMAND, MAKEWPARAM(IDOK, BN_CLICKED), 0);
+
+    wait = WaitForSingleObject(f.h.thread, 30000);
+    printf("      the UI thread ended: %s\n",
+           wait == WAIT_OBJECT_0 ? "yes"
+                                 : "NO -- the process would be a zombie");
+    if (wait != WAIT_OBJECT_0) {
+        fix_down(&f);
+        FAIL("the window closed but the message loop never ended");
+    }
+
+    /* And the take is still a real file: closing must never cost a recording. */
+    ASSERT_TRUE(wav_is_playable(f.h.setup.out_path, NULL));
+
+    fix_down(&f);
+}
+
+/* ==========================================================================
+ * THE TREE PANEL AND THE MODEL, KEPT IN STEP
+ * ======================================================================== */
+
+/* The live control's rows, against what the model says they are. */
+static int tree_agrees_with_model(UiHost *h, AprGraph *g)
+{
+    static wchar_t got[APR_TREE_MAX_ROWS][512];
+    static AprTreeRow rows[APR_TREE_MAX_ROWS];
+    size_t n_model, n_live, i;
+
+    n_model = apr_tree_panel_rows(g, rows, APR_TREE_MAX_ROWS);
+    n_live  = tv_texts(h->tv, got, APR_TREE_MAX_ROWS);
+
+    if (n_model != n_live) {
+        printf("      the tree shows %d rows; the model has %d\n",
+               (int)n_live, (int)n_model);
+        return 0;
+    }
+    for (i = 0; i < n_model; ++i) {
+        wchar_t want[512];
+        apr_tree_panel_label(g, &rows[i].sel, want, 512);
+        if (wcscmp(want, got[i]) != 0) {
+            printf("      row %d says    \"%ls\"\n", (int)i, got[i]);
+            printf("      the model says \"%ls\"\n", want);
+            return 0;
+        }
+    }
+    return 1;
+}
+
+TEST(an_edit_the_canvas_makes_by_itself_reaches_the_tree_panel)
+{
+    /* apr_controller_model_changed's own header says that without it "the tree
+     * panel would still be showing the old shape", and that is exactly what
+     * happened: nothing in the product ever called it. Ctrl+Shift+E and a
+     * mouse click completing an edge edit the graph inside the canvas's own
+     * window procedure -- no accelerator, no WM_COMMAND, nothing reaching the
+     * controller -- so the tree went on describing an edge that had been cut.
+     * The view used to AUDIT a session reported a connection that no longer
+     * existed. */
+    Fix f;
+    int si, bi;
+
+    if (!fix_up(&f, 1, 1, 1, 1)) { fix_down(&f); return; }
+    if (!f.h.tv) { printf("      SKIPPED: no tree panel\n"); fix_down(&f); return; }
+
+    ASSERT_TRUE(tree_agrees_with_model(&f.h, f.g));
+
+    /* Disconnect through the canvas's own two-step gesture -- the route that
+     * never touches the controller's command handler. */
+    si = node_index(&f.h, APR_NODE_SOURCE, SRC(&f), 0);
+    bi = node_index(&f.h, APR_NODE_BUS, BUS(&f), 0);
+    ASSERT_TRUE(focus_node(&f.h, si));
+    SendMessageW(f.h.canvas, APR_CANVAS_WM_PERFORM,
+                 (WPARAM)APR_CANVAS_OP_DISCONNECT, 0);
+    ASSERT_TRUE(focus_node(&f.h, bi));
+    SendMessageW(f.h.canvas, APR_CANVAS_WM_PERFORM,
+                 (WPARAM)APR_CANVAS_OP_DISCONNECT, 0);
+
+    ASSERT_FALSE(apr_graph_connected(f.g, SRC(&f), BUS(&f)) != 0);
+    ASSERT_TRUE(tree_agrees_with_model(&f.h, f.g));
+
+    fix_down(&f);
+}
+
+TEST(the_tree_says_a_bus_is_recording_while_it_is_recording)
+{
+    /* THE SENTENCES EXISTED, WERE QUEUED FOR TRANSLATION, AND COULD NEVER BE
+     * HEARD WHEN TRUE. Every bus row picks UI_TREE_BUS_RECORDING over
+     * UI_TREE_BUS from apr_bus_running(), and nothing rebuilt the rows when a
+     * run started -- so F6 into the panel mid-session and every bus read as
+     * idle for the whole recording. */
+    Fix f;
+    static wchar_t live[APR_TREE_MAX_ROWS][512];
+    wchar_t want[512];
+    AprTreeSel bus_row;
+    size_t n;
+    int waited, heard = 0;
+
+    if (!fix_up(&f, 1, 1, 1, 1)) { fix_down(&f); return; }
+    if (!f.h.tv) { printf("      SKIPPED: no tree panel\n"); fix_down(&f); return; }
+
+    memset(&bus_row, 0, sizeof bus_row);
+    bus_row.kind = APR_TREE_ROW_BUS;
+    bus_row.bus  = BUS(&f);
+
+    accel(&f.h, APR_CMD_RECORD_START);
+    if (!apr_controller_recording(f.h.ctl)) {
+        fix_down(&f);
+        FAIL("the recording did not start");
+    }
+
+    /* The sentence the model produces WHILE the bus is running -- read from
+     * the catalog through the panel's own pure projection, never a literal. */
+    apr_tree_panel_label(f.g, &bus_row, want, 512);
+    printf("      the model says: \"%ls\"\n", want);
+
+    for (waited = 0; waited < 5000 && !heard; waited += 20) {
+        size_t i;
+        n = tv_texts(f.h.tv, live, APR_TREE_MAX_ROWS);
+        for (i = 0; i < n; ++i) {
+            if (wcscmp(want, live[i]) == 0) { heard = 1; break; }
+        }
+        if (!heard) Sleep(20);
+    }
+    if (!heard) {
+        size_t i;
+        n = tv_texts(f.h.tv, live, APR_TREE_MAX_ROWS);
+        for (i = 0; i < n; ++i) printf("      the tree says:  \"%ls\"\n", live[i]);
+    }
+
+    accel(&f.h, APR_CMD_RECORD_STOP);
+    for (waited = 0; waited < 25000 && apr_controller_recording(f.h.ctl);
+         waited += 10) {
+        Sleep(10);
+    }
+
+    ASSERT_TRUE(heard);
+    fix_down(&f);
+}
+
+/* ==========================================================================
+ * THE NOTIFICATION AREA IS A CHANNEL, NOT A DECORATION
+ * ======================================================================== */
+
+TEST(a_take_that_moved_aside_is_told_to_a_window_that_is_not_in_front)
+{
+    /* The honest-collision policy insists the user be TOLD when a take moves
+     * aside -- and the telling landed on a status bar's live region, which no
+     * reader announces on a background window. A recording started from the
+     * notification area starts with the window hidden BY DEFINITION, so this
+     * was the one fact the policy insists on, delivered on the one channel
+     * that could not carry it.
+     *
+     * fg_override forces "the window is not in front", because a test cannot
+     * make itself foreground reliably (ui_controller.h). */
+    Fix f;
+    wchar_t second[MAX_PATH], want[512], got[512];
+    int waited, heard = 0;
+
+    if (!fix_up(&f, 1, 1, 1, 1)) { fix_down(&f); return; }
+    sibling_take(f.h.setup.out_path, 2, second, MAX_PATH);
+    DeleteFileW(second);
+
+    if (!one_take(&f, 200)) {
+        fix_down(&f);
+        DeleteFileW(second);
+        FAIL("take one did not run");
+    }
+
+    apr_controller_test_set_foreground(f.h.ctl, 0);   /* hidden, or behind */
+    sentence(APR_S_UI_TRAY_INFO_OUTPUT_RENAMED, second, NULL, want, 512);
+    printf("      wanted on the tray channel: \"%ls\"\n", want);
+
+    accel(&f.h, APR_CMD_RECORD_START);
+    for (waited = 0; waited < 5000; waited += 10) {
+        apr_controller_last_balloon(f.h.ctl, got, 512);
+        if (wcscmp(want, got) == 0) { heard = 1; break; }
+        Sleep(10);
+    }
+    printf("      last balloon:               \"%ls\"\n", got);
+
+    accel(&f.h, APR_CMD_RECORD_STOP);
+    for (waited = 0; waited < 25000 && apr_controller_recording(f.h.ctl);
+         waited += 10) {
+        Sleep(10);
+    }
+    apr_controller_test_set_foreground(f.h.ctl, -1);
+
+    ASSERT_TRUE(heard);
+    fix_down(&f);
+    DeleteFileW(second);
+}
+
+TEST(nothing_balloons_while_the_window_is_in_front)
+{
+    /* The other half of "INSTEAD, not as well". A balloon raised while the
+     * window is in front is read by a screen reader on top of the live region
+     * that already said it -- every event heard twice -- and one test run
+     * buried the author's notification centre during a meeting. */
+    Fix f;
+    unsigned before;
+    wchar_t second[MAX_PATH];
+
+    if (!fix_up(&f, 1, 1, 1, 1)) { fix_down(&f); return; }
+    sibling_take(f.h.setup.out_path, 2, second, MAX_PATH);
+    DeleteFileW(second);
+
+    apr_controller_test_set_foreground(f.h.ctl, 1);   /* in front */
+    before = apr_controller_balloon_count(f.h.ctl);
+
+    if (!one_take(&f, 200)) {
+        fix_down(&f);
+        DeleteFileW(second);
+        FAIL("the take did not run");
+    }
+    Sleep(200);
+
+    printf("      balloons raised in the foreground: %u\n",
+           apr_controller_balloon_count(f.h.ctl) - before);
+    ASSERT_EQ_INT((int)before, (int)apr_controller_balloon_count(f.h.ctl));
+
+    apr_controller_test_set_foreground(f.h.ctl, -1);
+    fix_down(&f);
+    DeleteFileW(second);
+}
+
+TEST(hiding_the_window_is_refused_when_there_is_no_icon_to_hide_into)
+{
+    /* Shell_NotifyIcon(NIM_ADD) is allowed to fail, and that is deliberately
+     * not fatal -- but both hide paths called ShowWindow(SW_HIDE) regardless.
+     * With no icon the window then vanishes with no surface AT ALL: Win+B
+     * finds nothing, Alt+Tab finds nothing, and it is still recording.
+     *
+     * Every test runs with APPRECORDER_NO_TRAY set (AGENTS.md rule 1, wired in
+     * CMake), so this suite is permanently in exactly that state. */
+    Fix f;
+    wchar_t got[512], want[512];
+
+    if (!fix_up(&f, 1, 1, 1, 1)) { fix_down(&f); return; }
+
+    /* The fixture never shows its frame, and "it did not disappear" needs a
+     * window that was there to begin with. SW_SHOWNOACTIVATE: visible, but it
+     * does not take the foreground away from whoever is at the machine. */
+    ShowWindow(f.h.frame, SW_SHOWNOACTIVATE);
+    if (!IsWindowVisible(f.h.frame)) {
+        printf("      SKIPPED: the frame would not become visible\n");
+        fix_down(&f);
+        return;
+    }
+
+    accel(&f.h, APR_CMD_HIDE_TO_TRAY);
+
+    apr_str_format(APR_S_UI_ANN_NO_TRAY, want, 512, NULL, 0);
+    printf("      said: \"%ls\"\n", said(&f.h, got, 512));
+    ASSERT_WSTR_EQ(want, got);
+    /* And the window is still there, which is the whole point. */
+    ASSERT_TRUE(IsWindowVisible(f.h.frame) != 0);
+
+    ShowWindow(f.h.frame, SW_HIDE);
+    fix_down(&f);
+}
+
+/* ==========================================================================
+ * SMALLER THINGS THAT WERE STILL SILENCE
+ * ======================================================================== */
+
+TEST(removing_an_output_from_a_bus_that_has_none_talks_about_outputs)
+{
+    /* "There is no bus to record yet" told a user standing on a bus that they
+     * had no bus, and sent them off to add the thing they already had. */
+    Fix f;
+    wchar_t got[512], want[512];
+
+    if (!fix_up(&f, 1, 1, 1, 0)) { fix_down(&f); return; }   /* bus, no output */
+
+    accel(&f.h, APR_CMD_REMOVE_OUTPUT);
+
+    apr_str_format(APR_S_UI_DLG_NO_OUTPUTS, want, 512, NULL, 0);
+    printf("      said: \"%ls\"\n", said(&f.h, got, 512));
+    ASSERT_WSTR_EQ(want, got);
+
+    fix_down(&f);
+}
+
+TEST(a_window_that_could_not_be_created_is_announced_rather_than_logged)
+{
+    /* A two-byte misalignment in the template builder made EVERY dialog fail
+     * to be created for a fortnight. Every call site folded that into "the
+     * user cancelled", so the key did nothing, no window appeared, and NOTHING
+     * WAS SAID -- the only evidence was a warning in a log file nobody had
+     * open, and the author's report was "it's all silence". */
+    Fix f;
+    HWND dlg;
+    wchar_t got[512], want[512];
+
+    if (!fix_up(&f, 1, 1, 1, 1)) { fix_down(&f); return; }
+
+    apr_dlg_test_fail_next(1);
+    accel(&f.h, APR_CMD_ADD_BUS);
+    apr_dlg_test_fail_next(0);
+
+    apr_str_format(APR_S_UI_DLG_CREATE_FAILED, want, 512, NULL, 0);
+    printf("      said: \"%ls\"\n", said(&f.h, got, 512));
+    ASSERT_WSTR_EQ(want, got);
+
+    /* And a real cancel still says nothing, because the user meant it. */
+    accel_async(&f.h, APR_CMD_ADD_BUS);
+    dlg = wait_for_dialog(&f.h, 10000);
+    if (!dlg) { fix_down(&f); FAIL("the dialog did not open after the gate"); }
+    PostMessageW(dlg, WM_COMMAND, MAKEWPARAM(IDCANCEL, BN_CLICKED), 0);
+    ASSERT_TRUE(wait_for_no_dialog(&f.h, 10000));
+    (void)SendMessageW(f.h.frame, WM_NULL, 0, 0);
+    ASSERT_EQ_INT(0, apr_dlg_last_failed());
+
+    fix_down(&f);
+}
+
+TEST(a_session_with_unsaved_changes_is_not_discarded_without_asking)
+{
+    /* File > New and File > Open threw an hour of routing away with no prompt.
+     * Ctrl+N is one slip from Ctrl+B on any layout, and the session file is the
+     * artifact you rely on to reproduce a recording. */
+    Fix f;
+    HWND dlg;
+
+    if (!fix_up(&f, 1, 1, 1, 1)) { fix_down(&f); return; }
+    ASSERT_EQ_INT(1, (int)apr_graph_source_count(f.g));
+
+    accel_async(&f.h, APR_CMD_FILE_NEW);
+    dlg = wait_for_dialog(&f.h, 10000);
+    if (!dlg) { fix_down(&f); FAIL("File > New discarded the session silently"); }
+
+    /* Say no, and nothing moves. */
+    PostMessageW(dlg, WM_COMMAND, MAKEWPARAM(IDCANCEL, BN_CLICKED), 0);
+    ASSERT_TRUE(wait_for_no_dialog(&f.h, 10000));
+    (void)SendMessageW(f.h.frame, WM_NULL, 0, 0);
+    ASSERT_EQ_INT(1, (int)apr_graph_source_count(apr_controller_graph(f.h.ctl)));
+
+    /* Say yes, and it does. */
+    accel_async(&f.h, APR_CMD_FILE_NEW);
+    dlg = wait_for_dialog(&f.h, 10000);
+    if (!dlg) { fix_down(&f); FAIL("the prompt did not come back"); }
+    PostMessageW(dlg, WM_COMMAND, MAKEWPARAM(IDOK, BN_CLICKED), 0);
+    ASSERT_TRUE(wait_for_no_dialog(&f.h, 10000));
+    (void)SendMessageW(f.h.frame, WM_NULL, 0, 0);
+    ASSERT_EQ_INT(0, (int)apr_graph_source_count(apr_controller_graph(f.h.ctl)));
+
+    fix_down(&f);
+}
+
+TEST(the_frame_title_is_the_catalogs_sentence_and_not_a_bare_path)
+{
+    /* UI_TITLE_SESSION exists precisely so a window title can be written the
+     * way a language writes document titles. Putting the raw path in bypassed
+     * it -- and the title is also the frame's accessible NAME, so what a reader
+     * announced on arriving at the window was a file path with no indication of
+     * which application it belonged to. */
+    Fix f;
+    wchar_t dir[MAX_PATH], path[MAX_PATH], want[512], got[512];
+    AprErr e;
+    DWORD n;
+
+    if (!fix_up(&f, 1, 1, 1, 1)) { fix_down(&f); return; }
+
+    n = GetTempPathW(MAX_PATH, dir);
+    if (n == 0 || n >= MAX_PATH) { fix_down(&f); FAIL("no temp folder"); }
+    _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%lsapr_title_%lu.aprsession",
+                 dir, GetCurrentProcessId());
+    DeleteFileW(path);
+
+    e = apr_controller_save_session(f.h.ctl, path);
+    ASSERT_FALSE(apr_failed(&e));
+
+    sentence(APR_S_UI_TITLE_SESSION, path, NULL, want, 512);
+    got[0] = 0;
+    GetWindowTextW(f.h.frame, got, 512);
+    printf("      title: \"%ls\"\n", got);
+    ASSERT_WSTR_EQ(want, got);
+
+    DeleteFileW(path);
+    fix_down(&f);
+}
+
+
+TEST(cancelling_a_session_load_is_not_reported_as_a_failure)
+{
+    /* "That session could not be loaded: the user declined this session."
+     *
+     * Three faults in one sentence: a cancel is not a failure, the reason was
+     * an untranslatable English literal from inside the code, and it referred
+     * to the person who had just pressed Cancel in the third person.
+     *
+     * The whole File > Open route is driven here, picker included, because the
+     * sentence lives in the half BELOW the picker and nothing could reach it. */
+    Fix f;
+    HWND dlg;
+    wchar_t dir[MAX_PATH], path[MAX_PATH], want[512], got[512];
+    AprSession *s;
+    AprErr e;
+    DWORD n;
+    int waited;
+
+    /* A session naming a program that is certainly not running, so resolve has
+     * something to report and the report is shown. */
+    s = (AprSession *)calloc(1, sizeof *s);
+    if (!s) FAIL("out of memory");
+    apr_session_init(s);
+    s->source_count = 1;
+    strncpy_s(s->sources[0].key, sizeof s->sources[0].key, "s0", _TRUNCATE);
+    s->sources[0].kind = APR_SESSION_SRC_PROCESS;
+    lstrcpynW(s->sources[0].name, L"Nothing Like This", APR_NAME_CCH);
+    lstrcpynW(s->sources[0].exe, L"apr_no_such_program_xyz.exe", APR_NAME_CCH);
+    s->bus_count = 1;
+    lstrcpynW(s->buses[0].name, L"Main Mix", APR_NAME_CCH);
+    s->buses[0].edge_count = 1;
+    strncpy_s(s->buses[0].edges[0].key, sizeof s->buses[0].edges[0].key,
+              "s0", _TRUNCATE);
+    s->buses[0].edges[0].source_index = 0;
+
+    n = GetTempPathW(MAX_PATH, dir);
+    if (n == 0 || n >= MAX_PATH) { free(s); FAIL("no temp folder"); }
+    _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%lsapr_declined_%lu.json",
+                 dir, GetCurrentProcessId());
+    e = apr_session_save(s, path);
+    free(s);
+    if (apr_failed(&e)) {
+        wchar_t why[512];
+        printf("      SKIPPED: could not write the session: %ls\n",
+               apr_err_format(&e, why, 512));
+        DeleteFileW(path);
+        return;
+    }
+
+    /* An EMPTY session, so File > Open has nothing unsaved to ask about
+     * first. */
+    if (!fix_up(&f, 0, 0, 0, 0)) { fix_down(&f); DeleteFileW(path); return; }
+
+    apr_dlg_test_set_session_path(path);
+    accel_async(&f.h, APR_CMD_FILE_OPEN);
+
+    dlg = wait_for_dialog(&f.h, 15000);
+    if (!dlg) {
+        printf("      SKIPPED: the resolve report did not open (this session "
+               "resolved cleanly on this machine)\n");
+        apr_dlg_test_set_session_path(NULL);
+        fix_down(&f);
+        DeleteFileW(path);
+        return;
+    }
+    /* CANCEL. Deliberately, knowing exactly what it means. */
+    PostMessageW(dlg, WM_COMMAND, MAKEWPARAM(IDCANCEL, BN_CLICKED), 0);
+    ASSERT_TRUE(wait_for_no_dialog(&f.h, 10000));
+    (void)SendMessageW(f.h.frame, WM_NULL, 0, 0);
+
+    apr_str_format(APR_S_UI_DLG_SESSION_CANCELLED, want, 512, NULL, 0);
+    for (waited = 0; waited < 5000; waited += 10) {
+        if (wcscmp(want, said(&f.h, got, 512)) == 0) break;
+        Sleep(10);
+    }
+    printf("      said: \"%ls\"\n", said(&f.h, got, 512));
+    ASSERT_WSTR_EQ(want, got);
+
+    /* And nothing was adopted: the session the user had is untouched. */
+    ASSERT_EQ_INT(0, (int)apr_graph_bus_count(apr_controller_graph(f.h.ctl)));
+
+    apr_dlg_test_set_session_path(NULL);
+    fix_down(&f);
+    DeleteFileW(path);
+}
+
+TEST(ctrl_t_with_focus_on_the_divider_does_not_strand_it_in_a_hidden_window)
+{
+    /* Ctrl+T hides the structure panel AND the splitter. The focus rescue
+     * checked the panel and not the splitter, so Tab to "Panel divider" and
+     * press Ctrl+T and focus stayed on an invisible window: the reader went
+     * quiet, and Left and Right silently resized a panel nobody could see. */
+    Fix f;
+    HWND split = NULL, w;
+    int t;
+
+    if (!fix_up(&f, 1, 1, 1, 1)) { fix_down(&f); return; }
+
+    /* The splitter by its window class. It is a private class of the frame's
+     * and the frame publishes no handle for it -- which is part of why the
+     * focus rescue forgot it existed. */
+    for (w = GetWindow(f.h.frame, GW_CHILD); w; w = GetWindow(w, GW_HWNDNEXT)) {
+        wchar_t cls[64];
+        cls[0] = 0;
+        if (GetClassNameW(w, cls, 64) <= 0) continue;
+        if (CompareStringOrdinal(cls, -1, L"AprRecorderSplitter", -1,
+                                 FALSE) == CSTR_EQUAL) {
+            split = w;
+            break;
+        }
+    }
+    if (!split) {
+        printf("      SKIPPED: no splitter window in this build\n");
+        fix_down(&f);
+        return;
+    }
+
+    /* Tab to it, exactly as the author does: focus into a pane with F6 first,
+     * then Tab until the divider has it. A SetFocus from this thread would do
+     * nothing at all, silently. */
+    if (!focus_the_tree(&f.h)) {
+        printf("      SKIPPED: focus never reached the tree control\n");
+        fix_down(&f);
+        return;
+    }
+    for (t = 0; t < 12 && focus_on_ui_thread(&f.h) != split; ++t) {
+        /* Posted to the window that actually HAS focus, which is what the
+         * keyboard does: IsDialogMessage navigates from the focused control,
+         * and a Tab addressed to the frame is not the same message. */
+        HWND ff = focus_on_ui_thread(&f.h);
+        if (!ff) break;
+        PostMessageW(ff, WM_KEYDOWN, VK_TAB, 0);
+        PostMessageW(ff, WM_KEYUP, VK_TAB, 0);
+        Sleep(60);
+    }
+    if (focus_on_ui_thread(&f.h) != split) {
+        printf("      SKIPPED: Tab never landed on the splitter\n");
+        fix_down(&f);
+        return;
+    }
+
+    accel(&f.h, APR_CMD_VIEW_TREE);   /* hide the structure panel */
+
+    for (t = 0; t < 60; ++t) {
+        HWND ff = focus_on_ui_thread(&f.h);
+        if (ff && IsWindowVisible(ff)) break;
+        Sleep(15);
+    }
+    {
+        HWND ff = focus_on_ui_thread(&f.h);
+        printf("      splitter visible after Ctrl+T: %s; focus is on %p "
+               "(visible: %s)\n",
+               IsWindowVisible(split) ? "yes" : "no", (void *)ff,
+               (ff && IsWindowVisible(ff)) ? "yes" : "NO");
+        ASSERT_FALSE(IsWindowVisible(split) != 0);
+        ASSERT_NOT_NULL(ff);
+        ASSERT_TRUE(IsWindowVisible(ff) != 0);
+    }
+
+    accel(&f.h, APR_CMD_VIEW_TREE);   /* put it back */
+    fix_down(&f);
+}
+
+
+TEST(a_close_that_runs_out_of_patience_says_that_rather_than_repeating_itself)
+{
+    /* The wait for the encoders is bounded, because a genuinely hung disk must
+     * not leave a window that cannot be closed at all. When it expired the
+     * handler said "the window will close once the files are written" -- the
+     * same sentence it had said on the way IN. Hearing that twice and then
+     * having nothing close is indistinguishable from a hung application. */
+    Fix f;
+    HWND dlg;
+    wchar_t got[512], want[512];
+    int waited;
+
+    if (!fix_up(&f, 1, 1, 1, 1)) { fix_down(&f); return; }
+
+    /* Give up immediately, so the path is reached without a stalled disk. */
+    apr_controller_test_set_close_wait_ms(f.h.ctl, 0);
+
+    accel(&f.h, APR_CMD_RECORD_START);
+    if (!apr_controller_recording(f.h.ctl)) {
+        fix_down(&f);
+        FAIL("the recording did not start");
+    }
+
+    PostMessageW(f.h.frame, WM_CLOSE, 0, 0);
+    dlg = wait_for_dialog(&f.h, 15000);
+    if (!dlg) {
+        accel(&f.h, APR_CMD_RECORD_STOP);
+        for (waited = 0; waited < 25000 && apr_controller_recording(f.h.ctl);
+             waited += 10) {
+            Sleep(10);
+        }
+        fix_down(&f);
+        FAIL("closing while recording asked no question");
+    }
+    PostMessageW(dlg, WM_COMMAND, MAKEWPARAM(IDOK, BN_CLICKED), 0);
+
+    apr_str_format(APR_S_UI_ANN_CLOSE_TIMEOUT, want, 512, NULL, 0);
+    for (waited = 0; waited < 10000; waited += 10) {
+        if (wcscmp(want, said(&f.h, got, 512)) == 0) break;
+        Sleep(10);
+    }
+    printf("      said: \"%ls\"\n", said(&f.h, got, 512));
+    ASSERT_WSTR_EQ(want, got);
+
+    /* And the window is still there to be closed again, which is the other
+     * half of the promise. */
+    ASSERT_TRUE(IsWindow(f.h.frame) != 0);
+
+    apr_controller_test_set_close_wait_ms(f.h.ctl, -1);
+    accel(&f.h, APR_CMD_RECORD_STOP);
+    for (waited = 0; waited < 25000 && apr_controller_recording(f.h.ctl);
+         waited += 10) {
+        Sleep(10);
+    }
+    fix_down(&f);
+}
+
+TEST(an_edit_the_model_refuses_is_announced_with_the_reason_the_model_gave)
+{
+    /* "That is not available yet" describes a feature nobody has written. It
+     * was what the canvas said for EVERY refusal the model handed back, with
+     * the AprErr thrown away -- so a real, explicable refusal reached the user
+     * as a statement about their own session that was simply untrue, and the
+     * only diagnostic went in the bin.
+     *
+     * A bus holds APR_MAX_SOURCES_PER_BUS sources; the one after that is
+     * refused, with a reason. */
+    Fix f;
+    AprCaptureConfig cfg;
+    wchar_t got[512], want[512];
+    AprSourceId extra = 0;
+    size_t i;
+    int si, bi;
+    AprErr e;
+
+    if (!fix_up(&f, 0, 1, 0, 0)) { fix_down(&f); return; }
+
+    memset(&cfg, 0, sizeof cfg);
+    cfg.kind = APR_SRC_FAKE;
+    cfg.fake.tone_hz   = 440;
+    cfg.fake.amplitude = 0.25f;
+
+    for (i = 0; i < APR_MAX_SOURCES_PER_BUS + 1; ++i) {
+        wchar_t name[APR_NAME_CCH];
+        AprSourceId id;
+        _snwprintf_s(name, APR_NAME_CCH, _TRUNCATE, L"Source %d", (int)i);
+        e = apr_graph_add_source(f.g, name, &cfg, &id);
+        if (apr_failed(&e)) { fix_down(&f); FAIL("could not fill the graph"); }
+        if (i < APR_MAX_SOURCES_PER_BUS) {
+            e = apr_graph_connect(f.g, id, BUS(&f), 1.0f);
+            if (apr_failed(&e)) { fix_down(&f); FAIL("could not fill the bus"); }
+        } else {
+            extra = id;
+        }
+    }
+    apr_controller_model_changed(f.h.ctl);
+
+    /* The reason the model itself gives for refusing the next one -- read from
+     * the model, never guessed, and never written down here as prose. */
+    e = apr_graph_connect(f.g, extra, BUS(&f), 1.0f);
+    if (!apr_failed(&e)) {
+        printf("      SKIPPED: this build accepts more than %d sources on a "
+               "bus\n", (int)APR_MAX_SOURCES_PER_BUS);
+        fix_down(&f);
+        return;
+    }
+    {
+        const wchar_t *args[1];
+        wchar_t why[512];
+        apr_err_format(&e, why, 512);
+        args[0] = why;
+        apr_str_format(APR_S_UI_ANN_EDIT_FAILED, want, 512, args, 1);
+    }
+
+    si = node_index(&f.h, APR_NODE_SOURCE, extra, 0);
+    bi = node_index(&f.h, APR_NODE_BUS, BUS(&f), 0);
+    ASSERT_GE_INT(0, si);
+    ASSERT_GE_INT(0, bi);
+
+    ASSERT_TRUE(focus_node(&f.h, si));
+    SendMessageW(f.h.canvas, APR_CANVAS_WM_PERFORM,
+                 (WPARAM)APR_CANVAS_OP_CONNECT, 0);
+    ASSERT_TRUE(focus_node(&f.h, bi));
+    SendMessageW(f.h.canvas, APR_CANVAS_WM_PERFORM,
+                 (WPARAM)APR_CANVAS_OP_CONNECT, 0);
+
+    printf("      said:   \"%ls\"\n", said(&f.h, got, 512));
+    printf("      wanted: \"%ls\"\n", want);
+    ASSERT_WSTR_EQ(want, got);
+
+    fix_down(&f);
+}
+
+TEST(a_half_made_connection_whose_end_disappears_says_it_has_been_cancelled)
+{
+    /* A mode the user is IN that ends without a word leaves them pressing the
+     * second half of a gesture that no longer exists -- which is exactly how
+     * "Ctrl+E twice does nothing" was reported the first time. */
+    Fix f;
+    wchar_t got[512], want[512];
+    int si;
+
+    if (!fix_up(&f, 1, 1, 0, 0)) { fix_down(&f); return; }
+
+    si = node_index(&f.h, APR_NODE_SOURCE, SRC(&f), 0);
+    ASSERT_TRUE(focus_node(&f.h, si));
+    SendMessageW(f.h.canvas, APR_CANVAS_WM_PERFORM,
+                 (WPARAM)APR_CANVAS_OP_CONNECT, 0);
+    ASSERT_NOT_NULL(apr_canvas_pending_node(f.h.canvas));
+
+    /* The held end leaves the model behind the canvas's back -- which is the
+     * case apr_controller_model_changed exists for. */
+    {
+        AprErr e = apr_graph_remove_source(f.g, SRC(&f));
+        ASSERT_FALSE(apr_failed(&e));
+    }
+    apr_controller_model_changed(f.h.ctl);
+
+    ASSERT_TRUE(apr_canvas_pending_node(f.h.canvas) == NULL);
+    apr_str_format(APR_S_UI_ANN_CANCELLED, want, 512, NULL, 0);
+    printf("      said: \"%ls\"\n", said(&f.h, got, 512));
+    ASSERT_WSTR_EQ(want, got);
+
+    fix_down(&f);
+}
+
+TEST(focus_arriving_at_the_canvas_lands_on_a_node_and_not_on_the_pane)
+{
+    /* SetFocus() from inside WM_SETFOCUS is SWALLOWED -- the outer SetFocus
+     * reasserts its own target as it unwinds (design 6.3). Every proxy check
+     * passes; only asking the platform which window really ended up with focus
+     * catches it. A canvas that keeps focus on itself leaves a screen reader
+     * reading the pane's name and nothing else, forever. */
+    Fix f;
+    int t;
+    HWND got = NULL;
+
+    if (!fix_up(&f, 1, 1, 1, 1)) { fix_down(&f); return; }
+
+    ShowWindow(f.h.frame, SW_SHOWNOACTIVATE);
+    if (!IsWindowVisible(f.h.frame)) {
+        printf("      SKIPPED: the frame would not become visible\n");
+        fix_down(&f);
+        return;
+    }
+
+    /* F6 until the canvas pane has been entered. */
+    for (t = 0; t < 8 && !got; ++t) {
+        int w;
+        PostMessageW(f.h.frame, WM_KEYDOWN, VK_F6, 0);
+        PostMessageW(f.h.frame, WM_KEYUP, VK_F6, 0);
+        for (w = 0; w < 30; ++w) {
+            HWND ff = focus_on_ui_thread(&f.h);
+            if (ff && IsChild(f.h.canvas, ff)) { got = ff; break; }
+            Sleep(15);
+        }
+    }
+
+    printf("      focus inside the canvas: %p (the canvas itself is %p)\n",
+           (void *)got, (void *)f.h.canvas);
+    ASSERT_NOT_NULL(got);
+    ASSERT_TRUE(got != f.h.canvas);
+    /* And it is a real node, which is what carries a name worth reading. */
+    ASSERT_TRUE(got == apr_canvas_focused_node(f.h.canvas));
+
+    fix_down(&f);
+}
+
+TEST(a_session_opened_with_nobody_to_ask_reports_the_sources_it_dropped)
+{
+    /* ui_controller.h: non-interactive "takes what resolved and reports the
+     * rest through the return value". It returned ok -- so a caller with
+     * nobody to ask was told a session had loaded cleanly while sources had
+     * been silently dropped out of it. */
+    Fix f;
+    AprSession *s;
+    wchar_t dir[MAX_PATH], path[MAX_PATH];
+    AprErr e;
+    DWORD n;
+
+    s = (AprSession *)calloc(1, sizeof *s);
+    if (!s) FAIL("out of memory");
+    apr_session_init(s);
+    s->source_count = 1;
+    strncpy_s(s->sources[0].key, sizeof s->sources[0].key, "s0", _TRUNCATE);
+    s->sources[0].kind = APR_SESSION_SRC_PROCESS;
+    lstrcpynW(s->sources[0].name, L"Nothing Like This", APR_NAME_CCH);
+    lstrcpynW(s->sources[0].exe, L"apr_no_such_program_xyz.exe", APR_NAME_CCH);
+    s->bus_count = 1;
+    lstrcpynW(s->buses[0].name, L"Main Mix", APR_NAME_CCH);
+    s->buses[0].edge_count = 1;
+    strncpy_s(s->buses[0].edges[0].key, sizeof s->buses[0].edges[0].key,
+              "s0", _TRUNCATE);
+    s->buses[0].edges[0].source_index = 0;
+
+    n = GetTempPathW(MAX_PATH, dir);
+    if (n == 0 || n >= MAX_PATH) { free(s); FAIL("no temp folder"); }
+    _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%lsapr_headless_%lu.json",
+                 dir, GetCurrentProcessId());
+    e = apr_session_save(s, path);
+    free(s);
+    if (apr_failed(&e)) {
+        printf("      SKIPPED: could not write the session\n");
+        DeleteFileW(path);
+        return;
+    }
+
+    if (!fix_up(&f, 0, 0, 0, 0)) { fix_down(&f); DeleteFileW(path); return; }
+
+    e = apr_controller_open_session(f.h.ctl, path, 0);
+    {
+        wchar_t why[512];
+        printf("      returned: %ls\n",
+               apr_failed(&e) ? apr_err_format(&e, why, 512) : L"ok");
+    }
+    ASSERT_TRUE(apr_failed(&e));
+
+    /* The graph IS adopted either way -- what changes is that the caller finds
+     * out what is missing from it. */
+    ASSERT_EQ_INT(1, (int)apr_graph_bus_count(apr_controller_graph(f.h.ctl)));
+    ASSERT_EQ_INT(0, (int)apr_graph_source_count(apr_controller_graph(f.h.ctl)));
+
+    fix_down(&f);
+    DeleteFileW(path);
+}
+
+TEST(add_output_with_no_bus_to_put_it_on_says_so_instead_of_opening_empty)
+{
+    /* m6 SAID "OK can silently do nothing when the format combo is empty", and
+     * the shape of that defect was real: every `return TRUE` on an empty combo
+     * was a button press that changed nothing, closed nothing and said
+     * nothing. For a listener a dead OK reads as a broken application.
+     *
+     * Each of those branches now names what is missing and puts focus on it.
+     * The FORMAT one cannot be reached from a build that has encoders, and the
+     * BUS one turns out to be guarded a step earlier -- which is what this
+     * asserts, because it is the path a person actually takes: ask for an
+     * output with nowhere to put it, and be told, rather than being handed an
+     * empty picker whose OK does nothing. */
+    Fix f;
+    HWND dlg;
+    wchar_t body[512];
+
+    /* A source but NO bus. */
+    if (!fix_up(&f, 1, 0, 0, 0)) { fix_down(&f); return; }
+
+    accel_async(&f.h, APR_CMD_ADD_ACTION);
+    dlg = wait_for_dialog(&f.h, 15000);
+    if (!dlg) { fix_down(&f); FAIL("Add Output said nothing and opened nothing"); }
+
+    body[0] = 0;
+    GetDlgItemTextW(dlg, 2015 /* IDC_BODY, src/ui/dialogs.c */, body, 512);
+    printf("      said: \"%ls\"\n", body);
+    ASSERT_WSTR_EQ(apr_str(APR_S_UI_DLG_NO_BUSES), body);
+
+    PostMessageW(dlg, WM_COMMAND, MAKEWPARAM(IDCANCEL, BN_CLICKED), 0);
+    ASSERT_TRUE(wait_for_no_dialog(&f.h, 10000));
+    (void)SendMessageW(f.h.frame, WM_NULL, 0, 0);
+
+    /* And nothing was created out of a choice that could not be made. */
+    ASSERT_EQ_INT(0, (int)apr_graph_bus_count(apr_controller_graph(f.h.ctl)));
+
+    fix_down(&f);
+}
+
+TEST(the_close_dialogs_buttons_are_wide_enough_for_their_own_captions)
+{
+    /* NEVER SIZE A CONTROL TO FIT ITS ENGLISH STRING (AGENTS.md rule 6). These
+     * were a fixed 96 dialog units, which clips "Stop the recording and close"
+     * in ENGLISH -- and Arabic needs more room again at the same point size,
+     * so the Arabic pass would have shipped three unreadable buttons. */
+    Fix f;
+    HWND dlg;
+    int waited, checked = 0;
+    static const int ids[] = { IDOK, IDCANCEL };
+    size_t k;
+
+    if (!fix_up(&f, 1, 1, 1, 1)) { fix_down(&f); return; }
+
+    accel(&f.h, APR_CMD_RECORD_START);
+    if (!apr_controller_recording(f.h.ctl)) {
+        fix_down(&f);
+        FAIL("the recording did not start");
+    }
+
+    PostMessageW(f.h.frame, WM_CLOSE, 0, 0);
+    dlg = wait_for_dialog(&f.h, 15000);
+    if (!dlg) {
+        accel(&f.h, APR_CMD_RECORD_STOP);
+        for (waited = 0; waited < 25000 && apr_controller_recording(f.h.ctl);
+             waited += 10) {
+            Sleep(10);
+        }
+        fix_down(&f);
+        FAIL("closing while recording asked no question");
+    }
+
+    for (k = 0; k < sizeof ids / sizeof ids[0]; ++k) {
+        HWND b = GetDlgItem(dlg, ids[k]);
+        wchar_t text[256];
+        RECT rc;
+        HDC dc;
+        HFONT font, old;
+        SIZE sz;
+
+        if (!b) continue;
+        text[0] = 0;
+        GetWindowTextW(b, text, 256);
+        if (!text[0]) continue;
+        GetClientRect(b, &rc);
+
+        dc = GetDC(b);
+        if (!dc) continue;
+        font = (HFONT)SendMessageW(b, WM_GETFONT, 0, 0);
+        old = font ? (HFONT)SelectObject(dc, font) : NULL;
+        if (GetTextExtentPoint32W(dc, text, (int)wcslen(text), &sz)) {
+            printf("      \"%ls\": button %ld px, text %ld px\n",
+                   text, (long)(rc.right - rc.left), (long)sz.cx);
+            ASSERT_GE_INT((int)sz.cx, (int)(rc.right - rc.left));
+            checked++;
+        }
+        if (old) SelectObject(dc, old);
+        ReleaseDC(b, dc);
+    }
+    ASSERT_GT_INT(0, checked);
+
+    /* "Keep recording" -- the answer that changes nothing. */
+    PostMessageW(dlg, WM_COMMAND, MAKEWPARAM(IDCANCEL, BN_CLICKED), 0);
+    (void)wait_for_no_dialog(&f.h, 10000);
+
+    accel(&f.h, APR_CMD_RECORD_STOP);
+    for (waited = 0; waited < 25000 && apr_controller_recording(f.h.ctl);
+         waited += 10) {
+        Sleep(10);
+    }
+    fix_down(&f);
 }
 
 /* ==========================================================================

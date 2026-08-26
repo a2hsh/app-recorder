@@ -32,6 +32,20 @@
  *
  * THREAD SAFETY: the graph is built and torn down on one thread, and ticked on
  * one thread. Do not mutate the shape while a tick is in flight.
+ *
+ * AND THAT IS ENFORCED, NOT MERELY ASKED FOR. Every call below that changes
+ * the shape -- add/remove source, add/remove bus, connect, disconnect, add
+ * action -- REFUSES WITH APR_E_BUSY while apr_graph_running() is nonzero, and
+ * so does apr_bus_set_gain (bus.h). It is a refusal and not a silent no-op on
+ * purpose: a keystroke that does nothing and says nothing is indistinguishable
+ * from a broken app to someone working by ear, and APR_E_BUSY is what lets a
+ * front end answer with "that cannot be changed while a recording is running"
+ * instead of a generic failure.
+ *
+ * A front end disabling its own menu items is still worth doing -- it is what
+ * greys the command -- but it is not the guard. It cannot be: the CLI, session
+ * loading and tests are callers too, and at least one UI path reaches the model
+ * as a raw keystroke that never passes the controller at all.
  */
 #ifndef APPRECORDER_GRAPH_H
 #define APPRECORDER_GRAPH_H

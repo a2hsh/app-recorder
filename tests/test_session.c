@@ -1352,3 +1352,195 @@ TEST(help_documents_the_session_options)
     ASSERT_TRUE(said(&c, L"--allow-system-capture"));
     ASSERT_TRUE(said(&c, L"--allow-missing"));
 }
+
+/* ===========================================================================
+ * --allow-missing, and the run it exists to save (M2)
+ * ========================================================================= */
+
+/* Two buses. "Mix" wants an application that is not running; "Voice" wants a
+ * synthetic source that always resolves. --allow-missing drops the
+ * application, which leaves "Mix" with no sources at all -- and the whole run
+ * then hard-failed with exit 2, so VOICE NEVER RECORDED EITHER. The meeting
+ * was lost by the flag that was typed to save it.
+ *
+ * THE RULE: a bus left with no sources is dropped, with a sentence, and the
+ * rest of the run proceeds. Its outputs go with it -- an empty file where a
+ * recording was expected is a worse lie than a missing one. The run ends
+ * INCOMPLETE, because what was recorded is not what was asked for. */
+static void two_bus_session_one_bus_unresolvable(wchar_t *sfile, size_t cch,
+                                                 wchar_t *voice, size_t vcch)
+{
+    char json[1400];
+    char narrow[MAX_PATH * 2];
+
+    tmp_path(sfile, cch, L"m2", L"json");
+    tmp_path(voice, vcch, L"m2voice", L"wav");
+    WideCharToMultiByte(CP_UTF8, 0, voice, -1, narrow, (int)sizeof narrow,
+                        NULL, NULL);
+    /* Backslashes have to reach the file escaped -- it is JSON. */
+    {
+        char esc[MAX_PATH * 4];
+        size_t i, o = 0;
+        for (i = 0; narrow[i] && o + 3 < sizeof esc; i++) {
+            if (narrow[i] == '\\') esc[o++] = '\\';
+            esc[o++] = narrow[i];
+        }
+        esc[o] = '\0';
+        sprintf_s(json, sizeof json,
+            "{\"apprecorder\":{\"version\":1,\"minReader\":1},"
+            " \"sampleRate\":48000, \"channels\":2,"
+            " \"sources\":["
+            "   {\"key\":\"gone\",\"kind\":\"process\",\"name\":\"Teams\","
+            "    \"exe\":\"apr_no_such_app.exe\","
+            "    \"path\":\"C:\\\\nowhere\\\\apr_no_such_app.exe\",\"pid\":0},"
+            "   {\"key\":\"tone\",\"kind\":\"fake\",\"name\":\"Tone\","
+            "    \"toneHz\":440,\"amplitude\":0.25}],"
+            " \"buses\":["
+            "   {\"name\":\"Mix\",\"sources\":[{\"key\":\"gone\"}],"
+            "    \"outputs\":[{\"format\":\"wav\",\"path\":\"apr_m2_mix_never.wav\"}]},"
+            "   {\"name\":\"Voice\",\"sources\":[{\"key\":\"tone\"}],"
+            "    \"outputs\":[{\"format\":\"wav\",\"path\":\"%s\"}]}]}", esc);
+    }
+    (void)write_text_file(sfile, json);
+}
+
+TEST(allow_missing_records_the_buses_that_still_have_sources)
+{
+    Cap     c;
+    wchar_t sfile[MAX_PATH], voice[MAX_PATH];
+
+    two_bus_session_one_bus_unresolvable(sfile, MAX_PATH, voice, MAX_PATH);
+
+    ASSERT_EQ_INT(APR_CLI_INCOMPLETE,
+                  RUN(&c, L"record", L"--session", sfile, L"--allow-missing",
+                      L"--duration", L"0.3"));
+
+    /* The bus that could still record, did. */
+    ASSERT_TRUE(file_exists(voice));
+    /* The bus that could not was dropped by name, out loud... */
+    ASSERT_TRUE(said(&c, L"Mix"));
+    /* ...and took its output with it rather than leaving an empty file. */
+    ASSERT_FALSE(file_exists(L"apr_m2_mix_never.wav"));
+
+    DeleteFileW(voice);
+    DeleteFileW(sfile);
+}
+
+TEST(without_allow_missing_a_source_less_bus_is_still_a_refusal)
+{
+    /* The flag is what changes the answer. Without it, a session naming
+     * something that is not there is exit 3 and nothing is recorded -- which
+     * is right, because nobody said it was acceptable to record less. */
+    Cap     c;
+    wchar_t sfile[MAX_PATH], voice[MAX_PATH];
+
+    two_bus_session_one_bus_unresolvable(sfile, MAX_PATH, voice, MAX_PATH);
+
+    ASSERT_EQ_INT(APR_CLI_NOT_FOUND,
+                  RUN(&c, L"record", L"--session", sfile, L"--duration", L"0.3"));
+    ASSERT_FALSE(file_exists(voice));
+
+    DeleteFileW(sfile);
+}
+
+TEST(a_session_with_nothing_left_to_record_is_refused_even_with_allow_missing)
+{
+    /* Dropping empty buses is not "record nothing, quietly". When no bus
+     * survives there is nothing to record, and that is the same exit 2 an
+     * empty command line already gets. */
+    Cap     c;
+    wchar_t sfile[MAX_PATH];
+    char    json[900];
+
+    tmp_path(sfile, MAX_PATH, L"m2empty", L"json");
+    sprintf_s(json, sizeof json,
+        "{\"apprecorder\":{\"version\":1,\"minReader\":1},"
+        " \"sources\":[{\"key\":\"gone\",\"kind\":\"process\",\"name\":\"Teams\","
+        "               \"exe\":\"apr_no_such_app.exe\","
+        "               \"path\":\"C:\\\\nowhere\\\\apr_no_such_app.exe\",\"pid\":0}],"
+        " \"buses\":[{\"name\":\"Mix\",\"sources\":[{\"key\":\"gone\"}],"
+        "             \"outputs\":[{\"format\":\"wav\",\"path\":\"apr_m2_none.wav\"}]}]}");
+    ASSERT_FALSE(failed(write_text_file(sfile, json)));
+
+    ASSERT_EQ_INT(APR_CLI_CONFIG,
+                  RUN(&c, L"record", L"--session", sfile, L"--allow-missing",
+                      L"--duration", L"0.3"));
+    ASSERT_FALSE(file_exists(L"apr_m2_none.wav"));
+    DeleteFileW(sfile);
+}
+
+/* m13: every reason a session could not be resolved was said through warn(),
+ * which is silent under --json. So `record --session x --json` printed NOTHING
+ * AT ALL and exited 3 -- an exit code and an empty stream, where the contract
+ * says there is always a document. */
+TEST(a_session_that_cannot_be_resolved_still_produces_a_json_document)
+{
+    Cap     c;
+    wchar_t sfile[MAX_PATH], voice[MAX_PATH];
+
+    two_bus_session_one_bus_unresolvable(sfile, MAX_PATH, voice, MAX_PATH);
+
+    ASSERT_EQ_INT(APR_CLI_NOT_FOUND,
+                  RUN(&c, L"record", L"--session", sfile, L"--json",
+                      L"--duration", L"0.3"));
+    ASSERT_TRUE(said(&c, L"\"ok\": false"));
+    ASSERT_TRUE(said(&c, L"\"exitCode\": 3"));
+    ASSERT_TRUE(said(&c, L"\"error\""));
+    DeleteFileW(sfile);
+}
+
+/* ===========================================================================
+ * save-session does not quietly write down less than it was given (M14)
+ * ========================================================================= */
+
+TEST(a_session_that_cannot_hold_every_source_is_refused_rather_than_trimmed)
+{
+    /* intern_source returns -1 when the pool is full and the caller used to
+     * `continue`: the file was written, the run exited 0, and --json reported
+     * "sources": 64. Silent configuration loss, in the one artefact whose
+     * whole job is to reproduce a recording exactly -- and unnoticeable until
+     * the session was replayed and a bus was missing an input. */
+    Cap      c;
+    wchar_t  sfile[MAX_PATH];
+    wchar_t  specs[70][32];
+    const wchar_t *argv[1 + 4 + 70 * 4];
+    int      argc = 0, i;
+
+    tmp_path(sfile, MAX_PATH, L"toomany", L"json");
+
+    argv[argc++] = L"apprecorder";
+    argv[argc++] = L"save-session";
+    argv[argc++] = L"--session";
+    argv[argc++] = sfile;
+
+    /* 70 sources that are genuinely different from each other -- a fake's tone
+     * is part of its identity, so none of these intern together -- spread over
+     * buses of ten, because a bus holds fewer than 70 anyway. */
+    for (i = 0; i < 70; i++) {
+        _snwprintf_s(specs[i], 32, _TRUNCATE, L"%d,0,0.25", 200 + i);
+        if (i % 10 == 0) {
+            argv[argc++] = L"--bus";
+            argv[argc++] = (i == 0) ? L"B0" : ((i == 10) ? L"B1" :
+                           ((i == 20) ? L"B2" : ((i == 30) ? L"B3" :
+                           ((i == 40) ? L"B4" : ((i == 50) ? L"B5" : L"B6")))));
+        }
+        argv[argc++] = L"--fake";
+        argv[argc++] = specs[i];
+        if (i % 10 == 9) {
+            argv[argc++] = L"--out";
+            argv[argc++] = (i == 9) ? L"apr_m14_0.wav" :
+                           ((i == 19) ? L"apr_m14_1.wav" :
+                           ((i == 29) ? L"apr_m14_2.wav" :
+                           ((i == 39) ? L"apr_m14_3.wav" :
+                           ((i == 49) ? L"apr_m14_4.wav" :
+                           ((i == 59) ? L"apr_m14_5.wav" : L"apr_m14_6.wav")))));
+        }
+    }
+    argv[argc++] = L"--quiet";
+
+    ASSERT_EQ_INT(APR_CLI_CONFIG,
+                  apr_cli_run(argc, (const wchar_t *const *)argv, io_of(&c)));
+    /* No half-written session left behind claiming to describe the graph. */
+    ASSERT_FALSE(file_exists(sfile));
+    DeleteFileW(sfile);
+}

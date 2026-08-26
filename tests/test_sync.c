@@ -158,6 +158,24 @@ static AprSource *add_source(Rig *r, const wchar_t *name, int32_t ppm,
     return add_source_cfg(r, name, &cfg, reference);
 }
 
+/* The same, but NOT registered for pumping: it exists in the graph and can be
+ * wired up, and it produces nothing until a test hands it to rig.pump. That is
+ * how a source whose capture starts late is built now that the graph refuses
+ * shape changes mid-recording (BUGS.md C4). */
+static AprSource *add_source_unpumped(Rig *r, const wchar_t *name, int32_t ppm,
+                                      uint32_t tone_hz, float amplitude,
+                                      int reference)
+{
+    AprCaptureConfig cfg = fake_cfg(ppm, tone_hz, amplitude);
+    AprSourceId id = 0;
+    AprSource  *s;
+
+    apr_graph_add_source(r->g, name, &cfg, &id);
+    s = apr_graph_source(r->g, id);
+    if (s) apr_source_set_reference(s, reference);
+    return s;
+}
+
 /* Seconds of this session, as a frame index -- the unit capture.h's health
  * schedule is expressed in. */
 static uint64_t at_second(double sec)
@@ -826,14 +844,26 @@ TEST(a_ring_overrun_costs_content_and_not_alignment)
     apr_graph_destroy(g);
 }
 
-TEST(a_source_added_mid_session_lands_where_it_starts_not_at_the_beginning)
+TEST(a_source_that_starts_mid_session_lands_where_it_starts_not_at_the_beginning)
 {
+    /* A source whose first frame arrives five seconds into a session must land
+     * five seconds in, not at the top of the file.
+     *
+     * THE EDGE IS BUILT BEFORE THE BUS STARTS, and that is not incidental any
+     * more: BUGS.md C4 made the graph refuse every shape change while it is
+     * running, because the runner's loop thread walks these very arrays. What
+     * arrives late here is the SOURCE's first frame -- the fake anchors on its
+     * first advance, so registering it for pumping at the five-second mark is
+     * exactly a capture that produced nothing until then. The reader placement
+     * being tested is unchanged; only the moment the edge was created moved,
+     * and that was never what the arithmetic depended on. */
     Rig rig;
     AprGraph *g = NULL;
     AprBusId  bid = 0;
     AprSource *first, *late;
     AprBus   *b;
     uint64_t  late_start;
+    AprErr    e;
 
     memset(&rig, 0, sizeof rig);
     apr_graph_create(RATE, 1, &g);
@@ -842,15 +872,26 @@ TEST(a_source_added_mid_session_lands_where_it_starts_not_at_the_beginning)
     first = add_source(&rig, L"First", 0, 440, 0.5f, 1);
     apr_graph_add_bus(g, L"Main", &bid);
     apr_graph_connect(g, apr_source_id(first), bid, 1.0f);
+
+    /* Created and wired now, but deliberately NOT registered for pumping, so
+     * it produces nothing and never anchors. */
+    late = add_source_unpumped(&rig, L"Late", 0, 660, 0.5f, 1);
+    apr_graph_connect(g, apr_source_id(late), bid, 1.0f);
+
     b = apr_graph_bus(g, bid);
 
     rig_run(&rig);
     rig_seconds(&rig, 5.0);
 
-    /* A second source appears five seconds in. */
-    late = add_source(&rig, L"Late", 0, 660, 0.5f, 1);
+    /* C4: the shape is frozen while the graph runs, and the refusal is
+     * distinguishable rather than silent. */
+    e = apr_graph_disconnect(g, apr_source_id(late), bid);
+    ASSERT_TRUE(apr_failed(&e));
+    ASSERT_EQ_INT(APR_E_BUSY, (int)e.kind);
+
+    /* The late source's capture starts delivering here. */
+    rig.pump[rig.pump_count++] = late;
     apr_capture_fake_advance(apr_source_capture(late), rig.now);
-    apr_graph_connect(g, apr_source_id(late), bid, 1.0f);
 
     rig_seconds(&rig, 5.0);
 

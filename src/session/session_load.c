@@ -187,9 +187,14 @@ static int tok_wstr(const P *p, int i, wchar_t *out, size_t cch)
     if (n < 0) return -1;
     raw[n] = L'\0';
 
+    /* EVERY FAILURE PATH BELOW LEAVES `out` TERMINATED, which it did not do
+     * before: the loop writes into out[] without a terminator as it goes, so
+     * a bare `return -1` from inside it left a caller that ignores the return
+     * -- and the unknown-key path deliberately does -- reading past whatever
+     * had been written. `bad:` is one exit, and it terminates. */
     for (k = 0; k < n && o + 1 < cch; k++) {
         if (raw[k] != L'\\') { out[o++] = raw[k]; continue; }
-        if (k + 1 >= n) return -1;
+        if (k + 1 >= n) goto bad;
         k++;
         switch (raw[k]) {
         case L'"':  out[o++] = L'"';  break;
@@ -203,23 +208,61 @@ static int tok_wstr(const P *p, int i, wchar_t *out, size_t cch)
         case L'u': {
             unsigned v = 0;
             int      d;
-            if (k + 4 >= n) return -1;
+            if (k + 4 >= n) goto bad;
             for (d = 0; d < 4; d++) {
                 wchar_t c = raw[++k];
                 v <<= 4;
                 if      (c >= L'0' && c <= L'9') v |= (unsigned)(c - L'0');
                 else if (c >= L'a' && c <= L'f') v |= (unsigned)(c - L'a' + 10);
                 else if (c >= L'A' && c <= L'F') v |= (unsigned)(c - L'A' + 10);
-                else return -1;
+                else goto bad;
             }
             out[o++] = (wchar_t)v;
             break;
         }
         default:
-            return -1;
+            goto bad;
         }
     }
+    /* THE WHOLE STRING, OR A FAULT. The loop above stops when it runs out of
+     * room, and returning 0 then handed the caller a QUIETLY SHORTER path or
+     * name: a session naming "C:\\Recordings\\...\\very long\\take.wav" past the
+     * buffer became one naming a different file, and the load reported
+     * success. Every field here is a path, a device id or a name a person
+     * chose; a prefix of one is not a weaker version of it, it is wrong. The
+     * caller turns this into APR_SESSION_FAULT_BAD_TYPE with the JSON path of
+     * the field, which is what a person needs to find the line. */
+    if (k < n) goto bad;
     out[o] = L'\0';
+    return 0;
+
+bad:
+    out[o] = L'\0';
+    return -1;
+}
+
+/* A JSON string that has to be a FILE PATH.
+ *
+ * \t, \r and \n are perfectly legal JSON escapes, so a hand-edited
+ * "C:\\temp\\new.wav" -- a Windows path a person would write without
+ * thinking, with its backslashes unescaped -- parses without complaint into
+ * "C:<TAB>emp<LF>ew.wav". Nothing downstream could tell: the recording simply
+ * went somewhere else, or failed to open with a reason naming a path that
+ * looked nothing like what was typed.
+ *
+ * A Windows filename cannot contain a character below 0x20 at all, so
+ * refusing them costs nothing that was ever going to work and turns a silent
+ * mangling into a fault that names the field. Only paths get this: a display
+ * name is not a filename, and this must not start rejecting sessions that
+ * round-tripped correctly. */
+static int tok_wpath(const P *p, int i, wchar_t *out, size_t cch)
+{
+    size_t k;
+
+    if (tok_wstr(p, i, out, cch) != 0) return -1;
+    for (k = 0; out[k]; k++) {
+        if (out[k] < 0x20) { out[0] = L'\0'; return -1; }
+    }
     return 0;
 }
 
@@ -468,7 +511,7 @@ static int read_source(P *p, int obj, size_t index)
             WANT(tok_wstr(p, val, s->exe, APR_DISC_NAME_CCH) == 0,
                  APR_SESSION_FAULT_BAD_TYPE, wat(w, L"sources[%d].exe", (int)index));
         } else if (key_is(p, key, "path")) {
-            WANT(tok_wstr(p, val, s->path, APR_DISC_PATH_CCH) == 0,
+            WANT(tok_wpath(p, val, s->path, APR_DISC_PATH_CCH) == 0,
                  APR_SESSION_FAULT_BAD_TYPE, wat(w, L"sources[%d].path", (int)index));
         } else if (key_is(p, key, "windowClass")) {
             WANT(tok_wstr(p, val, s->window_class, APR_SESSION_CLASS_CCH) == 0,
@@ -633,7 +676,7 @@ static int read_action(P *p, int obj, size_t bi, size_t ai,
                  APR_SESSION_FAULT_BAD_TYPE,
                  wat(w, L"buses[%d].outputs[%d].format", (int)bi, (int)ai));
         } else if (key_is(p, key, "path")) {
-            WANT(tok_wstr(p, val, a->path, APR_DISC_PATH_CCH) == 0,
+            WANT(tok_wpath(p, val, a->path, APR_DISC_PATH_CCH) == 0,
                  APR_SESSION_FAULT_BAD_TYPE,
                  wat(w, L"buses[%d].outputs[%d].path", (int)bi, (int)ai));
         } else if (key_is(p, key, "bitrateKbps")) {

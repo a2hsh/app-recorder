@@ -189,21 +189,25 @@ static AprErr dev_close_com(void *user)
     return apr_ok();
 }
 
-static void dev_close(AprCapture *c)
+static AprErr dev_close(AprCapture *c)
 {
     DevImpl *d = (DevImpl *)c->impl;
-    if (!d) return;
+    AprErr   e;
 
-    apr_wasapi_close(&d->s, dev_close_com, d);
+    if (!d) return apr_ok();
 
-    if (d->s.pump_stuck) {
-        /* wasapi_common.h: the pump is still running on &d->s. */
-        c->impl = NULL;
-        return;
+    e = apr_wasapi_close(&d->s, dev_close_com, d);
+    if (apr_failed(&e)) {
+        /* wasapi_common.h: the pump is still running on &d->s, which lives
+         * inside this allocation and points at the caller's ring. c->impl is
+         * deliberately LEFT SET so a caller that keeps the capture can retry;
+         * the error is what stops the ring being freed above us. */
+        return e;
     }
 
     c->impl = NULL;
     free(d);
+    return apr_ok();
 }
 
 static const AprCaptureVTable g_device_vtable = {

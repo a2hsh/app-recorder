@@ -379,6 +379,11 @@ static void copy_cch(wchar_t *dst, size_t cch, const wchar_t *src)
  * The stop signal, shared by the console control handler and the record loop
  * ------------------------------------------------------------------------- */
 
+/* How long CTRL_CLOSE/LOGOFF/SHUTDOWN waits for the files. INFINITE: see the
+ * handler. Named so the suite can pin it, because "it waits" is a promise in
+ * cli.h and the last value here was a number that broke it. */
+#define APR_CLI_CLOSE_WAIT_MS INFINITE
+
 static volatile LONG g_stop_requested;
 static volatile LONG g_handler_installed;
 static HANDLE        g_stop_event;       /* manual reset */
@@ -393,6 +398,11 @@ void apr_cli_request_stop(void)
 int apr_cli_test_ctrl_handler_installed(void)
 {
     return (int)InterlockedCompareExchange(&g_handler_installed, 0, 0);
+}
+
+unsigned long apr_cli_test_close_wait_ms(void)
+{
+    return (unsigned long)APR_CLI_CLOSE_WAIT_MS;
 }
 
 /* Written straight to the console rather than through AprCliIo: this runs on a
@@ -423,7 +433,16 @@ static BOOL WINAPI ctrl_handler(DWORD type)
          * work has to finish HERE. Block until the files are closed. */
         InterlockedExchange(&g_stop_requested, 1);
         if (g_stop_event) SetEvent(g_stop_event);
-        if (g_finished_event) WaitForSingleObject(g_finished_event, 4000);
+        /* NO TIMEOUT, and that is the whole point. cli.h promises this handler
+         * blocks until the files are closed; a four-second cap turned that
+         * promise into "four seconds, then an unplayable file", and it did so
+         * by GUARANTEEING the kill at four seconds rather than merely risking
+         * one. Windows decides when we die either way -- and while we are
+         * still here it offers the user an End Task dialog they may decline,
+         * which is more time, not less. There is nothing to gain by returning
+         * early and a recording to lose. */
+        if (g_finished_event)
+            WaitForSingleObject(g_finished_event, APR_CLI_CLOSE_WAIT_MS);
         return TRUE;
 
     default:
@@ -487,11 +506,37 @@ static AprCliBus *current_bus(AprCliPlan *p)
  * Parse
  * ------------------------------------------------------------------------- */
 
+/* Which options consume the argument after them. ONE list, read twice: the
+ * parse loop below uses it to know what to swallow, and prescan uses it to
+ * know what NOT to look at. Two copies would part company the first time an
+ * option was added, and the way they would part company is silent. */
+static int option_takes_value(const wchar_t *a)
+{
+    return eq(a, L"--bus") || eq(a, L"--pid") || eq(a, L"--exe") ||
+           eq(a, L"--device") || eq(a, L"--fake") ||
+           eq(a, L"--system-minus-tree") || eq(a, L"--gain") ||
+           eq(a, L"--out") || eq(a, L"--format") ||
+           eq(a, L"--bitrate") || eq(a, L"--quality") ||
+           eq(a, L"--rate") || eq(a, L"--channels") ||
+           eq(a, L"--duration") || eq(a, L"--lang") ||
+           eq(a, L"--log-level") || eq(a, L"--log-file") ||
+           eq(a, L"--session");
+}
+
+/* --json and --quiet have to be known BEFORE the option that fails, because
+ * they may be written after it. That is why this is a separate pass -- but a
+ * pass that walked every word would find them inside somebody else's value:
+ * `--out --json` names a file called "--json", and reading it as the flag
+ * turned a plain-text refusal into a JSON one for a command line that never
+ * asked for either. So this walks the same grammar the parser does and steps
+ * over each option's value. */
 static int prescan(int argc, const wchar_t *const *argv, const wchar_t *flag)
 {
     int i;
     for (i = 1; i < argc; i++) {
+        if (!argv[i]) continue;
         if (eq(argv[i], flag)) return 1;
+        if (option_takes_value(argv[i])) i++;
     }
     return 0;
 }
@@ -683,15 +728,7 @@ AprCliExit apr_cli_parse(int argc, const wchar_t *const *argv,
 
         if (!a) continue;
 
-        wants_value = eq(a, L"--bus") || eq(a, L"--pid") || eq(a, L"--exe") ||
-                      eq(a, L"--device") || eq(a, L"--fake") ||
-                      eq(a, L"--system-minus-tree") || eq(a, L"--gain") ||
-                      eq(a, L"--out") || eq(a, L"--format") ||
-                      eq(a, L"--bitrate") || eq(a, L"--quality") ||
-                      eq(a, L"--rate") || eq(a, L"--channels") ||
-                      eq(a, L"--duration") || eq(a, L"--lang") ||
-                      eq(a, L"--log-level") || eq(a, L"--log-file") ||
-                      eq(a, L"--session");
+        wants_value = option_takes_value(a);
 
         if (eq(a, L"--bus") || eq(a, L"--pid") || eq(a, L"--exe") ||
             eq(a, L"--device") || eq(a, L"--fake") ||
@@ -1185,6 +1222,47 @@ AprCliExit apr_cli_resolve(AprCliPlan *plan, const AprCliIo *io)
     if (plan->cmd != APR_CLI_CMD_RECORD &&
         plan->cmd != APR_CLI_CMD_SAVE_SESSION) return APR_CLI_OK;
 
+    /* ----------------------------------------------------------------------
+     * WHAT --allow-missing MEANS WHEN IT EMPTIES A BUS
+     *
+     * THE RULE: under --allow-missing, a bus whose every source was dropped is
+     * itself dropped, with a sentence, and the rest of the run proceeds. The
+     * run is refused only when NO bus is left -- there is then nothing to
+     * record at all, which is the same exit 2 an empty command line gets.
+     *
+     * The alternative -- refusing the whole run because one bus emptied -- is
+     * what this code did, and it is the exact outcome the flag is typed to
+     * prevent. Two buses, "Mix" (Teams + mic) and "Voice" (mic); Teams is not
+     * playing; --allow-missing drops it, "Mix" is now source-less, and the
+     * whole session aborts, so VOICE NEVER RECORDS EITHER. The meeting is lost
+     * by the flag that existed to save it.
+     *
+     * Dropping the bus takes its outputs with it, so no empty file appears
+     * where a recording was expected -- an empty file is a worse lie than a
+     * missing one. And the run ends INCOMPLETE rather than OK, because what
+     * was recorded is not what was asked for: that is what exit 6 means, and
+     * it is the same verdict a dropped SOURCE already produces.
+     *
+     * RECORD ONLY. `save-session` describes a recording rather than making
+     * one, and a session file quietly written with a bus missing is the silent
+     * configuration loss this product refuses everywhere else.
+     * -------------------------------------------------------------------- */
+    if (plan->allow_missing && plan->cmd == APR_CLI_CMD_RECORD) {
+        size_t keep = 0;
+        for (bi = 0; bi < plan->bus_count; bi++) {
+            const wchar_t *args[1];
+            if (plan->buses[bi].source_count == 0) {
+                args[0] = plan->buses[bi].name;
+                warn(&cx, APR_S_WARN_BUS_DROPPED, args, 1);
+                plan->session_incomplete = 1;
+                continue;
+            }
+            if (keep != bi) plan->buses[keep] = plan->buses[bi];
+            keep++;
+        }
+        plan->bus_count = keep;
+    }
+
     if (plan->bus_count == 0)
         return fail(&cx, APR_CLI_CONFIG, APR_S_ERR_NO_SOURCES, NULL, 0);
 
@@ -1253,13 +1331,13 @@ AprCliExit apr_cli_resolve(AprCliPlan *plan, const AprCliIo *io)
         }
 
         for (oi = 0; oi < b->output_count; oi++) {
-            AprCliOutput *o = &b->outputs[oi];
-            const wchar_t *args[2];
-            AprErr e;
+            AprCliOutput          *o = &b->outputs[oi];
+            const AprActionVTable *vt;
+            const wchar_t         *args[2];
+            AprErr                 e;
 
             if (o->action_id[0] == '\0') {
                 const wchar_t *ext = extension_of(o->path);
-                const AprActionVTable *vt;
                 if (!ext) {
                     args[0] = o->path;
                     return fail(&cx, APR_CLI_CONFIG, APR_S_ERR_NO_EXTENSION, args, 1);
@@ -1269,15 +1347,58 @@ AprCliExit apr_cli_resolve(AprCliPlan *plan, const AprCliIo *io)
                     args[0] = ext;
                     return fail(&cx, APR_CLI_CONFIG, APR_S_ERR_UNKNOWN_FORMAT, args, 1);
                 }
-                strcpy_s(o->action_id, sizeof o->action_id, vt->id);
-            } else if (!apr_action_find(o->action_id)) {
-                wchar_t wide[16];
-                size_t  k;
-                for (k = 0; k + 1 < 16 && o->action_id[k]; k++)
-                    wide[k] = (wchar_t)o->action_id[k];
-                wide[k] = L'\0';
-                args[0] = wide;
-                return fail(&cx, APR_CLI_CONFIG, APR_S_ERR_UNKNOWN_FORMAT, args, 1);
+            } else {
+                vt = apr_action_find(o->action_id);
+                if (!vt) {
+                    wchar_t wide[16];
+                    size_t  k;
+                    for (k = 0; k + 1 < 16 && o->action_id[k]; k++)
+                        wide[k] = (wchar_t)o->action_id[k];
+                    wide[k] = L'\0';
+                    args[0] = wide;
+                    return fail(&cx, APR_CLI_CONFIG, APR_S_ERR_UNKNOWN_FORMAT,
+                                args, 1);
+                }
+            }
+
+            /* THE CANONICAL SPELLING, always, whichever way the format was
+             * chosen. `--format WAV` now resolves -- apr_action_find matches
+             * case-insensitively, exactly as the extension pass always did,
+             * so `--out x.WAV` working while `--format WAV` was refused as "a
+             * format this build cannot write" is over -- and writing the
+             * vtable's own id back is what keeps a session file holding the
+             * wire value rather than whatever case somebody typed. */
+            strcpy_s(o->action_id, sizeof o->action_id, vt->id);
+
+            /* ASK THE ENCODER BEFORE ANYTHING IS RECORDED.
+             *
+             * This is the check whose absence could cost a whole take.
+             * `--bitrate 400 --out meeting.mp3 --duration 3600` parsed, passed
+             * --dry-run, and then ran for an hour writing nothing, because the
+             * only thing that knew LAME refuses 400 kbps was create() -- which
+             * runs at apr_bus_start, where a refusal is downgraded to a
+             * skipped output and the session carries on regardless. The
+             * registry knows every action; now it can be asked (action.h).
+             *
+             * Exit 2: the command line was read and does not describe a
+             * recording that can be made. */
+            {
+                AprActionConfig acfg;
+
+                memset(&acfg, 0, sizeof acfg);
+                acfg.sample_rate  = plan->rate;
+                acfg.channels     = plan->channels;
+                acfg.bitrate_kbps = o->bitrate_kbps;
+                acfg.quality      = o->quality;
+
+                e = apr_action_check_config(vt, &acfg);
+                if (apr_failed(&e)) {
+                    wchar_t why[512];
+                    args[0] = o->path;
+                    args[1] = errtext(&e, why, 512);
+                    return fail(&cx, APR_CLI_CONFIG,
+                                APR_S_ERR_OUTPUT_UNSUPPORTED, args, 2);
+                }
             }
 
             /* Two recordings cannot share a file, and the comparison has to
@@ -1288,16 +1409,25 @@ AprCliExit apr_cli_resolve(AprCliPlan *plan, const AprCliIo *io)
             {
                 wchar_t mine[APR_CLI_SPEC_CCH], full_mine[APR_CLI_SPEC_CCH];
                 size_t  bj, oj;
+                /* {n} MEANS "THE LOWEST FREE NUMBER", resolved against the disk
+                 * at the instant each recording starts, so a template carrying
+                 * one names a DIFFERENT file every time it is used -- and the
+                 * comparison below cannot see that, because expanding without
+                 * the disk turns every {n} into 1. Two buses both saving to
+                 * "take{n}.wav" were therefore refused as a duplicate when
+                 * they are precisely the case the token exists for. */
+                int mine_numbered = apr_out_has_token(o->path, L"n");
 
                 expanded_output_path(b, o, mine, APR_CLI_SPEC_CCH);
                 full_path(mine, full_mine, APR_CLI_SPEC_CCH);
 
-                for (bj = 0; bj <= bi; bj++) {
+                for (bj = 0; bj <= bi && !mine_numbered; bj++) {
                     size_t limit = (bj == bi) ? oi : plan->buses[bj].output_count;
                     for (oj = 0; oj < limit; oj++) {
+                        const AprCliOutput *other_o = &plan->buses[bj].outputs[oj];
                         wchar_t other[APR_CLI_SPEC_CCH], full_other[APR_CLI_SPEC_CCH];
-                        expanded_output_path(&plan->buses[bj],
-                                             &plan->buses[bj].outputs[oj],
+                        if (apr_out_has_token(other_o->path, L"n")) continue;
+                        expanded_output_path(&plan->buses[bj], other_o,
                                              other, APR_CLI_SPEC_CCH);
                         full_path(other, full_other, APR_CLI_SPEC_CCH);
                         if (ieq(full_mine, full_other)) {
@@ -1315,11 +1445,10 @@ AprCliExit apr_cli_resolve(AprCliPlan *plan, const AprCliIo *io)
              * recording here -- that happens at apr_bus_start() (bus.h). */
             {
                 AprOutContext ctx;
-                const AprActionVTable *ovt = apr_action_find(o->action_id);
                 wchar_t shown[APR_CLI_SPEC_CCH];
 
                 ctx.bus_name  = b->name;
-                ctx.extension = ovt ? ovt->extension : NULL;
+                ctx.extension = vt->extension;
                 e = apr_out_validate(o->path, &ctx, shown, APR_CLI_SPEC_CCH);
                 if (apr_failed(&e)) {
                     wchar_t why[512];
@@ -1653,6 +1782,19 @@ typedef struct RunState {
     AprBusId  bus_ids[APR_MAX_BUSES];
     int       incomplete;
     uint64_t  frames_out[APR_MAX_BUSES];
+
+    /* WHICH OUTPUTS NEVER OPENED A FILE, which is not the same question as
+     * "which outputs are marked failed" and the difference decides both the
+     * exit code and what the summary is allowed to claim.
+     *
+     * The runner announces a failed action twice over the life of a run: once
+     * from the poll it makes BEFORE APR_RUN_EV_STARTED, which can only mean
+     * the file would not open, and again later for anything that went wrong
+     * while recording or while closing. Only the first kind means there is no
+     * file. Watching where the notice falls relative to STARTED is how this
+     * tells them apart -- the bus exposes one `failed` flag for both. */
+    unsigned char never_opened[APR_MAX_BUSES][APR_CLI_MAX_OUTPUTS_PER_BUS];
+    int           never_opened_count;
 } RunState;
 
 static AprCliExit build_graph(const Ctx *cx, const AprCliPlan *p, RunState *st)
@@ -1778,6 +1920,9 @@ typedef struct RunObs {
     const Ctx        *cx;
     const AprCliPlan *p;
     const AprGraph   *g;
+    RunState         *st;
+    int               started;    /* APR_RUN_EV_STARTED has been seen   */
+    int               finishing;  /* APR_RUN_EV_FINISHING has been seen */
 } RunObs;
 
 /* The file an output is writing, or -- before it opens one, and for the
@@ -1831,6 +1976,7 @@ static void cli_observer(void *user, const AprRunNotice *n)
         break;
 
     case APR_RUN_EV_STARTED:
+        o->started = 1;
         say_output_lines(o, APR_S_STATUS_RECORDING_TO);
         if (!o->p->duration_ms && !o->cx->quiet && !o->cx->json)
             SAY0(o->cx, APR_CLI_STDOUT, APR_S_CLI_STOP_HINT);
@@ -1847,9 +1993,32 @@ static void cli_observer(void *user, const AprRunNotice *n)
         break;
 
     case APR_RUN_EV_ACTION_FAILED:
+        /* BEFORE "started" means the file never opened. apr_graph_start has
+         * already run by then, so this is the create() that refused, and there
+         * is nothing on disk under that name -- which is what stops the
+         * summary below reporting an hour of audio into a file that does not
+         * exist. */
+        if (!o->started && o->st &&
+            n->bus_index < APR_MAX_BUSES &&
+            n->action_index < APR_CLI_MAX_OUTPUTS_PER_BUS &&
+            !o->st->never_opened[n->bus_index][n->action_index])
+        {
+            o->st->never_opened[n->bus_index][n->action_index] = 1;
+            o->st->never_opened_count++;
+        }
         args[0] = n->name;
         args[1] = errtext(&n->err, why, 512);
-        warn(o->cx, APR_S_WARN_ACTION_FAILED, args, 2);
+        if (o->finishing) {
+            /* After "finishing" the file is written and closed: what failed
+             * was the close, or the encoder is reporting that the disk fell
+             * behind and part of the take is silence. "Stopped taking audio"
+             * would be untrue, and being told nothing at all is how a
+             * four-second disk stall used to pass for a clean recording. */
+            args[0] = n->path[0] ? n->path : n->name;
+            warn(o->cx, APR_S_WARN_OUTPUT_DEGRADED, args, 2);
+        } else {
+            warn(o->cx, APR_S_WARN_ACTION_FAILED, args, 2);
+        }
         break;
 
     case APR_RUN_EV_OUTPUT_RENAMED:
@@ -1861,6 +2030,7 @@ static void cli_observer(void *user, const AprRunNotice *n)
         break;
 
     case APR_RUN_EV_FINISHING:
+        o->finishing = 1;
         say_output_lines(o, APR_S_STATUS_FINISHING);
         break;
 
@@ -1877,9 +2047,11 @@ static AprCliExit record_loop(const Ctx *cx, const AprCliPlan *p, RunState *st)
     AprErr          e;
     size_t          bi;
 
+    memset(&obs, 0, sizeof obs);
     obs.cx = cx;
     obs.p  = p;
     obs.g  = st->g;
+    obs.st = st;
 
     memset(&cfg, 0, sizeof cfg);
     cfg.graph       = st->g;
@@ -1927,16 +2099,63 @@ static AprCliExit record_loop(const Ctx *cx, const AprCliPlan *p, RunState *st)
  * output's name expanded to and whether the collision policy moved it. A
  * summary that named the template would send the user looking for a file that
  * is not there. */
+/* Did this output ever open a file? Reads the map the observer filled while
+ * the run was still going, because after apr_bus_stop the bus's own `failed`
+ * flag no longer distinguishes "never opened" from "closed badly". */
+static int output_never_opened(const RunState *st, size_t bi, size_t oi)
+{
+    if (bi >= APR_MAX_BUSES || oi >= APR_CLI_MAX_OUTPUTS_PER_BUS) return 0;
+    return st->never_opened[bi][oi] != 0;
+}
+
+static size_t output_count_total(const RunState *st)
+{
+    size_t bi, n = 0;
+    for (bi = 0; bi < apr_graph_bus_count(st->g); bi++) {
+        AprBus *b = apr_graph_bus_at(st->g, bi);
+        if (b) n += apr_bus_action_count(b);
+    }
+    return n;
+}
+
+/* NOTHING WAS RECORDED AT ALL, which is a different outcome from "something
+ * went wrong" and must not wear its clothes.
+ *
+ * A run in which every single output failed to open used to end INCOMPLETE --
+ * documented as "recorded and playable" -- with a --json document listing each
+ * output's path beside the full duration of the run. An hour of `"seconds":
+ * 3600` for a file that was never created. A script branching on exit 6 keeps
+ * going; a person reading the report goes looking for a file that is not
+ * there; and the audio is gone either way.
+ *
+ * Exit 4 is what this is: "a file could not be created, or could not be closed
+ * properly." It is the code the same failure already gets when it is caught
+ * before recording starts (apr_cli_resolve), so a script branches on one thing
+ * whichever side of the start it happened. Note the asymmetry with a run where
+ * SOME outputs opened: that is exit 6 and correct, because there is a playable
+ * recording -- just not all of the one that was asked for. */
+static int nothing_was_written(const RunState *st)
+{
+    size_t total = output_count_total(st);
+    return total > 0 && (size_t)st->never_opened_count >= total;
+}
+
 static void report_result(const Ctx *cx, const AprCliPlan *p, RunState *st,
                           AprCliExit code)
 {
     size_t bi, oi;
+    int    empty = nothing_was_written(st);
 
     if (cx->json) {
         jline(cx, 0, L"{");
         jbool(cx, 1, L"ok", code == APR_CLI_OK, 1);
         jnum(cx, 1, L"exitCode", (int64_t)code, 1);
         jbool(cx, 1, L"dryRun", 0, 1);
+        if (empty) {
+            wchar_t msg[LINE_CCH];
+            apr_str_format(APR_S_ERR_NOTHING_WAS_WRITTEN, msg, LINE_CCH, NULL, 0);
+            jstr(cx, 1, L"error", msg, 1);
+        }
         jline(cx, 1, L"\"outputs\": [");
         for (bi = 0; bi < apr_graph_bus_count(st->g); bi++) {
             AprBus *b = apr_graph_bus_at(st->g, bi);
@@ -1944,6 +2163,7 @@ static void report_result(const Ctx *cx, const AprCliPlan *p, RunState *st,
             for (oi = 0; oi < apr_bus_action_count(b); oi++) {
                 const AprActionVTable *vt = apr_bus_action_at(b, oi);
                 wchar_t fw[16];
+                int gone = output_never_opened(st, bi, oi);
                 int last = (bi + 1 == apr_graph_bus_count(st->g)) &&
                            (oi + 1 == apr_bus_action_count(b));
                 wide_of(vt && vt->id ? vt->id : "", fw, 16);
@@ -1951,8 +2171,15 @@ static void report_result(const Ctx *cx, const AprCliPlan *p, RunState *st,
                 jstr(cx, 3, L"path", written_path(b, oi), 1);
                 jstr(cx, 3, L"format", fw, 1);
                 jstr(cx, 3, L"bus", apr_bus_name(b), 1);
+                /* An output with no file is said so in its own entry, and its
+                 * duration is zero rather than the length of the run. A script
+                 * that reads `seconds` and goes looking for the file has to be
+                 * able to trust both. */
+                jbool(cx, 3, L"failed", gone, 1);
                 jreal(cx, 3, L"seconds",
-                      p->rate ? (double)st->frames_out[bi] / (double)p->rate : 0.0, 0);
+                      (gone || !p->rate)
+                          ? 0.0
+                          : (double)st->frames_out[bi] / (double)p->rate, 0);
                 jline(cx, 2, L"}%ls", last ? L"" : L",");
             }
         }
@@ -1960,6 +2187,8 @@ static void report_result(const Ctx *cx, const AprCliPlan *p, RunState *st,
         jline(cx, 0, L"}");
         return;
     }
+
+    if (empty) SAY0(cx, APR_CLI_STDERR, APR_S_ERR_NOTHING_WAS_WRITTEN);
 
     for (bi = 0; bi < apr_graph_bus_count(st->g); bi++) {
         AprBus *b = apr_graph_bus_at(st->g, bi);
@@ -1970,13 +2199,17 @@ static void report_result(const Ctx *cx, const AprCliPlan *p, RunState *st,
             int64_t ms = p->rate
                 ? (int64_t)apr_mul_div_u64(st->frames_out[bi], 1000u, p->rate, NULL)
                 : 0;
+            /* "Wrote x, 3600.000 seconds" about a file that was never created
+             * is the sentence this whole guard exists to delete. It was
+             * already announced as a failure when the run started. */
+            if (output_never_opened(st, bi, oi)) continue;
             args[0] = written_path(b, oi);
             args[1] = fixed(&sb, ms, 3);
             if (!args[0][0]) continue;
             note(cx, APR_S_STATUS_WROTE, args, 2);
         }
     }
-    if (!cx->quiet) SAY0(cx, APR_CLI_STDOUT, APR_S_STATUS_STOPPED);
+    if (!cx->quiet && !empty) SAY0(cx, APR_CLI_STDOUT, APR_S_STATUS_STOPPED);
 }
 
 static AprCliExit do_record(const Ctx *cx, const AprCliPlan *p)
@@ -1997,7 +2230,14 @@ static AprCliExit do_record(const Ctx *cx, const AprCliPlan *p)
         rc = build_graph(cx, p, &st);
         if (rc == APR_CLI_OK) rc = record_loop(cx, p, &st);
         if (rc == APR_CLI_OK && st.incomplete) rc = APR_CLI_INCOMPLETE;
-        if (rc == APR_CLI_OK || rc == APR_CLI_INCOMPLETE)
+        /* A run that opened no file at all did not record anything, whatever
+         * else went right -- see nothing_was_written(). */
+        if ((rc == APR_CLI_OK || rc == APR_CLI_INCOMPLETE) &&
+            nothing_was_written(&st))
+        {
+            rc = APR_CLI_OUTPUT;
+        }
+        if (rc == APR_CLI_OK || rc == APR_CLI_INCOMPLETE || rc == APR_CLI_OUTPUT)
             report_result(cx, p, &st, rc);
     }
     __finally {
@@ -2278,12 +2518,34 @@ static void plan_from_session(AprCliPlan *p, const AprSession *s)
     }
 }
 
+/* THE SESSION COULD NOT BE TURNED INTO A RECORDING, said once, at the end.
+ *
+ * Every reason was already said in detail by say_resolution -- but through
+ * warn(), which is silent under --json, so a `record --session x --json` that
+ * could not resolve printed NOTHING AT ALL and exited 3. A script got an exit
+ * code and an empty stream where the contract says there is always a document.
+ * fail() is the one place that writes the JSON failure shape, so the refusal
+ * goes through it, and in text mode it adds the one line that was missing
+ * anyway: a verdict after the list of reasons. */
+static AprCliExit session_refused(const Ctx *cx, const AprCliPlan *p,
+                                  AprCliExit code, const wchar_t *first_bad)
+{
+    const wchar_t *args[2];
+
+    args[0] = p->session_file;
+    args[1] = (first_bad && first_bad[0]) ? first_bad : p->session_file;
+    return fail(cx, code, APR_S_ERR_SESSION_NOT_USABLE, args, 2);
+}
+
 static AprCliExit load_session(const Ctx *cx, AprCliPlan *p)
 {
     AprSessionResolveOptions opt;
     AprErr e;
     size_t i;
     AprCliExit worst = APR_CLI_OK;
+    wchar_t    first_bad[APR_NAME_CCH];
+
+    first_bad[0] = L'\0';
 
     e = apr_session_load(p->session_file, &g_session, &g_load_report);
     if (apr_failed(&e)) return report_load_fault(cx, p, &g_load_report, &e);
@@ -2318,6 +2580,11 @@ static AprCliExit load_session(const Ctx *cx, AprCliPlan *p)
         say_resolution(cx, p, &g_session, r);
         if (apr_session_status_usable(r->status)) continue;
 
+        if (!first_bad[0]) {
+            copy_cch(first_bad, APR_NAME_CCH,
+                     r->name[0] ? r->name : r->wanted);
+        }
+
         /* Consent is a configuration answer, not a missing thing: the file
          * was perfectly readable and describes a recording we will not make. */
         if (r->status == APR_SESSION_NEEDS_CONSENT) {
@@ -2331,8 +2598,9 @@ static AprCliExit load_session(const Ctx *cx, AprCliPlan *p)
             p->session_incomplete = 1;
         }
     }
-    if (worst != APR_CLI_OK) return worst;
-    if (apr_failed(&e) && !p->allow_missing) return APR_CLI_NOT_FOUND;
+    if (worst != APR_CLI_OK) return session_refused(cx, p, worst, first_bad);
+    if (apr_failed(&e) && !p->allow_missing)
+        return session_refused(cx, p, APR_CLI_NOT_FOUND, first_bad);
 
     plan_from_session(p, &g_session);
 
@@ -2447,7 +2715,23 @@ static AprCliExit do_save_session(const Ctx *cx, const AprCliPlan *p)
         for (si = 0; si < cb->source_count; si++) {
             size_t idx = intern_source(&g_session, &cb->sources[si]);
             AprSessionEdge *ed;
-            if (idx == (size_t)-1) continue;
+            /* THE POOL IS FULL, AND THAT IS A REFUSAL, NOT A SHRUG.
+             *
+             * This used to `continue`: the source was dropped, the file was
+             * written, the run exited 0 and --json cheerfully reported
+             * "sources": 64. Silent configuration loss, in the one artefact
+             * whose entire job is to reproduce a recording exactly -- and it
+             * would not be noticed until the session was replayed weeks later
+             * and a bus was quietly missing an input. A session that cannot
+             * hold what was described is not a session worth writing. */
+            if (idx == (size_t)-1) {
+                const wchar_t *args[2];
+                args[0] = p->session_file;
+                args[1] = cb->sources[si].label[0] ? cb->sources[si].label
+                                                   : cb->sources[si].spec;
+                return fail(cx, APR_CLI_CONFIG, APR_S_ERR_SESSION_TOO_MANY,
+                            args, 2);
+            }
             ed = &sb->edges[sb->edge_count++];
             memset(ed, 0, sizeof *ed);
             strcpy_s(ed->key, APR_SESSION_KEY_CCH, g_session.sources[idx].key);

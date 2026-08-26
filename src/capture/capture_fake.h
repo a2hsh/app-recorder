@@ -53,4 +53,32 @@ AprErr apr_capture_fake_advance(AprCapture *c, uint64_t now_ticks);
  * QPF is not 10 MHz just because it was on one machine. */
 uint64_t apr_capture_fake_tick_rate(const AprCapture *c);
 
+/* ---------------------------------------------------------------------------
+ * THE WEDGE. A fake pump that will not stop.
+ *
+ * The only critical bug the capture layer can have is freeing memory a live
+ * audio thread is still writing into, and it is unreachable from a test by
+ * ordinary means: it needs WASAPI to hang inside GetBuffer, which is exactly
+ * the thing nobody can arrange on demand. Without a seam, the abandonment path
+ * -- every join in the layer, and the AprErr each one returns so that
+ * apr_source_destroy does not free the ring anyway -- is code that has never
+ * once run.
+ *
+ * A wedged fake ignores stop_ev and keeps generating frames into the ring, so
+ * stop() cannot join it and close() must abandon it. That is not a simulation
+ * of the failure; it IS the failure, minus the part that needs a broken audio
+ * driver.
+ *
+ * A wedged source must be started (real-time mode) -- there is no thread to
+ * wedge in driven mode, and wedging one is refused rather than ignored.
+ * ------------------------------------------------------------------------- */
+AprErr apr_capture_fake_wedge(AprCapture *c);
+
+/* Release the wedge. The pacing thread leaves at its next tick, after which a
+ * repeated apr_source_destroy / apr_capture_destroy succeeds and the leak the
+ * abandonment deliberately created can be cleaned up. Tests must call this;
+ * leaving a wedged source behind leaks a hot thread for the life of the
+ * process. */
+AprErr apr_capture_fake_unwedge(AprCapture *c);
+
 #endif /* APPRECORDER_CAPTURE_FAKE_H */

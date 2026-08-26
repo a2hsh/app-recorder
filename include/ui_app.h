@@ -351,6 +351,33 @@ void apr_ui_app_request_close(const AprUiApp *app);
  * module's decision to make. */
 int apr_ui_app_run(AprUiApp *app);
 
+/* EVERYTHING THAT HAPPENS TO A KEYSTROKE BETWEEN THE QUEUE AND THE WINDOW.
+ * apr_ui_app_run() calls exactly this and nothing else; returns nonzero when
+ * the message was consumed and must not be dispatched.
+ *
+ * IT IS A FUNCTION SO THAT A TEST CAN DRIVE IT, and that is not a convenience.
+ * The rule "an editing command refused during a recording is greyed AND
+ * spoken" was implemented, documented, translated -- and never once fired,
+ * because TranslateAccelerator does not send WM_COMMAND for an accelerator
+ * whose menu item is disabled. It consumes the key and delivers nothing, so
+ * the handler that would have spoken never ran and the user got silence. That
+ * lived in an inlined message loop no test could reach.
+ *
+ * So: a keystroke bound to a DISABLED command is dispatched here anyway, and
+ * the command handler refuses it out loud. Enabled state decides how the menu
+ * looks; it no longer decides, silently, whether a key exists at all. */
+int apr_ui_app_pretranslate(AprUiApp *app, MSG *msg);
+
+/* The command this keystroke is bound to in the frame's accelerator table, or
+ * 0. Pure -- `mods` are APR_KMOD_* (ui_canvas.h), not a live keyboard read --
+ * so a test can ask what Ctrl+1 means without pressing anything. */
+int apr_ui_app_accel_command(UINT vk, UINT mods);
+
+/* Nonzero when `command_id`'s menu item is currently enabled. The other half
+ * of the pair above: "greyed" and "silent" are now separate questions, and a
+ * test can assert that a command is greyed AND still says why. */
+int apr_ui_app_command_enabled(const AprUiApp *app, int command_id);
+
 /* ---------------------------------------------------------------------------
  * What the next two agents implement
  *

@@ -38,6 +38,10 @@
 #include "runner.h"
 #include "strings.h"
 
+/* MSVC in C mode: an assignment is not an lvalue, so the &(e = f(...)) idiom
+ * does not compile. This is the same assertion without the trick. */
+#define ASSERT_OK(call) do { AprErr e_ = (call); ASSERT_FALSE(apr_failed(&e_)); } while (0)
+
 /* ==========================================================================
  * Scaffolding
  * ======================================================================== */
@@ -508,4 +512,106 @@ TEST(a_runner_with_no_graph_is_refused_rather_than_crashing)
     ASSERT_EQ_INT(0, (int)apr_runner_source_count(NULL));
     apr_runner_request_stop(NULL);
     apr_runner_destroy(NULL);
+}
+
+/* ==========================================================================
+ * m28 -- destroy must wait for a SYNCHRONOUS run too
+ *
+ * apr_runner_destroy() joined the thread apr_runner_run_async() creates, and
+ * that was the whole of it. apr_runner_run() executes the recording on the
+ * CALLER's thread, for which the runner holds no handle at all -- so destroy
+ * saw nothing to wait for and fell straight through to free(), while a live
+ * loop on another thread was still writing into that allocation and had not
+ * finalized a single file.
+ *
+ * It stayed latent because today's callers happen to destroy on the same
+ * thread they ran on, which is to say this safety net has never been under
+ * load. The test puts it under load.
+ * ======================================================================= */
+
+typedef struct SyncRun {
+    AprRunner *r;
+    HANDLE     started;      /* set once the loop is definitely in flight */
+    volatile LONG finished;  /* 1 once apr_runner_run() has RETURNED */
+} SyncRun;
+
+static DWORD WINAPI sync_run_thread(void *param)
+{
+    SyncRun *sr = (SyncRun *)param;
+    AprErr   e;
+
+    SetEvent(sr->started);
+    e = apr_runner_run(sr->r);      /* the whole recording, on THIS thread */
+    (void)e;
+    InterlockedExchange(&sr->finished, 1);
+    return 0;
+}
+
+TEST(destroy_waits_for_a_run_on_someone_elses_thread)
+{
+    Fixture          f;
+    AprRunnerConfig  cfg;
+    AprRunner       *r = NULL;
+    SyncRun          sr;
+    HANDLE           th;
+    AprErr           e;
+
+    ASSERT_TRUE(fixture_up(&f, L"m28sync", NULL));
+
+    memset(&cfg, 0, sizeof cfg);
+    cfg.graph       = f.g;
+    cfg.duration_ms = 400;          /* long enough to still be running below */
+    cfg.tick_ms     = 10;
+    ASSERT_OK(apr_runner_create(&cfg, &r));
+
+    memset(&sr, 0, sizeof sr);
+    sr.r       = r;
+    sr.started = CreateEventW(NULL, TRUE, FALSE, NULL);
+    ASSERT_NOT_NULL(sr.started);
+
+    th = CreateThread(NULL, 0, sync_run_thread, &sr, 0, NULL);
+    ASSERT_NOT_NULL(th);
+    ASSERT_EQ_INT(WAIT_OBJECT_0, (long long)WaitForSingleObject(sr.started, 5000));
+
+    /* Wait until the loop is genuinely inside itself, so that destroy really
+     * has something to wait for rather than arriving before or after. */
+    while (!apr_runner_running(r)) Sleep(1);
+
+    /* RED before the fix: this returned immediately, freed `r`, and left
+     * sync_run_thread writing into it. */
+    e = apr_runner_destroy(r);
+    ASSERT_FALSE(apr_failed(&e));
+
+    /* The ordering assertion. If destroy returned while the loop was still
+     * running, this is 0 -- and everything the loop touched afterwards was
+     * freed memory. */
+    ASSERT_EQ_INT(1, (long long)sr.finished);
+
+    WaitForSingleObject(th, INFINITE);
+    CloseHandle(th);
+    CloseHandle(sr.started);
+    fixture_down(&f);
+}
+
+TEST(destroy_of_a_runner_that_never_ran_is_immediate_and_ok)
+{
+    Fixture         f;
+    AprRunnerConfig cfg;
+    AprRunner      *r = NULL;
+    AprErr          e;
+
+    ASSERT_TRUE(fixture_up(&f, L"m28idle", NULL));
+
+    memset(&cfg, 0, sizeof cfg);
+    cfg.graph   = f.g;
+    cfg.tick_ms = 10;
+    ASSERT_OK(apr_runner_create(&cfg, &r));
+
+    e = apr_runner_destroy(r);
+    ASSERT_FALSE(apr_failed(&e));
+
+    e = apr_runner_destroy(NULL);
+    ASSERT_FALSE(apr_failed(&e));
+
+    fixture_down(&f);
 }

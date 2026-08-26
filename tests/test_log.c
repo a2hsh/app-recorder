@@ -12,6 +12,10 @@
 
 #include <windows.h>
 
+/* MSVC in C mode: an assignment is not an lvalue, so the &(e = f(...)) idiom
+ * does not compile. This is the same assertion without the trick. */
+#define ASSERT_OK(call) do { AprErr e_ = (call); ASSERT_FALSE(apr_failed(&e_)); } while (0)
+
 /* ---- a sink that captures into memory, so tests need no files ----------- */
 
 #define CAP_MAX 4096
@@ -327,4 +331,103 @@ TEST(logging_before_init_is_harmless)
     APR_ERROR(L"into the void");
     APR_RT1(APR_LOG_ERROR, L"also void %lld", 1);
     ASSERT_EQ_U64(0, apr_log_drain());   /* nothing queued, nothing emitted */
+}
+
+/* ==========================================================================
+ * m26 -- shutdown must not free out from under its own drain thread
+ *
+ * apr_log_shutdown() waited 2 s for the drain thread, IGNORED the result, and
+ * then closed the file handle, cleared the sink pointer and drained the ring
+ * itself. A drain thread that had not yet left was inside emit_line() doing
+ * all three: two consumers on a single-consumer ring, a WriteFile to a handle
+ * about to be closed, and a sink pointer swapped under a live call.
+ *
+ * The seam is the sink itself: a sink that blocks IS a drain thread that will
+ * not leave, and it is the only way to make the timeout fire without a
+ * genuinely hung disk.
+ * ======================================================================= */
+
+static HANDLE g_block_ev;              /* the blocking sink waits on this */
+static volatile LONG g_block_calls;
+static volatile LONG g_block_released;
+
+static void blocking_sink(const wchar_t *line, void *user)
+{
+    (void)user;
+    cap_sink(line, NULL);
+    if (InterlockedIncrement(&g_block_calls) == 1) {
+        /* Only the FIRST record blocks; everything after it must still be
+         * emitted, which is what proves the sink pointer was left alone. */
+        (void)WaitForSingleObject(g_block_ev, 20000);
+        InterlockedExchange(&g_block_released, 1);
+    }
+}
+
+TEST(a_shutdown_that_cannot_join_its_drain_thread_says_so_and_frees_nothing)
+{
+    AprLogConfig cfg;
+    AprErr       e;
+    int          spins;
+
+    /* log_start() owns the capture sink's lock; borrow it, then take the log
+     * back down so this test can bring it up with a drain thread. */
+    log_start(APR_LOG_TRACE);
+    apr_log_shutdown();
+
+    g_block_ev = CreateEventW(NULL, TRUE, FALSE, NULL);
+    ASSERT_NOT_NULL(g_block_ev);
+    g_block_calls    = 0;
+    g_block_released = 0;
+
+    memset(&cfg, 0, sizeof cfg);
+    cfg.level            = APR_LOG_TRACE;
+    cfg.background_drain = 1;          /* the thread this test is about */
+    ASSERT_OK(apr_log_init(&cfg));
+    apr_log_set_sink(blocking_sink, NULL);
+    cap_reset();
+
+    APR_INFO(L"first record, the one that wedges the drain");
+    APR_INFO(L"second record, emitted only if the sink survived shutdown");
+
+    /* Let the drain thread pick the first record up and block inside it. Its
+     * loop wakes every 250 ms, so this is a handful of spins, not a race. */
+    for (spins = 0; spins < 2000; spins++) {
+        if (InterlockedCompareExchange(&g_block_calls, 0, 0) != 0) break;
+        Sleep(5);
+    }
+    ASSERT_NE_INT(0, (long long)g_block_calls);
+
+    /* RED before the fix: this returned void, waited 2 s, and then tore the
+     * log down around a thread still inside emit_line(). */
+    e = apr_log_shutdown();
+    ASSERT_TRUE(apr_failed(&e));
+    ASSERT_EQ_INT(APR_E_TIMEOUT, e.kind);
+
+    /* Re-initialising over a live drain thread would memset the ring under it,
+     * so it is refused rather than attempted. */
+    e = apr_log_init(&cfg);
+    ASSERT_TRUE(apr_failed(&e));
+    ASSERT_EQ_INT(APR_E_TIMEOUT, e.kind);
+
+    /* Release the sink, then retry. The retry joins the thread, so everything
+     * asserted after it is settled rather than slept for -- and the retry
+     * succeeding is what makes the deliberate leak recoverable. */
+    SetEvent(g_block_ev);
+    ASSERT_OK(apr_log_shutdown());
+
+    /* The second record was emitted after the abandoned shutdown returned,
+     * which it could only be because that shutdown left g_sink alone. */
+    ASSERT_TRUE(cap_contains(L"second record"));
+
+    CloseHandle(g_block_ev);
+    g_block_ev = NULL;
+}
+
+TEST(an_ordinary_shutdown_reports_success)
+{
+    AprErr e;
+    log_start(APR_LOG_TRACE);
+    APR_INFO(L"nothing wrong here");
+    e = apr_log_shutdown();
+    ASSERT_FALSE(apr_failed(&e));
 }

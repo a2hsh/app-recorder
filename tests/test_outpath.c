@@ -475,3 +475,129 @@ TEST(the_default_name_is_absolute_timestamped_and_format_following)
      * from -- which for a shortcut is nowhere the user can find. */
     ASSERT_TRUE(got[1] == L':' || (got[0] == L'\\' && got[1] == L'\\'));
 }
+
+/* ===========================================================================
+ * Claiming the name, rather than checking it and hoping (M13)
+ * ========================================================================= */
+
+/* apr_out_resolve answers "which name is free". Between that answer and the
+ * CreateFileW that used it there was a window, and it was not theoretical:
+ * two scheduled tasks starting apprecorder in the same second with the same
+ * template both saw "mix.wav" free, both opened it with CREATE_ALWAYS, and
+ * both wrote into it. One corrupt take -- and, if the collision policy had
+ * already moved an earlier take aside, a second file that is garbage under the
+ * name the earlier take used to have.
+ *
+ * apr_out_open_new closes it by making the create itself the claim. */
+TEST(opening_a_new_take_never_touches_a_file_that_is_already_there)
+{
+    wchar_t taken[CCH], got[CCH], expect[CCH];
+    void   *h = NULL;
+    int     collided = -1;
+    size_t  len;
+    AprErr  e;
+
+    tmp_name(taken, CCH, L"claim", L"wav");
+    ASSERT_TRUE(make_file(taken, "the take that was already here"));
+
+    /* The same name, handed straight to the opener as if the resolve had been
+     * beaten to it. CREATE_ALWAYS would have truncated it here. */
+    e = apr_out_open_new(taken, got, CCH, &collided, &h);
+    ASSERT_FALSE(apr_failed(&e));
+    ASSERT_NOT_NULL(h);
+    ASSERT_EQ_INT(1, collided);
+
+    /* The earlier take is untouched, byte for byte. THIS is the property. */
+    ASSERT_TRUE(file_says(taken, "the take that was already here"));
+
+    /* And the name that came back is the next one down the same ladder the
+     * collision policy walks. */
+    len = wcslen(taken);
+    wcscpy_s(expect, CCH, taken);
+    wcscpy_s(expect + len - 4, CCH - (len - 4), L"-2.wav");
+    ASSERT_WSTR_EQ(expect, got);
+    ASSERT_TRUE(exists(got));
+
+    CloseHandle((HANDLE)h);
+    DeleteFileW(taken);
+    DeleteFileW(got);
+}
+
+TEST(a_free_name_is_opened_as_itself_and_reports_no_collision)
+{
+    wchar_t want[CCH], got[CCH];
+    void   *h = NULL;
+    int     collided = -1;
+    AprErr  e;
+
+    tmp_name(want, CCH, L"claimfree", L"wav");
+    ASSERT_FALSE(exists(want));
+
+    e = apr_out_open_new(want, got, CCH, &collided, &h);
+    ASSERT_FALSE(apr_failed(&e));
+    ASSERT_NOT_NULL(h);
+    ASSERT_EQ_INT(0, collided);
+    ASSERT_WSTR_EQ(want, got);
+
+    CloseHandle((HANDLE)h);
+    DeleteFileW(got);
+}
+
+/* The handle is a real one, opened for writing, and the take that was moved
+ * aside is what receives the bytes. */
+TEST(the_handle_that_comes_back_is_the_one_the_recording_writes_through)
+{
+    wchar_t taken[CCH], got[CCH];
+    void   *h = NULL;
+    DWORD   wrote = 0;
+    AprErr  e;
+
+    tmp_name(taken, CCH, L"claimwrite", L"wav");
+    ASSERT_TRUE(make_file(taken, "first"));
+
+    e = apr_out_open_new(taken, got, CCH, NULL, &h);
+    ASSERT_FALSE(apr_failed(&e));
+    ASSERT_TRUE(WriteFile((HANDLE)h, "second", 6, &wrote, NULL) != 0);
+    CloseHandle((HANDLE)h);
+
+    ASSERT_TRUE(file_says(taken, "first"));
+    ASSERT_TRUE(file_says(got, "second"));
+
+    DeleteFileW(taken);
+    DeleteFileW(got);
+}
+
+/* A folder that is not there is still a plain failure with a reason, not a
+ * walk up the whole ladder looking for a name that could never work. */
+TEST(a_path_that_cannot_be_created_at_all_fails_rather_than_counting)
+{
+    wchar_t dir[CCH], path[CCH], got[CCH];
+    void   *h = (void *)1;
+    AprErr  e;
+
+    tmp_dir(dir, CCH);
+    _snwprintf_s(path, CCH, _TRUNCATE, L"%lsapr_out_no_such_folder_%lu\\x.wav",
+                 dir, GetCurrentProcessId());
+
+    e = apr_out_open_new(path, got, CCH, NULL, &h);
+    ASSERT_TRUE(apr_failed(&e));
+    ASSERT_NULL(h);
+}
+
+/* ===========================================================================
+ * Asking about one token (m17 needs this to tell two files from one)
+ * ========================================================================= */
+
+TEST(a_caller_can_ask_whether_a_template_numbers_itself)
+{
+    ASSERT_TRUE(apr_out_has_token(L"take{n}.wav", L"n"));
+    ASSERT_TRUE(apr_out_has_token(L"take{N}.wav", L"n"));
+    ASSERT_FALSE(apr_out_has_token(L"take.wav", L"n"));
+    /* {{ is a literal brace and is not a token. */
+    ASSERT_FALSE(apr_out_has_token(L"take{{n}.wav", L"n"));
+    /* One token, not any token: {bus} does not answer for {n}. */
+    ASSERT_FALSE(apr_out_has_token(L"{bus}.wav", L"n"));
+    ASSERT_TRUE(apr_out_has_token(L"{bus}.wav", L"bus"));
+    ASSERT_FALSE(apr_out_has_token(NULL, L"n"));
+    ASSERT_FALSE(apr_out_has_token(L"take{n}.wav", NULL));
+}

@@ -106,9 +106,27 @@ typedef struct AprLogConfig {
  * requested file could not be opened -- logging still works without it. */
 AprErr apr_log_init(const AprLogConfig *cfg);
 
-/* Drain what is queued, stop the drain thread, close the file, clear the sink.
- * Safe to call when never initialised, and safe to call twice. */
-void apr_log_shutdown(void);
+/* Stop the drain thread, drain what is queued, close the file, clear the sink.
+ * Safe to call when never initialised, and safe to call twice.
+ *
+ * IT CAN FAIL, AND EVERY LINE BELOW IT DEPENDS ON THE ANSWER.
+ *
+ *   apr_ok()  -- the drain thread has exited. The file is closed, the sink is
+ *                cleared, and nothing is left reading the ring.
+ *
+ *   failure   -- the bounded wait for the drain thread timed out. IT IS STILL
+ *                RUNNING, and it is inside apr_log_drain(): rendering records,
+ *                calling the sink, writing to the file handle. So the file is
+ *                NOT closed, the sink is NOT cleared and the ring is NOT
+ *                touched -- closing a handle a live thread is about to
+ *                WriteFile to, or clearing a sink pointer it is about to call,
+ *                is the same bug this whole family had (join.h).
+ *
+ *   A failed shutdown leaves the log usable and leaves the thread joinable.
+ *   Call it again later and it will finish the job. apr_log_init() refuses
+ *   while a shutdown is outstanding, because re-initialising would memset the
+ *   ring under that thread. */
+AprErr apr_log_shutdown(void);
 
 /* Install (or clear, with NULL) the in-process sink. Thread-safe against
  * loggers; do not race it against the drain. */

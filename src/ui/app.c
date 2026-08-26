@@ -59,6 +59,7 @@
 #include <string.h>
 
 #include "log.h"
+#include "ui_canvas.h"   /* apr_canvas_current_mods, APR_KMOD_* */
 #include "ui_darkmode.h"
 #include "ui_dpi.h"
 
@@ -67,6 +68,10 @@
 
 #define APR_FRAME_CLASS L"AprRecorderFrame"
 #define APR_PANE_CLASS  L"AprRecorderPane"
+
+/* "Focus arrived at the frame; hand it on." Private, and POSTED rather than
+ * acted on inside WM_SETFOCUS -- see the handler. */
+#define APR_UI_WM_ENTER_FRAME (WM_APP + 0x60)
 
 #define APR_ID_STATUS   0x1001
 #define APR_ID_SPLITTER 0x1002
@@ -518,9 +523,12 @@ static HMENU build_menu(void)
  * produce a shortcut no keyboard can send. The TEXT beside the menu item is in
  * the catalog so it can be rendered in the local convention; the binding is
  * here. */
-static HACCEL build_accelerators(void)
-{
-    static ACCEL a[] = {
+/* THE TABLE IS DATA, AND IT HAS TO BE READABLE BACK.
+ *
+ * File scope rather than a local, because apr_ui_app_pretranslate() has to be
+ * able to answer "what command is this keystroke bound to" for a key
+ * TranslateAccelerator is about to swallow. See that function. */
+static const ACCEL k_accel[] = {
         { FVIRTKEY | FCONTROL,            'N', APR_CMD_FILE_NEW },
         { FVIRTKEY | FCONTROL,            'O', APR_CMD_FILE_OPEN },
         { FVIRTKEY | FCONTROL,            'S', APR_CMD_FILE_SAVE },
@@ -547,8 +555,14 @@ static HACCEL build_accelerators(void)
         { FVIRTKEY | FCONTROL,            'T', APR_CMD_VIEW_TREE },
         { FVIRTKEY | FCONTROL,            'D', APR_CMD_VIEW_DARK },
         { FVIRTKEY,                      VK_F1, APR_CMD_HELP_KEYS }
-    };
-    return CreateAcceleratorTableW(a, (int)(sizeof a / sizeof a[0]));
+};
+
+static HACCEL build_accelerators(void)
+{
+    /* CreateAcceleratorTableW takes a non-const LPACCEL and does not modify
+     * it; the table stays const here so nothing can edit it at run time. */
+    return CreateAcceleratorTableW((LPACCEL)(void *)k_accel,
+                                   (int)(sizeof k_accel / sizeof k_accel[0]));
 }
 
 /* --------------------------------------------------------------------------
@@ -746,13 +760,25 @@ static int dispatch_command(AprUiApp *app, int cmd)
         CheckMenuItem(app->menu, APR_CMD_VIEW_TREE,
                       MF_BYCOMMAND | (app->tree_visible ? MF_CHECKED : MF_UNCHECKED));
         apr_ui_app_relayout(app);
-        /* Focus must not be left inside a window we just hid. */
+        /* FOCUS MUST NOT BE LEFT INSIDE ANY WINDOW WE JUST HID, and the same
+         * relayout hides TWO of them. The rescue checked the tree pane and not
+         * the splitter, so Tab to "Panel divider" and press Ctrl+T and focus
+         * stayed on an invisible window: the reader went quiet, and the arrow
+         * keys silently resized a panel nobody could see. */
         if (!app->tree_visible && app->pane[APR_PANE_CANVAS]) {
             HWND f = GetFocus();
+            int stranded = 0;
+
             if (f && app->pane[APR_PANE_TREE] &&
-                (f == app->pane[APR_PANE_TREE] || IsChild(app->pane[APR_PANE_TREE], f))) {
-                SetFocus(app->pane[APR_PANE_CANVAS]);
+                (f == app->pane[APR_PANE_TREE] ||
+                 IsChild(app->pane[APR_PANE_TREE], f))) {
+                stranded = 1;
             }
+            if (f && app->splitter &&
+                (f == app->splitter || IsChild(app->splitter, f))) {
+                stranded = 1;
+            }
+            if (stranded) SetFocus(app->pane[APR_PANE_CANVAS]);
         }
         return 1;
     case APR_CMD_VIEW_DARK: {
@@ -992,17 +1018,36 @@ static LRESULT CALLBACK frame_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_SETFOCUS:
         /* The frame itself is not a useful focus target; hand focus to a pane
          * so that arriving at the window by Alt+Tab puts a screen reader
-         * somewhere it can read. */
+         * somewhere it can read.
+         *
+         * POSTED, NOT CALLED. SetFocus from inside WM_SETFOCUS is swallowed --
+         * the outer SetFocus reasserts its own target as it unwinds, so the
+         * hand-off reports success to every proxy check and leaves the
+         * keyboard on the frame (design 6.3; tree_panel.c measured it). The
+         * private message runs the same code one message later, with nothing
+         * unwinding over it. */
         if (app) {
+            PostMessageW(hwnd, APR_UI_WM_ENTER_FRAME, 0, 0);
+            return 0;
+        }
+        break;
+
+    case APR_UI_WM_ENTER_FRAME:
+        /* Only while the frame itself still holds focus -- or while NOTHING on
+         * this thread does, which is the state a freshly created window is in.
+         * Between the post and the delivery the user may already be somewhere
+         * else, and taking focus back from wherever they went is worse than
+         * not forwarding at all. */
+        if (app && (GetFocus() == hwnd || GetFocus() == NULL)) {
             int i;
             for (i = 0; i < APR_PANE_COUNT; ++i) {
                 if (app->pane[i] && IsWindowVisible(app->pane[i])) {
                     SetFocus(app->pane[i]);
-                    return 0;
+                    break;
                 }
             }
         }
-        break;
+        return 0;
 
     case WM_ERASEBKGND:
         if (app) {
@@ -1348,6 +1393,86 @@ void apr_ui_app_enable_command(AprUiApp *app, int command_id, int enabled)
     DrawMenuBar(app->frame);
 }
 
+int apr_ui_app_command_enabled(const AprUiApp *app, int command_id)
+{
+    UINT st;
+
+    if (!app || !app->menu) return 0;
+    st = GetMenuState(app->menu, (UINT)command_id, MF_BYCOMMAND);
+    if (st == (UINT)-1) return 0;   /* no such item */
+    return (st & (MF_GRAYED | MF_DISABLED)) == 0;
+}
+
+int apr_ui_app_accel_command(UINT vk, UINT mods)
+{
+    BYTE want = 0;
+    size_t i;
+
+    if (mods & APR_KMOD_CTRL)  want |= FCONTROL;
+    if (mods & APR_KMOD_SHIFT) want |= FSHIFT;
+    if (mods & APR_KMOD_ALT)   want |= FALT;
+
+    for (i = 0; i < sizeof k_accel / sizeof k_accel[0]; ++i) {
+        if (!(k_accel[i].fVirt & FVIRTKEY)) continue;
+        if (k_accel[i].key != (WORD)vk) continue;
+        if ((BYTE)(k_accel[i].fVirt & (FCONTROL | FSHIFT | FALT)) != want) {
+            continue;
+        }
+        return k_accel[i].cmd;
+    }
+    return 0;
+}
+
+/* THE DEFECT THIS FUNCTION EXISTS FOR, AND IT HAD NEVER FIRED ONCE.
+ *
+ * ui_controller.h promises that a command refused because a recording is
+ * running is "greyed AND spoken, because grey alone says nothing to this
+ * application's first user". The spoken half never happened.
+ *
+ * TranslateAccelerator resolves the key, looks at the corresponding MENU ITEM,
+ * finds it greyed, and returns nonzero WITHOUT sending WM_COMMAND. The
+ * keystroke is consumed and nothing is delivered -- so busy() never ran, and
+ * mid-recording Ctrl+1 produced total silence, which for this author is
+ * indistinguishable from a broken application. The sentence at strings.rc
+ * UI_ANN_BUSY_RECORDING had never been heard.
+ *
+ * So the resolution happens HERE instead, before TranslateAccelerator gets a
+ * chance to eat it: a disabled command is dispatched anyway, and the handler
+ * refuses it out loud. Enabling state then does what it should do -- decide
+ * how the menu LOOKS -- and stops silently deciding whether a key exists.
+ *
+ * F6 is here too, for the same reason it always was: IsDialogMessage consumes
+ * it, and pane cycling is the one navigation key a screen reader user relies
+ * on to leave a pane whose Tab order is long.
+ *
+ * Returns nonzero when the message was consumed and must not be dispatched. */
+int apr_ui_app_pretranslate(AprUiApp *app, MSG *msg)
+{
+    int cmd;
+
+    if (!app || !msg || !app->frame) return 0;
+
+    if (msg->message == WM_KEYDOWN && msg->wParam == VK_F6) {
+        cycle_pane(app, (GetKeyState(VK_SHIFT) & 0x8000) ? 0 : 1);
+        return 1;
+    }
+
+    if (msg->message == WM_KEYDOWN || msg->message == WM_SYSKEYDOWN) {
+        cmd = apr_ui_app_accel_command((UINT)msg->wParam,
+                                       apr_canvas_current_mods());
+        if (cmd && !apr_ui_app_command_enabled(app, cmd)) {
+            (void)dispatch_command(app, cmd);
+            return 1;
+        }
+    }
+
+    if (app->accel && TranslateAcceleratorW(app->frame, app->accel, msg)) {
+        return 1;
+    }
+    if (IsDialogMessageW(app->frame, msg)) return 1;
+    return 0;
+}
+
 void apr_ui_app_show(AprUiApp *app, int cmd_show)
 {
     if (!app || !app->frame) return;
@@ -1425,20 +1550,12 @@ int apr_ui_app_run(AprUiApp *app)
     memset(&msg, 0, sizeof msg);   /* GetMessage returning -1 leaves it alone */
 
     while (GetMessageW(&msg, NULL, 0, 0) > 0) {
-        /* F6 first: IsDialogMessage consumes it, and pane cycling is the one
-         * navigation key a screen reader user relies on to leave a pane whose
-         * Tab order is long. */
-        if (msg.message == WM_KEYDOWN && msg.wParam == VK_F6 && app->frame) {
-            cycle_pane(app, (GetKeyState(VK_SHIFT) & 0x8000) ? 0 : 1);
-            continue;
-        }
-        if (app->accel && app->frame &&
-            TranslateAcceleratorW(app->frame, app->accel, &msg)) {
-            continue;
-        }
-        if (app->frame && IsDialogMessageW(app->frame, &msg)) {
-            continue;
-        }
+        /* ONE FILTER, AND IT IS A FUNCTION SO A TEST CAN DRIVE IT. Everything
+         * that happens to a keystroke between the queue and the window lives
+         * in apr_ui_app_pretranslate; a loop that inlined it would be a path
+         * no test could reach, which is exactly how the greyed-accelerator
+         * defect survived. */
+        if (apr_ui_app_pretranslate(app, &msg)) continue;
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }

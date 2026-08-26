@@ -179,10 +179,26 @@ static void dt_item(DlgBuf *b, DWORD style, DWORD ex, short x, short y,
     b->items++;
 }
 
+/* "The last dialog was REJECTED, not cancelled." Set by dt_end and dlg_run --
+ * the two places a dialog can fail to appear -- and read by whoever has to
+ * tell the user. UI-thread only, like everything else in this file. */
+static int g_dlg_failed;
+
+/* Test seam, the same shape as action_wav.c's write gate: force the failure
+ * that is otherwise only reachable by corrupting a template. Without it, "the
+ * user is told when a window cannot open" is a property only a bug can
+ * demonstrate. */
+static int g_dlg_fail_next;
+
 static const DLGTEMPLATE *dt_end(DlgBuf *b)
 {
+    /* Cleared here rather than in dlg_run, because dt_end is the FIRST of the
+     * two failure points and the one whose failure means dlg_run never runs. */
+    g_dlg_failed = 0;
+
     if (b->overflow) {
         APR_WARN(L"dialog template overflowed its buffer; no dialog was built");
+        g_dlg_failed = 1;
         return NULL;
     }
     memcpy(b->p + b->count_off, &b->items, sizeof b->items);
@@ -197,10 +213,20 @@ static const DLGTEMPLATE *dt_end(DlgBuf *b)
  * dt_item() stayed invisible.
  *
  * The wrapper keeps each caller's contract and makes the failure loud. */
+void apr_dlg_test_fail_next(int on) { g_dlg_fail_next = on ? 1 : 0; }
+
+int apr_dlg_last_failed(void) { return g_dlg_failed; }
+
 static INT_PTR dlg_run(const DLGTEMPLATE *t, HWND owner, DLGPROC proc,
                        LPARAM param)
 {
     INT_PTR r;
+
+    if (g_dlg_fail_next) {
+        APR_WARN(L"dialog: apr_dlg_test_fail_next is set; refusing to create");
+        g_dlg_failed = 1;
+        return -1;
+    }
 
     SetLastError(0);
     r = DialogBoxIndirectParamW(GetModuleHandleW(NULL), t, owner, proc, param);
@@ -208,6 +234,11 @@ static INT_PTR dlg_run(const DLGTEMPLATE *t, HWND owner, DLGPROC proc,
         APR_WARN(L"dialog could not be created (GetLastError=%lu); the template "
                  L"was rejected -- this is a bug, not a cancelled dialog",
                  (unsigned long)GetLastError());
+        /* AND THE LOG IS NOT A CHANNEL TO THE USER. This failure used to be
+         * loud in a file nobody has open and silent everywhere a person is
+         * standing: the key did nothing, no window appeared, nothing was said.
+         * The caller reads this and announces it. */
+        g_dlg_failed = 1;
     }
     return r;
 }
@@ -370,34 +401,53 @@ size_t apr_dlg_resolution_row(const AprSessionResolution *r,
     return apr_str_format(id, buf, cch, args, n);
 }
 
-/* The names of keys that are not a printable character. Not localized: the key
- * a user presses does not change with the interface language, and a translated
- * "Delete" that no keyboard sends would be worse than an English one that
- * matches the legend on the key. The MODIFIERS are in the catalog, because
- * those really do differ (Ctrl / Strg / Ctrl). */
+/* The names of keys that are not a printable character.
+ *
+ * THESE ARE CATALOG ENTRIES NOW, and the reasoning that kept them as literals
+ * does not survive contact with rule 6. The old comment argued that "a
+ * translated Delete that no keyboard sends is worse than an English one that
+ * matches the legend on the key" -- which may well be the right ANSWER, but it
+ * is a translation decision, and freezing it in C is what leaves the Help
+ * window reading half in one language and half in another while the modifiers
+ * beside it (Ctrl, Shift, Alt) translate perfectly. A translator who agrees
+ * with the old argument writes "Delete" in the Arabic block and gets exactly
+ * the old behaviour; nobody else has to.
+ *
+ * A LETTER OR A DIGIT STAYS A CHARACTER. 'E' is not a word and has nothing to
+ * translate, so it is rendered, not looked up. */
 static const wchar_t *vk_name(UINT vk, wchar_t *scratch, size_t cch)
 {
+    AprStrId id = APR_S__NONE;
+
     switch (vk) {
-    case VK_TAB:    return L"Tab";
-    case VK_RETURN: return L"Enter";
-    case VK_SPACE:  return L"Space";
-    case VK_DELETE: return L"Delete";
-    case VK_ESCAPE: return L"Escape";
-    case VK_HOME:   return L"Home";
-    case VK_END:    return L"End";
-    case VK_LEFT:   return L"Left Arrow";
-    case VK_RIGHT:  return L"Right Arrow";
-    case VK_UP:     return L"Up Arrow";
-    case VK_DOWN:   return L"Down Arrow";
-    case VK_OEM_PLUS:  return L"Plus";
-    case VK_OEM_MINUS: return L"Minus";
-    case VK_ADD:       return L"Numpad Plus";
-    case VK_SUBTRACT:  return L"Numpad Minus";
-    case VK_OEM_PERIOD: return L"Full Stop";
+    case VK_TAB:        id = APR_S_UI_KEYNAME_TAB;       break;
+    case VK_RETURN:     id = APR_S_UI_KEYNAME_ENTER;     break;
+    case VK_SPACE:      id = APR_S_UI_KEYNAME_SPACE;     break;
+    case VK_DELETE:     id = APR_S_UI_KEYNAME_DELETE;    break;
+    case VK_ESCAPE:     id = APR_S_UI_KEYNAME_ESCAPE;    break;
+    case VK_HOME:       id = APR_S_UI_KEYNAME_HOME;      break;
+    case VK_END:        id = APR_S_UI_KEYNAME_END;       break;
+    case VK_LEFT:       id = APR_S_UI_KEYNAME_LEFT;      break;
+    case VK_RIGHT:      id = APR_S_UI_KEYNAME_RIGHT;     break;
+    case VK_UP:         id = APR_S_UI_KEYNAME_UP;        break;
+    case VK_DOWN:       id = APR_S_UI_KEYNAME_DOWN;      break;
+    case VK_OEM_PLUS:   id = APR_S_UI_KEYNAME_PLUS;      break;
+    case VK_OEM_MINUS:  id = APR_S_UI_KEYNAME_MINUS;     break;
+    case VK_ADD:        id = APR_S_UI_KEYNAME_NUM_PLUS;  break;
+    case VK_SUBTRACT:   id = APR_S_UI_KEYNAME_NUM_MINUS; break;
+    case VK_OEM_PERIOD: id = APR_S_UI_KEYNAME_PERIOD;    break;
     default: break;
     }
+    if (id != APR_S__NONE) return apr_str(id);
+
     if (vk >= VK_F1 && vk <= VK_F24) {
-        _snwprintf_s(scratch, cch, _TRUNCATE, L"F%u", vk - VK_F1 + 1u);
+        /* "F%1!s!" -- one catalog format with the number as an insert, and the
+         * number through apr_str_number() like every other digit. */
+        const wchar_t *args[1];
+        wchar_t n[24];
+        apr_str_number((int64_t)(vk - VK_F1 + 1u), n, 24);
+        args[0] = n;
+        apr_str_format(APR_S_UI_KEYNAME_FUNCTION, scratch, cch, args, 1);
         return scratch;
     }
     if ((vk >= '0' && vk <= '9') || (vk >= 'A' && vk <= 'Z')) {
@@ -509,6 +559,26 @@ static INT_PTR CALLBACK say_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
     return FALSE;
 }
 
+short apr_dlg_button_width(const wchar_t *label)
+{
+    size_t n = label ? wcslen(label) : 0;
+    long w;
+
+    /* One average character of the dialog font is one horizontal BASE UNIT,
+     * and a dialog unit is a quarter of that -- so four dlu per character is
+     * the average and five is the honest allowance for a face whose glyphs are
+     * wider than the average, which is every Arabic face at this size. Plus
+     * the platform's own padding either side of the caption.
+     *
+     * NEVER SIZE A CONTROL TO FIT ITS ENGLISH STRING (AGENTS.md rule 6). The
+     * fixed 96 units this replaces clipped "Stop the recording and close" in
+     * ENGLISH; the Arabic for it would not have had a chance. */
+    w = (long)(n * 5u) + 16;
+    if (w < APR_DLG_BUTTON_MIN_DU) w = APR_DLG_BUTTON_MIN_DU;
+    if (w > 400) w = 400;
+    return (short)w;
+}
+
 static int say_dialog(HWND owner, AprStrId title, const wchar_t *body,
                       AprStrId accept, AprStrId reject, AprStrId third)
 {
@@ -516,9 +586,10 @@ static int say_dialog(HWND owner, AprStrId title, const wchar_t *body,
     DlgBuf b;
     SayState st;
     const DLGTEMPLATE *t;
+    const wchar_t *lbl[3];
+    short bw[3];
     short y = 8;
-    short buttons = (short)(1 + (accept ? 1 : 0) + (third ? 1 : 0));
-    short bw = 96, bx;
+    short n = 0, i, bx, total = 0, width;
 
     memset(&st, 0, sizeof st);
     st.body = body ? body : L"";
@@ -527,34 +598,51 @@ static int say_dialog(HWND owner, AprStrId title, const wchar_t *body,
     st.reject = reject;
     st.third = third;
 
-    dt_begin(&b, storage, sizeof storage, DS_CENTER, 0, 320, 108,
+    /* MEASURE FIRST, THEN LAY OUT. Each button gets the width its OWN caption
+     * needs and the dialog grows to hold them, rather than every caption being
+     * cut to one number chosen against the shortest English word. */
+    if (accept) lbl[n++] = apr_str(accept);
+    if (third)  lbl[n++] = apr_str(third);
+    lbl[n++] = apr_str(reject);
+    for (i = 0; i < n; ++i) {
+        bw[i] = apr_dlg_button_width(lbl[i]);
+        total = (short)(total + bw[i] + 6);
+    }
+
+    width = 320;
+    if (total + 16 > width) width = (short)(total + 16);
+
+    dt_begin(&b, storage, sizeof storage, DS_CENTER, 0, width, 108,
              apr_str(title));
 
     /* A multi-line STATIC: Arabic needs more vertical room than English at the
      * same point size, so this is sized for the taller case rather than for
      * the string in front of us (AGENTS.md rule 6). */
-    dt_item(&b, SS_LEFT | WS_GROUP, 0, 8, y, 304, 48, IDC_BODY, ATOM_STATIC, L"");
+    dt_item(&b, SS_LEFT | WS_GROUP, 0, 8, y, (short)(width - 16), 48,
+            IDC_BODY, ATOM_STATIC, L"");
     y = 64;
 
-    bx = (short)(316 - buttons * (bw + 6));
+    bx = (short)(width - 4 - total);
+    i = 0;
     if (accept) {
-        dt_item(&b, BS_DEFPUSHBUTTON | WS_TABSTOP | WS_GROUP, 0, bx, y, bw, 18,
-                IDOK, ATOM_BUTTON, apr_str(accept));
-        bx = (short)(bx + bw + 6);
+        dt_item(&b, BS_DEFPUSHBUTTON | WS_TABSTOP | WS_GROUP, 0, bx, y,
+                bw[i], 18, IDOK, ATOM_BUTTON, lbl[i]);
+        bx = (short)(bx + bw[i] + 6);
+        i++;
     }
     if (third) {
-        dt_item(&b, BS_PUSHBUTTON | WS_TABSTOP, 0, bx, y, bw, 18,
-                IDC_THIRD, ATOM_BUTTON, apr_str(third));
-        bx = (short)(bx + bw + 6);
+        dt_item(&b, BS_PUSHBUTTON | WS_TABSTOP, 0, bx, y, bw[i], 18,
+                IDC_THIRD, ATOM_BUTTON, lbl[i]);
+        bx = (short)(bx + bw[i] + 6);
+        i++;
     }
-    dt_item(&b, BS_PUSHBUTTON | WS_TABSTOP, 0, bx, y, bw, 18,
-            IDCANCEL, ATOM_BUTTON, apr_str(reject));
+    dt_item(&b, BS_PUSHBUTTON | WS_TABSTOP, 0, bx, y, bw[i], 18,
+            IDCANCEL, ATOM_BUTTON, lbl[i]);
 
     t = dt_end(&b);
     if (!t) return 0;
 
-    return (int)dlg_run(t, owner,
-                                        say_proc, (LPARAM)&st);
+    return (int)dlg_run(t, owner, say_proc, (LPARAM)&st);
 }
 
 void apr_dlg_say(HWND owner, AprStrId title, const wchar_t *text)
@@ -1194,7 +1282,16 @@ static void browse_for_audio(HWND dlg)
     ofn.lpstrFile       = path;
     ofn.nMaxFile        = APR_DISC_PATH_CCH;
     ofn.lpstrTitle      = apr_str(APR_S_UI_DLG_SAVE_AUDIO_TITLE);
-    ofn.Flags           = OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT |
+    /* NO OFN_OVERWRITEPROMPT, and its absence is the honest answer.
+     *
+     * The shell's prompt asks "replace it?" and offers Yes/No -- but nothing
+     * downstream ever replaces anything: outpath.h's collision policy KEEPS
+     * the existing recording and moves the new take aside to "-2", and the
+     * runner announces that when it happens. Answering Yes therefore did not
+     * replace the file, so the dialog was describing behaviour the product
+     * does not have. This picker names a TEMPLATE anyway ({date}, {n}), and
+     * the file it expands to is not chosen until the recording starts. */
+    ofn.Flags           = OFN_PATHMUSTEXIST |
                           OFN_NOCHANGEDIR | OFN_EXPLORER;
 
     if (GetSaveFileNameW(&ofn)) SetDlgItemTextW(dlg, IDC_PATH, path);
@@ -1267,8 +1364,16 @@ static INT_PTR CALLBACK output_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
          * something a screen reader reads when you tab into the control. */
         apr_ui_set_accessible_description(GetDlgItem(dlg, IDC_PATH),
                                           APR_S_UI_DLG_OUT_PATH_TOKENS);
-        SetDlgItemTextW(dlg, IDC_BITRATE, L"0");
-        SetDlgItemTextW(dlg, IDC_QUALITY, L"0");
+        /* apr_str_number(), not L"0". Every digit a user sees goes through
+         * that one function -- it is where the Western-versus-Arabic-Indic
+         * decision lives (design 6.2) -- and a literal here is a zero that
+         * would stay Western when every other number in the window changed. */
+        {
+            wchar_t zero[24];
+            apr_str_number(0, zero, 24);
+            SetDlgItemTextW(dlg, IDC_BITRATE, zero);
+            SetDlgItemTextW(dlg, IDC_QUALITY, zero);
+        }
         SetFocus(bus);
         return FALSE;
     }
@@ -1295,17 +1400,40 @@ static INT_PTR CALLBACK output_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                 return TRUE;
             }
 
+            /* A BARE `return TRUE` HERE IS A BUTTON THAT DOES NOTHING.
+             *
+             * With no selection in a combo -- which is what an empty registry
+             * or a failed populate leaves behind -- OK used to swallow the
+             * press and stay put: no dialog closed, no model changed, nothing
+             * said. For a listener that is a dead key, and a dead key on OK is
+             * the shape of "the application is broken". Every refusal below
+             * now names what is missing and puts focus on it. */
             k = SendDlgItemMessageW(dlg, IDC_BUS, CB_GETCURSEL, 0, 0);
-            if (k == CB_ERR) return TRUE;
+            if (k == CB_ERR) {
+                apr_dlg_say(dlg, APR_S_UI_DLG_ADD_OUTPUT_TITLE,
+                            apr_str(APR_S_UI_DLG_NO_BUSES));
+                SetFocus(GetDlgItem(dlg, IDC_BUS));
+                return TRUE;
+            }
             st->result.bus = (AprBusId)SendDlgItemMessageW(dlg, IDC_BUS,
                                                            CB_GETITEMDATA,
                                                            (WPARAM)k, 0);
 
             k = SendDlgItemMessageW(dlg, IDC_FORMAT, CB_GETCURSEL, 0, 0);
-            if (k == CB_ERR) return TRUE;
+            if (k == CB_ERR) {
+                apr_dlg_say(dlg, APR_S_UI_DLG_ADD_OUTPUT_TITLE,
+                            apr_str(APR_S_UI_DLG_FORMAT_NEEDED));
+                SetFocus(GetDlgItem(dlg, IDC_FORMAT));
+                return TRUE;
+            }
             k = SendDlgItemMessageW(dlg, IDC_FORMAT, CB_GETITEMDATA, (WPARAM)k, 0);
             vt = apr_action_at((size_t)k);
-            if (!vt || !vt->id) return TRUE;
+            if (!vt || !vt->id) {
+                apr_dlg_say(dlg, APR_S_UI_DLG_ADD_OUTPUT_TITLE,
+                            apr_str(APR_S_UI_DLG_FORMAT_NEEDED));
+                SetFocus(GetDlgItem(dlg, IDC_FORMAT));
+                return TRUE;
+            }
             strncpy_s(st->result.action_id, sizeof st->result.action_id,
                       vt->id, _TRUNCATE);
 
@@ -1457,6 +1585,23 @@ int apr_dlg_pick_output(HWND owner, const AprGraph *g, AprBusId bus,
  * Session files
  * ======================================================================== */
 
+/* TEST ONLY. See apr_dlg_test_set_session_path: the common file picker is a
+ * system modal that owns the thread that opened it, so File > Open is
+ * otherwise a route no test can enter. */
+static wchar_t g_session_path_override[APR_DISC_PATH_CCH];
+static int     g_session_path_set;
+
+void apr_dlg_test_set_session_path(const wchar_t *path)
+{
+    if (path && path[0]) {
+        lstrcpynW(g_session_path_override, path, APR_DISC_PATH_CCH);
+        g_session_path_set = 1;
+    } else {
+        g_session_path_override[0] = 0;
+        g_session_path_set = 0;
+    }
+}
+
 int apr_dlg_choose_session(HWND owner, int for_saving, wchar_t *path, size_t cch)
 {
     OPENFILENAMEW ofn;
@@ -1465,6 +1610,14 @@ int apr_dlg_choose_session(HWND owner, int for_saving, wchar_t *path, size_t cch
     BOOL ok;
 
     if (!path || cch < 4) return 0;
+
+    /* Consumed once, so a test arms it for exactly the press it means. */
+    if (g_session_path_set) {
+        lstrcpynW(path, g_session_path_override, (int)cch);
+        g_session_path_set = 0;
+        return 1;
+    }
+
     memset(&ofn, 0, sizeof ofn);
     memset(filter, 0, sizeof filter);
 

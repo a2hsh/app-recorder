@@ -158,6 +158,19 @@ void apr_tray_destroy(AprTray *t)
     free(t);
 }
 
+/* DID THE SHELL ACTUALLY TAKE THE ICON?
+ *
+ * NIM_ADD is allowed to fail -- Explorer restarting, a policy, an
+ * over-full notification area -- and that failure is deliberately not fatal,
+ * because the window still works. But it makes ONE thing unsafe: hiding the
+ * window. Hidden with no icon, the application has no surface at all: not
+ * Alt+Tab, not Windows+B, nothing -- while it is still recording. So the
+ * hiding paths have to be able to ask. */
+int apr_tray_is_registered(const AprTray *t)
+{
+    return t && t->added;
+}
+
 int apr_tray_on_taskbar_created(AprTray *t, UINT msg)
 {
     if (!t || !t->msg_taskbar_created || msg != t->msg_taskbar_created) return 0;

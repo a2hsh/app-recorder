@@ -60,13 +60,50 @@ void apr_graph_destroy(AprGraph *g)
     /* Buses first: each holds readers into sources and must give them back
      * before the sources go. */
     for (i = 0; i < g->bus_count; i++)    apr_bus_destroy(g->buses[i]);
-    for (i = 0; i < g->source_count; i++) apr_source_destroy(g->sources[i]);
+    for (i = 0; i < g->source_count; i++) {
+        /* A source whose capture thread would not stop leaks itself and its
+         * ring, deliberately (source.h). Nothing above this point needs to
+         * change its behaviour -- the graph is going away either way -- but
+         * the log has to carry it, because a silently leaked audio thread is
+         * how the next mystery starts. */
+        AprErr e = apr_source_destroy(g->sources[i]);
+        if (apr_failed(&e)) APR_LOG_ERR(APR_LOG_ERROR, &e);
+    }
     free(g);
 }
 
 uint32_t apr_graph_rate(const AprGraph *g)     { return g ? g->rate : 0; }
 uint16_t apr_graph_channels(const AprGraph *g) { return g ? g->channels : 0; }
 int      apr_graph_running(const AprGraph *g)  { return g ? g->running : 0; }
+
+/* ---------------------------------------------------------------------------
+ * THE SHAPE IS FROZEN WHILE THE GRAPH RUNS
+ *
+ * graph.h has always said "do not mutate the shape while a tick is in flight",
+ * and saying it was all it did. The runner's loop thread walks g->buses and
+ * each bus walks its edge array; a UI thread rewriting either one underneath
+ * it is a corrupted mix or a crash, in the middle of a recording, with the
+ * files already open.
+ *
+ * The front end disables its editing commands during a recording, and that is
+ * necessary and not sufficient: it is not the only caller (the CLI builds
+ * graphs, sessions load into them, tests drive them), and at least one UI path
+ * -- Ctrl+Shift+E disconnect -- reaches the canvas as a raw keystroke that
+ * never passes the controller's busy() check at all. A guard that lives only
+ * in one caller is a guard with a hole in it.
+ *
+ * REFUSED, NOT IGNORED, and refused with APR_E_BUSY specifically. A silent
+ * no-op is the worst of the three outcomes for a screen-reader user: the
+ * keystroke does nothing, says nothing, and is indistinguishable from a broken
+ * app. APR_E_BUSY is distinguishable from every other APR_E_STATE so a caller
+ * can answer it with "that cannot be changed while a recording is running"
+ * rather than a generic failure.
+ * ------------------------------------------------------------------------- */
+static AprErr refuse_while_running(const AprGraph *g, const wchar_t *what)
+{
+    if (!g->running) return apr_ok();
+    return APR_ERR(APR_E_BUSY, L"%ls while this graph is recording", what);
+}
 
 /* ---------------------------------------------------------------------------
  * Nodes
@@ -81,6 +118,8 @@ AprErr apr_graph_add_source(AprGraph *g, const wchar_t *name,
 
     if (out_id) *out_id = 0;
     if (!g || !cfg) return APR_ERR(APR_E_INVALID_ARG, L"graph or config is null");
+    e = refuse_while_running(g, L"a source cannot be added");
+    if (apr_failed(&e)) return e;
     if (g->source_count >= APR_MAX_SOURCES) {
         return APR_ERR(APR_E_STATE, L"graph already holds %d sources", APR_MAX_SOURCES);
     }
@@ -135,9 +174,12 @@ AprSource *apr_graph_source_at(const AprGraph *g, size_t index)
 
 AprErr apr_graph_remove_source(AprGraph *g, AprSourceId id)
 {
+    AprErr e;
     size_t i, k;
 
     if (!g) return APR_ERR(APR_E_INVALID_ARG, L"null graph");
+    e = refuse_while_running(g, L"a source cannot be removed");
+    if (apr_failed(&e)) return e;
     i = source_index(g, id);
     if (i == (size_t)-1) return APR_ERR(APR_E_NOT_FOUND, L"no source %u", id);
 
@@ -146,10 +188,16 @@ AprErr apr_graph_remove_source(AprGraph *g, AprSourceId id)
     for (k = 0; k < g->bus_count; k++) {
         if (apr_bus_has_source(g->buses[k], id)) apr_bus_remove_source(g->buses[k], id);
     }
-    apr_source_destroy(g->sources[i]);
+
+    /* The slot is released whether or not the source could be retired: a
+     * source that leaks itself and its ring (source.h) is out of the graph
+     * either way, and leaving a pointer to it here would only mean trying to
+     * free it a second time at apr_graph_destroy. The error still travels, so
+     * the caller can say a source is still running rather than pretend. */
+    e = apr_source_destroy(g->sources[i]);
     for (; i + 1 < g->source_count; i++) g->sources[i] = g->sources[i + 1];
     g->source_count--;
-    return apr_ok();
+    return e;
 }
 
 AprErr apr_graph_add_bus(AprGraph *g, const wchar_t *name, AprBusId *out_id)
@@ -159,6 +207,8 @@ AprErr apr_graph_add_bus(AprGraph *g, const wchar_t *name, AprBusId *out_id)
 
     if (out_id) *out_id = 0;
     if (!g) return APR_ERR(APR_E_INVALID_ARG, L"null graph");
+    e = refuse_while_running(g, L"a bus cannot be added");
+    if (apr_failed(&e)) return e;
     if (g->bus_count >= APR_MAX_BUSES) {
         return APR_ERR(APR_E_STATE, L"graph already holds %d buses", APR_MAX_BUSES);
     }
@@ -189,9 +239,12 @@ AprBus *apr_graph_bus_at(const AprGraph *g, size_t index)
 
 AprErr apr_graph_remove_bus(AprGraph *g, AprBusId id)
 {
+    AprErr e;
     size_t i;
 
     if (!g) return APR_ERR(APR_E_INVALID_ARG, L"null graph");
+    e = refuse_while_running(g, L"a bus cannot be removed");
+    if (apr_failed(&e)) return e;
     i = bus_index(g, id);
     if (i == (size_t)-1) return APR_ERR(APR_E_NOT_FOUND, L"no bus %u", id);
 
@@ -209,8 +262,11 @@ AprErr apr_graph_connect(AprGraph *g, AprSourceId source, AprBusId bus, float ga
 {
     AprSource *s;
     AprBus    *b;
+    AprErr     e;
 
     if (!g) return APR_ERR(APR_E_INVALID_ARG, L"null graph");
+    e = refuse_while_running(g, L"an edge cannot be connected");
+    if (apr_failed(&e)) return e;
     s = apr_graph_source(g, source);
     b = apr_graph_bus(g, bus);
     if (!s) return APR_ERR(APR_E_NOT_FOUND, L"no source %u", source);
@@ -221,8 +277,11 @@ AprErr apr_graph_connect(AprGraph *g, AprSourceId source, AprBusId bus, float ga
 AprErr apr_graph_disconnect(AprGraph *g, AprSourceId source, AprBusId bus)
 {
     AprBus *b;
+    AprErr  e;
 
     if (!g) return APR_ERR(APR_E_INVALID_ARG, L"null graph");
+    e = refuse_while_running(g, L"an edge cannot be disconnected");
+    if (apr_failed(&e)) return e;
     b = apr_graph_bus(g, bus);
     if (!b) return APR_ERR(APR_E_NOT_FOUND, L"no bus %u", bus);
     return apr_bus_remove_source(b, source);
@@ -284,8 +343,11 @@ AprErr apr_graph_add_action(AprGraph *g, AprBusId bus, const char *action_id,
     const AprActionVTable *vt;
     AprActionConfig        local;
     AprBus                *b;
+    AprErr                 e;
 
     if (!g || !cfg) return APR_ERR(APR_E_INVALID_ARG, L"graph or config is null");
+    e = refuse_while_running(g, L"an output cannot be added");
+    if (apr_failed(&e)) return e;
     b = apr_graph_bus(g, bus);
     if (!b) return APR_ERR(APR_E_NOT_FOUND, L"no bus %u", bus);
 

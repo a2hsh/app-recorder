@@ -248,4 +248,11 @@ void apr_cli_request_stop(void);
  * the source. */
 int apr_cli_test_ctrl_handler_installed(void);
 
+/* Test seam: how long the CTRL_CLOSE/LOGOFF/SHUTDOWN handler waits for every
+ * file to be closed. INFINITE, and the suite pins that, because "the handler
+ * blocks until the files are closed" above is a promise a bounded wait
+ * silently downgrades -- it does not risk a kill part-way through finalize,
+ * it guarantees one. */
+unsigned long apr_cli_test_close_wait_ms(void);
+
 #endif /* APPRECORDER_CLI_H */

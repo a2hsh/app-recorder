@@ -17,6 +17,7 @@
 #include <stdlib.h>
 
 #include "capture_internal.h"
+#include "log.h"
 #include "ringbuf.h"
 
 /* ---------------------------------------------------------------------------
@@ -131,8 +132,20 @@ AprErr apr_capture_create(const AprCaptureConfig *cfg, RingBuf *rb,
 
     e = vt->open(c, cfg, rb);
     if (apr_failed(&e)) {
-        if (c->impl) vt->close(c);
-        free(c);
+        /* A half-open capture can already own its thread -- the WASAPI kinds
+         * create it before they touch COM -- so this close can be abandoned
+         * exactly like any other. When it is, `c` is handed back through
+         * `*out` DESPITE the failure: that non-NULL pointer is how the caller
+         * learns its ring is still being written into and must not be freed
+         * (see capture.h). The open error is what is returned, because it is
+         * the one that explains why there is no usable capture. */
+        AprErr ce = c->impl ? vt->close(c) : apr_ok();
+        if (apr_failed(&ce)) {
+            APR_LOG_ERR(APR_LOG_ERROR, &ce);
+            *out = c;
+        } else {
+            free(c);
+        }
         return e;
     }
 
@@ -140,9 +153,18 @@ AprErr apr_capture_create(const AprCaptureConfig *cfg, RingBuf *rb,
     return apr_ok();
 }
 
-void apr_capture_destroy(AprCapture *c)
+/* The join/free boundary for the whole capture layer. See the long note in
+ * capture.h: the value this returns is what stops a caller freeing a ring a
+ * wedged pump is still writing into, and the free below is deliberately in
+ * the same function as the test, so that a caller who ignores the value
+ * leaks rather than corrupts. */
+AprErr apr_capture_destroy(AprCapture *c)
 {
-    if (!c) return;
-    if (c->vt && c->vt->close) c->vt->close(c);
+    AprErr e;
+
+    if (!c) return apr_ok();
+    e = (c->vt && c->vt->close) ? c->vt->close(c) : apr_ok();
+    if (apr_failed(&e)) return e;   /* abandoned: free NOTHING */
     free(c);
+    return apr_ok();
 }

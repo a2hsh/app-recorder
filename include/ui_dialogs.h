@@ -99,6 +99,16 @@ size_t apr_dlg_resolution_row(const AprSessionResolution *r,
  * from the modifier names in the catalog rather than from a "+" in code. */
 size_t apr_dlg_key_name(UINT vk, UINT mods, wchar_t *buf, size_t cch);
 
+/* The width, in DIALOG UNITS, a push button needs for `label`. Pure.
+ *
+ * Public because it is the mechanical form of "never size a control to fit its
+ * English string" (AGENTS.md rule 6, design 6.2), and a rule nothing can
+ * assert is a rule that decays: the buttons here were a fixed 96 units, which
+ * clipped "Stop the recording and close" in English and would have clipped
+ * every Arabic caption in the catalog. */
+#define APR_DLG_BUTTON_MIN_DU 50
+short apr_dlg_button_width(const wchar_t *label);
+
 /* "Connect: Ctrl+E" -- one row of Help > Keyboard Shortcuts, from the canvas's
  * single binding table. */
 size_t apr_dlg_binding_row(const AprCanvasBinding *b, wchar_t *buf, size_t cch);
@@ -188,6 +198,33 @@ int apr_dlg_close_while_recording(HWND owner);
 
 /* A statement with one button. */
 void apr_dlg_say(HWND owner, AprStrId title, const wchar_t *text);
+
+/* ---------------------------------------------------------------------------
+ * "IT DID NOT OPEN" IS NOT "THE USER CANCELLED"
+ *
+ * Every chooser above returns 0 for both, and folding the two together is
+ * exactly how a malformed template reached the author as SILENCE: the key did
+ * nothing, no window appeared, and the only evidence was a log line in a file
+ * nobody had open. Call this after a 0 and announce it if it is nonzero.
+ *
+ * Valid until the next dialog is opened; UI-thread only.
+ * ------------------------------------------------------------------------- */
+int apr_dlg_last_failed(void);
+
+/* TEST ONLY, and the same shape as action_wav.c's write gate: make the next
+ * dialog fail to be created, without corrupting anything. "The user is told
+ * when a window cannot open" is otherwise a property only a bug can
+ * demonstrate. Clear it again in the same test. */
+void apr_dlg_test_fail_next(int on);
+
+/* TEST ONLY. Make the next apr_dlg_choose_session return `path` without
+ * showing the common file picker, then forget it.
+ *
+ * The picker is a system modal owned by the thread that opened it, so File >
+ * Open and File > Save As are otherwise routes no test can enter -- and those
+ * routes are where the session sentences live, including the one that used to
+ * report a deliberate Cancel as a failure. Pass NULL to disarm. */
+void apr_dlg_test_set_session_path(const wchar_t *path);
 
 /* Help > Keyboard Shortcuts, rendered from the canvas binding table so a
  * shortcut cannot be documented as one key and implemented as another. */

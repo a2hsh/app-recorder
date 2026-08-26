@@ -22,6 +22,12 @@
 #include "cli/cli.h"
 #include "strings.h"
 
+/* The ogg action's own disk-failure seam. Reached from here because "every
+ * output failed to open" is a property of the RUN, and the run is what this
+ * suite drives -- there is no other way to make a create() fail that
+ * apr_cli_resolve has not already caught. */
+extern volatile LONG64 apr_ogg_test_fail_after_bytes;
+
 /* ---------------------------------------------------------------------------
  * A capturing AprCliIo
  * ------------------------------------------------------------------------- */
@@ -1222,6 +1228,180 @@ TEST(an_output_that_cannot_be_created_stops_the_run_before_any_device_opens)
                                       L"--out", bad, L"--quiet"));
     ASSERT_FALSE(file_exists(bad));
     if (file_exists(good)) DeleteFileW(good);
+}
+
+
+/* ===========================================================================
+ * What an encoder will and will not accept -- asked BEFORE recording (M1)
+ * ========================================================================= */
+
+/* THE ONE THAT COST A TAKE.
+ *
+ * `--bitrate 400 --out meeting.mp3 --duration 3600 --json` parsed, passed
+ * --dry-run, and then recorded for a full hour into nothing: LAME refuses 400
+ * kbps, but the refusal could only happen inside create(), which runs at
+ * apr_bus_start -- after the recording has begun, where a failed output is
+ * downgraded to a per-output skip. --json swallowed the warning and the final
+ * document listed meeting.mp3 with "seconds": 3600 beside exit code 6, whose
+ * documented meaning is "recorded and playable".
+ *
+ * This test runs the same command line. It must come back in milliseconds, as
+ * a configuration error, having opened nothing -- so the 3600 here is not a
+ * slow test, it is the point. */
+TEST(a_bitrate_the_format_refuses_is_refused_before_any_recording_starts)
+{
+    Cap c;
+    wchar_t mp3[MAX_PATH];
+
+    tmp_path(mp3, MAX_PATH, L"kbps", L"mp3");
+    ASSERT_EQ_INT(APR_CLI_CONFIG, RUN(&c, L"--fake", L"440",
+                                      L"--bitrate", L"400", L"--out", mp3,
+                                      L"--duration", L"3600", L"--json"));
+    ASSERT_FALSE(file_exists(mp3));
+    /* --json still gets a document, and it says config rather than 6. */
+    ASSERT_TRUE(said(&c, L"\"exitCode\": 2"));
+}
+
+TEST(a_dry_run_refuses_a_bitrate_the_format_cannot_write)
+{
+    Cap c;
+    ASSERT_EQ_INT(APR_CLI_CONFIG, RUN(&c, L"--fake", L"440",
+                                      L"--bitrate", L"400", L"--out", L"x.mp3",
+                                      L"--dry-run"));
+    ASSERT_TRUE(said(&c, L"x.mp3"));
+    ASSERT_FALSE(file_exists(L"x.mp3"));
+}
+
+/* Channels are the same shape of refusal and neither lossy format can do more
+ * than two, so a session at 8 channels has to be told at plan time and not an
+ * hour in. WAV takes all eight, which is why it is here too: the check is the
+ * encoder's, not a blanket rule. */
+TEST(more_channels_than_the_format_carries_is_refused_at_plan_time)
+{
+    Cap c;
+
+    ASSERT_EQ_INT(APR_CLI_CONFIG, RUN(&c, L"--fake", L"440", L"--channels", L"8",
+                                      L"--out", L"x.opus", L"--dry-run"));
+    ASSERT_EQ_INT(APR_CLI_CONFIG, RUN(&c, L"--fake", L"440", L"--channels", L"8",
+                                      L"--out", L"x.mp3", L"--dry-run"));
+    ASSERT_EQ_INT(APR_CLI_OK, RUN(&c, L"--fake", L"440", L"--channels", L"8",
+                                  L"--out", L"x.wav", L"--dry-run"));
+    ASSERT_FALSE(file_exists(L"x.wav"));
+}
+
+/* A RUN THAT OPENED NO FILE AT ALL IS NOT A RECORDING.
+ *
+ * Some create() failures cannot be predicted from the numbers -- a volume that
+ * refuses every write is the honest example -- so the second half of M1 is
+ * what the run REPORTS when they happen. It used to report exit 6, documented
+ * as "recorded and playable", with each output listed at the full duration of
+ * the run: a path, a length, and no file. */
+TEST(a_run_whose_every_output_failed_to_open_is_not_a_success)
+{
+    Cap     c;
+    wchar_t opus[MAX_PATH];
+
+    tmp_path(opus, MAX_PATH, L"noopen", L"opus");
+
+    /* Every write refused, so the ogg action's create() cannot lay down its
+     * header pages and the output never opens. */
+    apr_ogg_test_fail_after_bytes = 1;
+    ASSERT_EQ_INT(APR_CLI_OUTPUT, RUN(&c, L"--fake", L"440", L"--out", opus,
+                                      L"--duration", L"0.3", L"--json"));
+    apr_ogg_test_fail_after_bytes = 0;
+
+    /* Exit 4 -- "a file could not be created" -- and the document says so
+     * rather than quietly listing a duration for a file nobody can open. */
+    ASSERT_TRUE(said(&c, L"\"exitCode\": 4"));
+    ASSERT_TRUE(said(&c, L"\"ok\": false"));
+    ASSERT_TRUE(said(&c, L"\"failed\": true"));
+    ASSERT_TRUE(said(&c, L"\"seconds\": 0.000"));
+
+    DeleteFileW(opus);
+}
+
+/* And the asymmetry: one output of two failing is still a recording, so it
+ * stays exit 6 and the file that DID open is reported with its real length. */
+TEST(one_output_failing_while_another_records_is_still_incomplete_not_a_failure)
+{
+    Cap     c;
+    wchar_t wav[MAX_PATH], opus[MAX_PATH];
+
+    tmp_path(wav,  MAX_PATH, L"half", L"wav");
+    tmp_path(opus, MAX_PATH, L"half", L"opus");
+
+    apr_ogg_test_fail_after_bytes = 1;
+    ASSERT_EQ_INT(APR_CLI_INCOMPLETE, RUN(&c, L"--fake", L"440",
+                                          L"--out", wav, L"--out", opus,
+                                          L"--duration", L"0.3", L"--json"));
+    apr_ogg_test_fail_after_bytes = 0;
+
+    ASSERT_TRUE(said(&c, L"\"exitCode\": 6"));
+    ASSERT_TRUE(file_exists(wav));
+    DeleteFileW(wav);
+    DeleteFileW(opus);
+}
+
+/* ===========================================================================
+ * The small ones
+ * ========================================================================= */
+
+/* m16: the extension pass has always matched case-insensitively, so
+ * `--out x.WAV` worked while `--format WAV` was refused as "a format this
+ * build cannot write" -- a sentence that was simply untrue. Both spellings
+ * now reach the action, and what is stored is the canonical id, because that
+ * is the wire value a session file holds. */
+TEST(a_format_named_in_capitals_is_the_same_format)
+{
+    Cap c; static AprCliPlan p;
+    wchar_t out[MAX_PATH];
+
+    tmp_path(out, MAX_PATH, L"caps", L"dat");
+    ASSERT_EQ_INT(APR_CLI_OK, PARSE(&c, &p, L"--fake", L"440",
+                                    L"--format", L"WAV", L"--out", out));
+    ASSERT_EQ_INT(APR_CLI_OK, apr_cli_resolve(&p, io_of(&c)));
+    ASSERT_STR_EQ("wav", p.buses[0].outputs[0].action_id);
+    ASSERT_FALSE(file_exists(out));
+}
+
+/* m17: {n} means "the lowest free number", resolved against the disk when each
+ * recording starts, so two buses using one numbered template name two files.
+ * Comparing their expansions cannot see that -- without the disk every {n} is
+ * 1 -- and the pair was refused as a duplicate. */
+TEST(two_buses_may_share_a_numbered_template_because_it_names_two_files)
+{
+    Cap c;
+    ASSERT_EQ_INT(APR_CLI_OK, RUN(&c, L"--bus", L"A", L"--fake", L"440",
+                                  L"--out", L"take{n}.wav",
+                                  L"--bus", L"B", L"--fake", L"220",
+                                  L"--out", L"take{n}.wav", L"--dry-run"));
+    ASSERT_FALSE(file_exists(L"take1.wav"));
+}
+
+/* m18: --json and --quiet may be written after the option that fails, so they
+ * are read in a pass of their own -- but a pass that looked at every word
+ * found them inside somebody else's VALUE. `--log-file --json` names a log
+ * file called "--json"; it does not ask for JSON. */
+TEST(a_flag_that_is_another_options_value_is_not_that_flag)
+{
+    Cap c; static AprCliPlan p;
+
+    ASSERT_EQ_INT(APR_CLI_OK, PARSE(&c, &p, L"--fake", L"440", L"--out", L"a.wav",
+                                    L"--log-file", L"--json"));
+    ASSERT_EQ_INT(0, p.json);
+    ASSERT_WSTR_EQ(L"--json", p.log_file);
+
+    ASSERT_EQ_INT(APR_CLI_OK, PARSE(&c, &p, L"--fake", L"440", L"--out", L"a.wav",
+                                    L"--log-file", L"--quiet"));
+    ASSERT_EQ_INT(0, p.quiet);
+}
+
+/* m19: cli.h promises the console close handler blocks until the files are
+ * closed. A four-second cap did not risk a kill part-way through finalize, it
+ * GUARANTEED one at four seconds. */
+TEST(the_console_close_handler_waits_for_the_files_without_a_deadline)
+{
+    ASSERT_EQ_U64((uint64_t)INFINITE, (uint64_t)apr_cli_test_close_wait_ms());
 }
 
 /* ===========================================================================

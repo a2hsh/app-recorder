@@ -187,6 +187,8 @@
 #define APR_EN_ERR_CAPTURE_START                "%1!s! could not be captured: %2!s!"
 #define APR_EN_ERR_DUPLICATE_OUTPUT             "%1!s! is named as an output twice, and two recordings cannot share one file."
 #define APR_EN_ERR_OPTION_NOT_FOR_COMMAND       "%1!s! means nothing to the command %2!s!."
+#define APR_EN_ERR_OUTPUT_UNSUPPORTED           "%1!s! cannot be recorded with these settings: %2!s!"
+#define APR_EN_ERR_NOTHING_WAS_WRITTEN          "Nothing was recorded: not one output file could be opened."
 #define APR_EN_WARN_SYSTEM_CAPTURE_SCOPE        "--system-minus-tree records every sound this computer plays, from every application, and writes all of it into your file."
 #define APR_EN_WARN_SYSTEM_CAPTURE_TREE         "Held back from the recording: %1!s!, every program it has started, every program those started, and any program it starts later."
 #define APR_EN_WARN_SYSTEM_CAPTURE_MEMBERS      "In that tree at this moment: %1!s!."
@@ -222,6 +224,8 @@
 /* The bus a recording gets when the command line never says --bus. It is a
  * name a person sees, so it is here rather than a literal in cli.c. */
 #define APR_EN_CLI_DEFAULT_BUS_NAME             "Recording"
+#define APR_EN_WARN_BUS_DROPPED                 "Recording without the bus %1!s!: every source it had is missing."
+#define APR_EN_WARN_OUTPUT_DEGRADED             "%1!s! is closed and it plays, but it is not a clean recording: %2!s!"
 
 /* Plurals. %1 is always the count. English reaches only ONE and OTHER; the
  * other four slots carry the OTHER text so that no slot is ever empty and so
@@ -361,6 +365,11 @@
 #define APR_EN_UI_ANN_NOT_YET                   "That is not available yet."
 #define APR_EN_UI_ANN_CONNECT_NOT_SOURCE        "A connection starts at a source, and %1!s! is not one."
 #define APR_EN_UI_ANN_GAIN_NOT_SOURCE           "Only a source has a level, and %1!s! is not one."
+/* The reason, in the frame the catalog owns. Before this, a real refusal from
+ * the model -- "the graph is running", "that bus is gone" -- was announced as
+ * "That is not available yet", which describes a feature nobody wrote rather
+ * than the thing that just happened. */
+#define APR_EN_UI_ANN_EDIT_FAILED               "That change was refused: %1!s!"
 
 /* One line per canvas operation, for Help > Keyboard Shortcuts. The binding
  * table in include/ui_canvas.h is both what dispatches the key and what that
@@ -385,6 +394,31 @@
 #define APR_EN_UI_KEY_GAIN_DOWN                 "Make this source quieter"
 #define APR_EN_UI_KEY_CANCEL                    "Cancel what is half done"
 #define APR_EN_UI_KEY_DESCRIBE                  "Say this node and its connections again"
+
+/* The names of keys that are not a printable character. IN THE CATALOG, not in
+ * C: the modifiers already were, so a shortcut rendered half in the interface
+ * language and half in English is the mixed-language failure rule 6 exists to
+ * prevent. A translator who decides the keycap legend is the right word simply
+ * writes the English word here -- that is a translation decision, and this is
+ * where translation decisions live. */
+#define APR_EN_UI_KEYNAME_TAB                   "Tab"
+#define APR_EN_UI_KEYNAME_ENTER                 "Enter"
+#define APR_EN_UI_KEYNAME_SPACE                 "Space"
+#define APR_EN_UI_KEYNAME_DELETE                "Delete"
+#define APR_EN_UI_KEYNAME_ESCAPE                "Escape"
+#define APR_EN_UI_KEYNAME_HOME                  "Home"
+#define APR_EN_UI_KEYNAME_END                   "End"
+#define APR_EN_UI_KEYNAME_LEFT                  "Left Arrow"
+#define APR_EN_UI_KEYNAME_RIGHT                 "Right Arrow"
+#define APR_EN_UI_KEYNAME_UP                    "Up Arrow"
+#define APR_EN_UI_KEYNAME_DOWN                  "Down Arrow"
+#define APR_EN_UI_KEYNAME_PLUS                  "Plus"
+#define APR_EN_UI_KEYNAME_MINUS                 "Minus"
+#define APR_EN_UI_KEYNAME_NUM_PLUS              "Numpad Plus"
+#define APR_EN_UI_KEYNAME_NUM_MINUS             "Numpad Minus"
+#define APR_EN_UI_KEYNAME_PERIOD                "Full Stop"
+/* %1 is the function key's number, already rendered by apr_str_number(). */
+#define APR_EN_UI_KEYNAME_FUNCTION              "F%1!s!"
 
 /* ---- the structure panel (src/ui/tree_panel.c).
  *
@@ -479,6 +513,7 @@
 
 #define APR_EN_STATUS_SESSION_LOADED            "Loaded %1!s!."
 #define APR_EN_STATUS_SESSION_SAVED             "Saved %1!s!."
+#define APR_EN_ERR_SESSION_NOT_USABLE           "%1!s! cannot be turned into a recording on this machine. The first source it cannot use is %2!s!."
 
 #define APR_EN_N_OTHER_BUSES_ZERO               "%1!s! other buses"
 #define APR_EN_N_OTHER_BUSES_ONE                "%1!s! other bus"
@@ -524,6 +559,11 @@
 #define APR_EN_UI_CLOSE_TO_TRAY          "Leave it recording in the notification area"
 #define APR_EN_UI_ANN_CLOSING_FILES      "Closing the files. This window will close when they are safely written."
 #define APR_EN_UI_ANN_OUTPUT_RENAMED     "That name is already a recording, so this take is being saved as %1!s! instead. Nothing was overwritten."
+/* NOT the same sentence as "the files are being written". Saying that one
+ * twice told the user the close was still in progress at the exact moment it
+ * had given up. */
+#define APR_EN_UI_ANN_CLOSE_TIMEOUT      "The files are taking longer than expected to close, so the window has stayed open. Try closing it again."
+#define APR_EN_UI_ANN_NO_TRAY            "There is no notification area icon, so hiding the window would leave nothing to reach it by. The window has stayed open."
 
 /* ---- dialogs ---- */
 #define APR_EN_UI_DLG_OK                   "OK"
@@ -555,6 +595,14 @@
 #define APR_EN_UI_DLG_OUT_FORMAT           "Format"
 #define APR_EN_UI_DLG_OUT_PATH             "Save to file"
 #define APR_EN_UI_DLG_OUT_PATH_TOKENS     "The name may contain {date}, {time}, {bus}, {n} and {ext}. A name that is already a recording is never overwritten."
+#define APR_EN_UI_DLG_NO_OUTPUTS          "This bus has no output to remove. Add one first."
+/* A CANCEL IS NOT A FAILURE, and it is not addressed to a third party. */
+#define APR_EN_UI_DLG_SESSION_CANCELLED   "That session was not opened."
+#define APR_EN_UI_DLG_DISCARD_TITLE       "Unsaved session"
+#define APR_EN_UI_DLG_DISCARD_BODY        "This session has changes that have not been saved. Going on will discard them."
+#define APR_EN_UI_DLG_DISCARD_OK          "Discard the changes"
+#define APR_EN_UI_DLG_FORMAT_NEEDED       "Choose a format for this output first."
+#define APR_EN_UI_DLG_CREATE_FAILED       "That window could not be opened. This is a fault in apprecorder, not something you did."
 #define APR_EN_UI_DLG_OUT_BITRATE          "Bitrate in kilobits per second, 0 for the format's own default"
 #define APR_EN_UI_DLG_OUT_QUALITY          "Quality, 0 for the format's own default"
 #define APR_EN_UI_DLG_SAVE_AUDIO_TITLE     "Where to save this recording"
@@ -622,6 +670,8 @@
 #define APR_EN_UI_TRAY_INFO_SOURCE_MUTED   "%1!s! is muted in Windows, so it records silence."
 #define APR_EN_UI_TRAY_INFO_ACTION_FAILED  "%1!s! stopped saving. The file that exists is still playable."
 #define APR_EN_UI_TRAY_INFO_MINIMIZED      "apprecorder is still running here. Press Windows+B and then the arrow keys to reach it."
+#define APR_EN_UI_TRAY_INFO_ARM_FAILED     "A source could not be started, so the recording is missing it."
+#define APR_EN_UI_TRAY_INFO_OUTPUT_RENAMED "That name was already a recording, so this take is being saved as %1!s! instead."
 
 #define APR_EN_UI_MENU_DISCONNECT           "&Disconnect\tCtrl+Shift+E"
 #define APR_EN_UI_MENU_RENAME_BUS           "Re&name this bus\tF2"
@@ -827,6 +877,8 @@ END
 #define APR_AR_ERR_CAPTURE_START(id)            /* not translated yet */
 #define APR_AR_ERR_DUPLICATE_OUTPUT(id)         /* not translated yet */
 #define APR_AR_ERR_OPTION_NOT_FOR_COMMAND(id)   /* not translated yet */
+#define APR_AR_ERR_OUTPUT_UNSUPPORTED(id)       /* not translated yet */
+#define APR_AR_ERR_NOTHING_WAS_WRITTEN(id)      /* not translated yet */
 #define APR_AR_WARN_SYSTEM_CAPTURE_SCOPE(id)    /* not translated yet */
 #define APR_AR_WARN_SYSTEM_CAPTURE_TREE(id)     /* not translated yet */
 #define APR_AR_WARN_SYSTEM_CAPTURE_MEMBERS(id)  /* not translated yet */
@@ -857,6 +909,8 @@ END
 #define APR_AR_SOURCE_KIND_DEVICE(id)           /* not translated yet */
 #define APR_AR_SOURCE_KIND_FAKE(id)             /* not translated yet */
 #define APR_AR_CLI_DEFAULT_BUS_NAME(id)         /* not translated yet */
+#define APR_AR_WARN_BUS_DROPPED(id)             /* not translated yet */
+#define APR_AR_WARN_OUTPUT_DEGRADED(id)         /* not translated yet */
 
 #define APR_AR_P_N_SOURCES(base)                                               \
     base+0  "AR-PLACEHOLDER zero %1!s!"                                        \
@@ -941,6 +995,7 @@ END
 #define APR_AR_UI_ANN_NOT_YET(id)               /* not translated yet */
 #define APR_AR_UI_ANN_CONNECT_NOT_SOURCE(id)    /* not translated yet */
 #define APR_AR_UI_ANN_GAIN_NOT_SOURCE(id)       /* not translated yet */
+#define APR_AR_UI_ANN_EDIT_FAILED(id)           /* not translated yet */
 #define APR_AR_UI_KEY_NEXT_NODE(id)             /* not translated yet */
 #define APR_AR_UI_KEY_PREV_NODE(id)             /* not translated yet */
 #define APR_AR_UI_KEY_NEXT_IN_COLUMN(id)        /* not translated yet */
@@ -959,6 +1014,23 @@ END
 #define APR_AR_UI_KEY_GAIN_DOWN(id)             /* not translated yet */
 #define APR_AR_UI_KEY_CANCEL(id)                /* not translated yet */
 #define APR_AR_UI_KEY_DESCRIBE(id)              /* not translated yet */
+#define APR_AR_UI_KEYNAME_TAB(id)               /* not translated yet */
+#define APR_AR_UI_KEYNAME_ENTER(id)             /* not translated yet */
+#define APR_AR_UI_KEYNAME_SPACE(id)             /* not translated yet */
+#define APR_AR_UI_KEYNAME_DELETE(id)            /* not translated yet */
+#define APR_AR_UI_KEYNAME_ESCAPE(id)            /* not translated yet */
+#define APR_AR_UI_KEYNAME_HOME(id)              /* not translated yet */
+#define APR_AR_UI_KEYNAME_END(id)               /* not translated yet */
+#define APR_AR_UI_KEYNAME_LEFT(id)              /* not translated yet */
+#define APR_AR_UI_KEYNAME_RIGHT(id)             /* not translated yet */
+#define APR_AR_UI_KEYNAME_UP(id)                /* not translated yet */
+#define APR_AR_UI_KEYNAME_DOWN(id)              /* not translated yet */
+#define APR_AR_UI_KEYNAME_PLUS(id)              /* not translated yet */
+#define APR_AR_UI_KEYNAME_MINUS(id)             /* not translated yet */
+#define APR_AR_UI_KEYNAME_NUM_PLUS(id)          /* not translated yet */
+#define APR_AR_UI_KEYNAME_NUM_MINUS(id)         /* not translated yet */
+#define APR_AR_UI_KEYNAME_PERIOD(id)            /* not translated yet */
+#define APR_AR_UI_KEYNAME_FUNCTION(id)          /* not translated yet */
 
 
 #define APR_AR_UI_TREE_NAME(id)                            /* not translated yet */
@@ -1019,6 +1091,7 @@ END
 #define APR_AR_WARN_SESSION_DROPPED(id)                    /* not translated yet */
 #define APR_AR_STATUS_SESSION_LOADED(id)                   /* not translated yet */
 #define APR_AR_STATUS_SESSION_SAVED(id)                    /* not translated yet */
+#define APR_AR_ERR_SESSION_NOT_USABLE(id)                  /* not translated yet */
 
 #define APR_AR_P_N_OTHER_BUSES(base)         /* not translated yet */
 #define APR_AR_P_N_OUTPUTS(base)             /* not translated yet */
@@ -1051,6 +1124,8 @@ END
 #define APR_AR_UI_CLOSE_TO_TRAY(id)          /* not translated yet */
 #define APR_AR_UI_ANN_CLOSING_FILES(id)      /* not translated yet */
 #define APR_AR_UI_ANN_OUTPUT_RENAMED(id)        /* not translated yet */
+#define APR_AR_UI_ANN_CLOSE_TIMEOUT(id)         /* not translated yet */
+#define APR_AR_UI_ANN_NO_TRAY(id)               /* not translated yet */
 
 #define APR_AR_UI_DLG_OK(id)                   /* not translated yet */
 #define APR_AR_UI_DLG_CANCEL(id)               /* not translated yet */
@@ -1081,6 +1156,13 @@ END
 #define APR_AR_UI_DLG_OUT_FORMAT(id)           /* not translated yet */
 #define APR_AR_UI_DLG_OUT_PATH(id)             /* not translated yet */
 #define APR_AR_UI_DLG_OUT_PATH_TOKENS(id)  /* not translated yet */
+#define APR_AR_UI_DLG_NO_OUTPUTS(id)       /* not translated yet */
+#define APR_AR_UI_DLG_SESSION_CANCELLED(id) /* not translated yet */
+#define APR_AR_UI_DLG_DISCARD_TITLE(id)    /* not translated yet */
+#define APR_AR_UI_DLG_DISCARD_BODY(id)     /* not translated yet */
+#define APR_AR_UI_DLG_DISCARD_OK(id)       /* not translated yet */
+#define APR_AR_UI_DLG_FORMAT_NEEDED(id)    /* not translated yet */
+#define APR_AR_UI_DLG_CREATE_FAILED(id)    /* not translated yet */
 #define APR_AR_UI_DLG_OUT_BITRATE(id)          /* not translated yet */
 #define APR_AR_UI_DLG_OUT_QUALITY(id)          /* not translated yet */
 #define APR_AR_UI_DLG_SAVE_AUDIO_TITLE(id)     /* not translated yet */
@@ -1147,6 +1229,8 @@ END
 #define APR_AR_UI_TRAY_INFO_SOURCE_MUTED(id)   /* not translated yet */
 #define APR_AR_UI_TRAY_INFO_ACTION_FAILED(id)  /* not translated yet */
 #define APR_AR_UI_TRAY_INFO_MINIMIZED(id)      /* not translated yet */
+#define APR_AR_UI_TRAY_INFO_ARM_FAILED(id)     /* not translated yet */
+#define APR_AR_UI_TRAY_INFO_OUTPUT_RENAMED(id) /* not translated yet */
 
 #define APR_AR_UI_MENU_DISCONNECT(id)       /* not translated yet */
 #define APR_AR_UI_MENU_RENAME_BUS(id)       /* not translated yet */
