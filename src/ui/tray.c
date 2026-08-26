@@ -125,7 +125,25 @@ AprErr apr_tray_create(HWND owner, AprTray **out)
     t->msg_taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
     lstrcpynW(t->tip, apr_str(APR_S_UI_TRAY_TIP_IDLE), APR_TRAY_TIP_CCH);
 
-    tray_add(t);
+    /* A TEST MUST NEVER PUT AN ICON IN A REAL PERSON'S NOTIFICATION AREA.
+     *
+     * Three suites build a real controller, and a controller builds a real
+     * tray. Running the suite therefore fired real shell notifications at the
+     * author -- announced aloud by his screen reader, every run. He asked
+     * "I'm still getting them, what do I do?" while the notifications were
+     * coming from test_ui_behaviour.exe rather than from the application.
+     *
+     * The whole object stays real so the tests still exercise its logic;
+     * only the shell registration is skipped. Everything downstream is
+     * already gated on `added`, so tip updates, menus and notifications all
+     * become no-ops with no further checks.
+     *
+     * Set for every test by CMake, so a new UI suite cannot forget it. */
+    if (GetEnvironmentVariableW(L"APPRECORDER_NO_TRAY", NULL, 0) == 0) {
+        tray_add(t);
+    } else {
+        APR_INFO(L"tray: APPRECORDER_NO_TRAY is set; no shell icon registered");
+    }
     *out = t;
     return apr_ok();
 }

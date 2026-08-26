@@ -99,8 +99,23 @@ typedef enum AprRunEvent {
     APR_RUN_EV_SOURCE_MUTED,
 
     /* An action refused audio and was dropped from the fan-out. Its finalize
-     * still runs -- a half-written file must still open. */
+     * still runs -- a half-written file must still open.
+     *
+     * Reported AS SOON AS IT HAPPENS, once per output. An output that will not
+     * even open reaches the user through this event at the start of the run
+     * rather than at the end of it, which is the difference between losing a
+     * second and losing an hour. */
     APR_RUN_EV_ACTION_FAILED,
+
+    /* THE TAKE IS BEING SAVED SOMEWHERE OTHER THAN THE NAME THAT WAS ASKED
+     * FOR, because that name was already a recording and apprecorder does not
+     * overwrite one (outpath.h). `path` is where the audio is really going;
+     * `name` is the output's display name, as for every other action event.
+     *
+     * This event is the honest half of the auto-increment policy. Renaming
+     * silently would trade one surprise for another; the take is kept AND the
+     * user is told, at the moment it happens. Reported once per output. */
+    APR_RUN_EV_OUTPUT_RENAMED,
 
     /* The last block has been rendered; the files are about to be closed.
      * Fired before apr_graph_stop, so a front end can say "finishing" before
@@ -126,6 +141,13 @@ typedef struct AprRunNotice {
      * notice can be posted to another thread and read after the graph is
      * gone. */
     wchar_t name[APR_NAME_CCH];
+
+    /* THE FILE THIS EVENT IS ABOUT, resolved and expanded -- not the template
+     * the user typed. Empty for the events that are not about one. Its own
+     * field rather than `name` because a path does not fit in APR_NAME_CCH and
+     * truncating the one thing the user has to go and look at would be worse
+     * than saying nothing. */
+    wchar_t path[APR_OUT_PATH_CCH];
 
     AprErr err;      /* apr_ok() unless the event carries a failure */
 } AprRunNotice;

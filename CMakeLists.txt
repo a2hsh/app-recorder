@@ -99,6 +99,11 @@ foreach(test_file ${TEST_SRC})
     target_link_libraries(${test_name} PRIVATE apprecorder_core)
   endif()
   add_test(NAME ${test_name} COMMAND ${test_name})
+  # A test must leave no trace on the machine running it. Several UI suites
+  # build a real controller, which builds a real tray icon and fires real
+  # shell notifications -- read aloud by a screen reader, on every run.
+  # Setting this here rather than per-file means a new UI suite cannot forget.
+  set_tests_properties(${test_name} PROPERTIES ENVIRONMENT "APPRECORDER_NO_TRAY=1")
 endforeach()
 
 # ---------------------------------------------------------------------------

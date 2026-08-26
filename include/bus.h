@@ -44,6 +44,7 @@
 #include "action.h"
 #include "clock.h"
 #include "err.h"
+#include "outpath.h"
 #include "source.h"
 
 #define APR_MAX_SOURCES_PER_BUS 32
@@ -106,30 +107,84 @@ float  apr_bus_gain(const AprBus *b, AprSourceId id);
  * Actions
  * ------------------------------------------------------------------------- */
 
-/* Creates the action's state immediately, so a bad path fails now rather than
- * halfway through a recording. */
+/* ---------------------------------------------------------------------------
+ * AN ACTION'S LIFETIME IS ONE RECORDING, NOT THE GRAPH'S
+ *
+ *   This used to call vt->create() here, so the output file was opened the
+ *   moment the user ADDED the output and closed for good at the first stop.
+ *   The consequence, reported by the author and reproducible every time:
+ *
+ *     record -> stop -> record again -> THE SECOND RECORDING WROTE NOTHING.
+ *
+ *   finalize had closed the encoder permanently, on_audio refused everything
+ *   afterwards, and deleting the stale file did not help either -- Windows
+ *   keeps an open handle valid with no directory entry, so the third take went
+ *   to a file with no name. Three recordings, one of them kept. That is data
+ *   loss, and it came from the lifetime, not from any encoder.
+ *
+ *   So A BUS HOLDS A SPEC, NOT AN OPEN ENCODER: the vtable plus the config it
+ *   would be created with. apr_bus_start() creates every action's state;
+ *   apr_bus_stop() finalizes and destroys it. Record twice and you get two
+ *   files. Delete the file and record again and it comes back.
+ *
+ *   WHAT THAT MOVED, AND WHERE IT MOVED TO. A bad path used to be caught by
+ *   create() at add time, which was worth having: the person who typed the
+ *   name is still there to fix it. Opening the file at record time would have
+ *   lost that, so the CHECK stayed where it was and only the OPEN moved --
+ *   apr_bus_add_action() validates through apr_out_validate() (outpath.h),
+ *   which expands the name and asks the folder whether something may be
+ *   created in it, leaving nothing behind. Validate at add, open at record.
+ * ------------------------------------------------------------------------- */
+
+/* Record what this output IS. Creates no file and opens no encoder -- but
+ * validates the path now, so an unwritable folder is refused while there is
+ * still somebody to tell. */
 AprErr apr_bus_add_action(AprBus *b, const AprActionVTable *vt,
                           const AprActionConfig *cfg);
 
 size_t                 apr_bus_action_count(const AprBus *b);
 const AprActionVTable *apr_bus_action_at(const AprBus *b, size_t index);
 
-/* Where output `index` is being written, or an empty string.
+/* WHAT THE USER ASKED FOR: the configured path for output `index`, exactly as
+ * it was given, tokens and all. This is the template, not a filename -- see
+ * outpath.h -- and it is what a session file stores, because reopening a
+ * session tomorrow must record to tomorrow's name and not to yesterday's.
  *
- * An action's config is borrowed for the length of create() -- right for
- * opening a file, useless for writing the arrangement down afterwards, which
- * is exactly what saving a session is. The bus keeps the path because the bus
- * is what owns the output; a front end keeping its own copy would be a second
- * answer to the same question. Never NULL. */
+ * The bus keeps it because the bus is what owns the output; a front end
+ * keeping its own copy would be a second answer to the same question. Never
+ * NULL. */
 const wchar_t *apr_bus_action_path(const AprBus *b, size_t index);
+
+/* WHERE THE AUDIO ACTUALLY WENT: the expanded, collision-resolved path of the
+ * recording in progress, or of the last one this bus made. Empty until the
+ * first apr_bus_start().
+ *
+ * Both are needed and neither substitutes for the other. "{bus} {date}.wav" is
+ * what to save; "Main Mix 2026-08-26-2.wav" is what to tell the user, and it
+ * is the only honest answer once the collision policy has renamed a take. */
+const wchar_t *apr_bus_action_current_path(const AprBus *b, size_t index);
+
+/* Nonzero when the current recording had to be saved under a different name
+ * because the one that was asked for was already a recording. The collision
+ * policy never overwrites and never refuses (outpath.h); this is how a front
+ * end knows there is a sentence it owes the user. */
+int apr_bus_action_renamed(const AprBus *b, size_t index);
+
+/* The rest of the spec, so that saving a session round-trips the whole output
+ * rather than its path alone. 0 means the encoder's own default. */
+int apr_bus_action_bitrate(const AprBus *b, size_t index);
+int apr_bus_action_quality(const AprBus *b, size_t index);
 
 /* Remove one output.
  *
- * THE ACTION IS FINALIZED FIRST, ALWAYS, even for a bus that never ran and
- * even for an action already marked failed. Detaching an encoder without
- * finalizing it is exactly the "unplayable file" outcome AGENTS.md rule 4
- * exists to prevent, and a user removing an output mid-session is the case
- * where it would happen. Then destroy, then close the gap in the array.
+ * IF A RECORDING IS OPEN ON IT, IT IS FINALIZED FIRST, ALWAYS -- detaching an
+ * encoder without finalizing it is exactly the "unplayable file" outcome
+ * AGENTS.md rule 4 exists to prevent, and a user removing an output mid-session
+ * is the case where it would happen. Then destroy, then close the gap.
+ *
+ * An output that is NOT recording has nothing open on it any more (see the
+ * lifetime note above), so removing one from an idle graph is now what it
+ * always looked like: forgetting a plan. No file is touched.
  *
  * Later actions shift down by one, so an index held across this call names a
  * different output afterwards. That is the same contract the array already
@@ -152,8 +207,14 @@ AprErr apr_bus_action_error(const AprBus *b, size_t index);
  * Running
  * ------------------------------------------------------------------------- */
 
-/* Anchors the bus timeline at `start_ticks` (QPC). Every position afterwards
- * is measured from it. */
+/* Anchors the bus timeline at `start_ticks` (QPC), and CREATES EVERY ACTION:
+ * each spec's path is expanded and collision-resolved (outpath.h) and its
+ * encoder is opened. This is the moment a file appears on disk.
+ *
+ * An action that will not open is marked failed and skipped, exactly as one
+ * that refuses audio mid-recording is: one broken encoder must not cost a
+ * session (design 10). The failure is readable through apr_bus_action_error()
+ * and the runner announces it. */
 AprErr apr_bus_start(AprBus *b, uint64_t start_ticks);
 
 /* Render everything QPC says is due at `now_ticks`, minus the lookbehind.
@@ -161,7 +222,9 @@ AprErr apr_bus_start(AprBus *b, uint64_t start_ticks);
  * catches up in full if called late. */
 AprErr apr_bus_tick(AprBus *b, uint64_t now_ticks);
 
-/* Finalizes every action, including failed ones. Idempotent. */
+/* Finalizes every action, including failed ones, THEN DESTROYS IT: the
+ * encoder's life ends with the recording it was made for. Idempotent, and the
+ * failed flags survive it so a caller can still ask what went wrong. */
 AprErr apr_bus_stop(AprBus *b);
 
 int      apr_bus_running(const AprBus *b);

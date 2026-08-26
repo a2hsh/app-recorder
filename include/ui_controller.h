@@ -154,6 +154,12 @@ int apr_controller_command(AprController *c, int command_id);
 /* The last thing the controller said out loud, which is also what went to the
  * status bar's live region. "The user was told" is otherwise a property only a
  * human with a screen reader can check. */
+/* TEST ONLY. A balloon is raised only when no better channel exists -- see
+ * a_better_channel_exists() in controller.c. A test cannot reliably make
+ * itself the foreground window, so it forces the answer: -1 real, 0 the
+ * window is not in front, 1 it is. */
+void apr_controller_test_set_foreground(AprController *c, int state);
+
 size_t apr_controller_last_announcement(const AprController *c,
                                         wchar_t *buf, size_t cch);
 

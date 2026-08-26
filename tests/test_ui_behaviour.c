@@ -62,6 +62,7 @@
 #include "bus.h"
 #include "capture.h"
 #include "graph.h"
+#include "outpath.h"
 #include "strings.h"
 #include "ui_app.h"
 #include "ui_canvas.h"
@@ -150,6 +151,10 @@ static void build_setup(UiHost *h)
         if (n == 0 || n >= MAX_PATH) { s->err = APR_ERR(APR_E_IO, L"no temp dir"); return; }
         swprintf(s->out_path, MAX_PATH, L"%sapr_behaviour_%lu.wav", dir,
                  (unsigned long)GetCurrentProcessId());
+        /* The name is fixed per process, so anything an earlier case left
+         * behind would be found by the collision policy and push this take
+         * to a different name. Start from a clean folder. */
+        DeleteFileW(s->out_path);
         memset(&ac, 0, sizeof ac);
         ac.out_path = s->out_path;
         e = apr_graph_add_action(h->graph, s->bus, "wav", &ac);
@@ -814,6 +819,288 @@ TEST(delete_removes_the_focused_node_and_names_what_went)
     ASSERT_WSTR_EQ(want, got);
 
     fix_down(&f);
+}
+
+/* ==========================================================================
+ * RECORDING TWICE, WHICH IS WHERE THE AUTHOR LOST A FILE
+ *
+ *   "I recorded a file called test.mp3, stopped, listened to it, and then
+ *   recorded again and stopped. Turns out the file was not updated with the
+ *   new recording, so I deleted it and recorded again, but the new file
+ *   wasn't there."
+ *
+ * Every case in this suite before these ones asserted that pressing a key
+ * changed the model and said something. None of them ever pressed RECORD --
+ * so the one operation the product exists for was the one nothing drove, and
+ * a defect that cost the author two takes walked straight through.
+ *
+ * SAFETY (AGENTS.md rule 1): the source is APR_SRC_FAKE, the output is a WAV
+ * file under TEMP, and no audio endpoint is opened in either direction. Every
+ * file made here is deleted before the case returns.
+ * ======================================================================== */
+
+/* The same playability check test_cli.c makes: RIFF/WAVE, a data chunk, and a
+ * data size that is non-zero and consistent with the file on disk. */
+static int wav_is_playable(const wchar_t *path, unsigned *out_data_bytes)
+{
+    unsigned char buf[4096];
+    HANDLE   h;
+    DWORD    got = 0;
+    uint64_t size;
+    size_t   i;
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+
+    if (out_data_bytes) *out_data_bytes = 0;
+    if (!GetFileAttributesExW(path, GetFileExInfoStandard, &fa)) return 0;
+    size = ((uint64_t)fa.nFileSizeHigh << 32) | fa.nFileSizeLow;
+
+    h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    if (!ReadFile(h, buf, (DWORD)sizeof buf, &got, NULL)) got = 0;
+    CloseHandle(h);
+    if (got < 64) return 0;
+    if (memcmp(buf, "RIFF", 4) != 0 && memcmp(buf, "RF64", 4) != 0) return 0;
+    if (memcmp(buf + 8, "WAVE", 4) != 0) return 0;
+
+    for (i = 12; i + 8 <= (size_t)got; i += 4) {
+        if (memcmp(buf + i, "data", 4) == 0) {
+            unsigned n = (unsigned)buf[i + 4] | ((unsigned)buf[i + 5] << 8) |
+                         ((unsigned)buf[i + 6] << 16) | ((unsigned)buf[i + 7] << 24);
+            if (out_data_bytes) *out_data_bytes = n;
+            return n > 0 && (uint64_t)n + i + 8 <= size;
+        }
+    }
+    return 0;
+}
+
+/* "mix.wav" -> "mix-2.wav": what the collision policy does with a name that is
+ * already a recording (outpath.h). */
+static void sibling_take(const wchar_t *path, int take, wchar_t *out, size_t cch)
+{
+    const wchar_t *dot = wcsrchr(path, L'.');
+    size_t stem = dot ? (size_t)(dot - path) : wcslen(path);
+    _snwprintf_s(out, cch, _TRUNCATE, L"%.*ls-%d%ls", (int)stem, path, take,
+                 dot ? dot : L"");
+}
+
+/* One take: press Record, let it run, press Stop, wait for the files to close.
+ * Both presses are the real accelerator; the wait is on the controller's own
+ * "am I recording" state rather than on a sleep, because the runner closes the
+ * files on a thread of its own and a take that is still being finalized is a
+ * file that is not finished. */
+static int one_take(Fix *f, int ms)
+{
+    int waited = 0;
+
+    accel(&f->h, APR_CMD_RECORD_START);
+    if (!apr_controller_recording(f->h.ctl)) return 0;
+
+    Sleep((DWORD)ms);
+    accel(&f->h, APR_CMD_RECORD_STOP);
+
+    /* The controller clears `recording` from APR_RUN_EV_STOPPED, which arrives
+     * on the window's own thread -- so this really is "the files are closed"
+     * and not "the stop was requested". */
+    while (apr_controller_recording(f->h.ctl)) {
+        if (waited >= 20000) return 0;
+        Sleep(10);
+        waited += 10;
+    }
+    return 1;
+}
+
+TEST(recording_twice_through_one_graph_leaves_two_playable_files)
+{
+    /* BUG 1 AND BUG 2 TOGETHER. Before the lifetime fix the encoder was created
+     * when the OUTPUT was added and finalized for good at the first stop, so
+     * take two wrote nothing at all. With the lifetime fixed but nothing else,
+     * take two would have landed on top of take one. */
+    Fix f;
+    wchar_t second[MAX_PATH];
+    unsigned a = 0, b = 0;
+
+    if (!fix_up(&f, 1, 1, 1, 1)) { fix_down(&f); return; }
+    sibling_take(f.h.setup.out_path, 2, second, MAX_PATH);
+    DeleteFileW(second);
+
+    /* Adding the output created NOTHING: the file appears when recording
+     * starts, which is the whole of the lifetime fix. */
+    ASSERT_EQ_INT(1, (int)apr_bus_action_count(apr_graph_bus(f.g, BUS(&f))));
+    ASSERT_EQ_INT((int)INVALID_FILE_ATTRIBUTES,
+                  (int)GetFileAttributesW(f.h.setup.out_path));
+
+    if (!one_take(&f, 400)) { fix_down(&f); DeleteFileW(second); FAIL("take one did not run"); }
+    ASSERT_TRUE(wav_is_playable(f.h.setup.out_path, &a));
+    printf("      take 1: [%ls] %u bytes\n", f.h.setup.out_path, a);
+
+    if (!one_take(&f, 400)) { fix_down(&f); DeleteFileW(second); FAIL("take two did not run"); }
+
+    /* Two files. Take one still holds take one. */
+    ASSERT_TRUE(wav_is_playable(f.h.setup.out_path, &a));
+    ASSERT_TRUE(wav_is_playable(second, &b));
+    printf("      take 2: [%ls] %u bytes\n", second, b);
+    ASSERT_GT_INT(40000, (int)b);
+
+    /* And the graph says where the second one went, which is what the tree
+     * panel and the announcement read. */
+    ASSERT_WSTR_EQ(second,
+        apr_bus_action_current_path(apr_graph_bus(f.g, BUS(&f)), 0));
+    /* While what the user CONFIGURED is unchanged -- that is what a session
+     * save writes down. */
+    ASSERT_WSTR_EQ(f.h.setup.out_path,
+        apr_bus_action_path(apr_graph_bus(f.g, BUS(&f)), 0));
+
+    fix_down(&f);
+    DeleteFileW(second);
+}
+
+TEST(a_take_deleted_between_recordings_comes_back)
+{
+    /* The third act of the report, and the strangest-looking one: deleting the
+     * file did not help. Windows keeps an open handle valid with no directory
+     * entry, so the next recording went on writing to a file with no name.
+     * Nothing is open between recordings now, so the name is simply free. */
+    Fix f;
+    wchar_t second[MAX_PATH];
+    unsigned bytes = 0;
+
+    if (!fix_up(&f, 1, 1, 1, 1)) { fix_down(&f); return; }
+    sibling_take(f.h.setup.out_path, 2, second, MAX_PATH);
+    DeleteFileW(second);
+
+    if (!one_take(&f, 400)) { fix_down(&f); DeleteFileW(second); FAIL("take one did not run"); }
+    ASSERT_TRUE(wav_is_playable(f.h.setup.out_path, &bytes));
+
+    /* THE DELETE HAS TO SUCCEED, and before the fix it could not have: a
+     * handle was still open on it. */
+    ASSERT_TRUE(DeleteFileW(f.h.setup.out_path) != 0);
+
+    if (!one_take(&f, 400)) { fix_down(&f); DeleteFileW(second); FAIL("take two did not run"); }
+    ASSERT_TRUE(wav_is_playable(f.h.setup.out_path, &bytes));
+    printf("      back:   [%ls] %u bytes\n", f.h.setup.out_path, bytes);
+    ASSERT_GT_INT(40000, (int)bytes);
+    /* The name was free, so no take number was needed. */
+    ASSERT_EQ_INT((int)INVALID_FILE_ATTRIBUTES, (int)GetFileAttributesW(second));
+
+    fix_down(&f);
+    DeleteFileW(second);
+}
+
+TEST(a_take_that_moved_aside_is_announced_while_it_is_happening)
+{
+    /* AUTO-INCREMENT IS ONLY HONEST IF THE USER HEARS ABOUT IT. The sentence
+     * is caught DURING the second take rather than after it: the stop
+     * announcement is the last thing said, so looking afterwards would find
+     * that instead and prove nothing.
+     *
+     * Compared against the catalog sentence with the catalog's own insert,
+     * like every other announcement in this file. */
+    Fix f;
+    wchar_t second[MAX_PATH], want[512], got[512];
+    int waited = 0, heard = 0;
+
+    if (!fix_up(&f, 1, 1, 1, 1)) { fix_down(&f); return; }
+    sibling_take(f.h.setup.out_path, 2, second, MAX_PATH);
+    DeleteFileW(second);
+
+    if (!one_take(&f, 200)) { fix_down(&f); DeleteFileW(second); FAIL("take one did not run"); }
+
+    sentence(APR_S_UI_ANN_OUTPUT_RENAMED, second, NULL, want, 512);
+    printf("      wanted: \"%ls\"\n", want);
+
+    accel(&f.h, APR_CMD_RECORD_START);
+    while (waited < 5000) {
+        if (wcscmp(want, said(&f.h, got, 512)) == 0) { heard = 1; break; }
+        Sleep(10);
+        waited += 10;
+    }
+    printf("      said:   \"%ls\"\n", got);
+
+    accel(&f.h, APR_CMD_RECORD_STOP);
+    while (apr_controller_recording(f.h.ctl) && waited < 25000) {
+        Sleep(10);
+        waited += 10;
+    }
+    ASSERT_TRUE(heard);
+
+    fix_down(&f);
+    DeleteFileW(second);
+}
+
+TEST(an_output_whose_folder_is_not_there_is_refused_when_it_is_added)
+{
+    /* THE EARLY CHECK, AND WHY IT HAD TO MOVE RATHER THAN GO. Opening the file
+     * used to be what caught an unwritable path, and it happened at add time.
+     * The open now happens at record time, so the CHECK was kept where it was:
+     * apr_bus_add_action validates the name through apr_out_validate (bus.h).
+     * The person who typed the name still finds out while they are standing
+     * there, and nothing is created either way. */
+    Fix f;
+    AprActionConfig ac;
+    wchar_t dir[MAX_PATH], bad[MAX_PATH];
+    AprErr e;
+    DWORD n;
+
+    if (!fix_up(&f, 1, 1, 1, 0)) { fix_down(&f); return; }
+
+    n = GetTempPathW(MAX_PATH, dir);
+    if (n == 0 || n >= MAX_PATH) { fix_down(&f); FAIL("no temp folder"); }
+    _snwprintf_s(bad, MAX_PATH, _TRUNCATE, L"%lsapr_no_such_dir_%lu\\{bus}.{ext}",
+                 dir, GetCurrentProcessId());
+
+    memset(&ac, 0, sizeof ac);
+    ac.out_path = bad;
+    e = apr_graph_add_action(f.g, BUS(&f), "wav", &ac);
+    {
+        wchar_t why[512];
+        printf("      refused: %ls\n", apr_err_format(&e, why, 512));
+    }
+    ASSERT_TRUE(apr_failed(&e));
+
+    /* Refused means refused: no output on the bus, and nothing on disk. */
+    ASSERT_EQ_INT(0, (int)apr_bus_action_count(apr_graph_bus(f.g, BUS(&f))));
+    ASSERT_EQ_INT((int)INVALID_FILE_ATTRIBUTES, (int)GetFileAttributesW(bad));
+
+    fix_down(&f);
+}
+
+TEST(a_writable_name_is_accepted_at_add_time_and_still_creates_nothing)
+{
+    /* The other half of the same rule. Validation must not be an open: adding
+     * an output leaves the folder exactly as it found it, so a session can
+     * carry ten outputs without ten empty files appearing beside it. */
+    Fix f;
+    AprActionConfig ac;
+    wchar_t dir[MAX_PATH], tmpl[MAX_PATH], expect[MAX_PATH];
+    AprOutContext ctx;
+    AprErr e;
+    DWORD n;
+
+    if (!fix_up(&f, 1, 1, 1, 0)) { fix_down(&f); return; }
+
+    n = GetTempPathW(MAX_PATH, dir);
+    if (n == 0 || n >= MAX_PATH) { fix_down(&f); FAIL("no temp folder"); }
+    _snwprintf_s(tmpl, MAX_PATH, _TRUNCATE, L"%lsapr_add_%lu_{bus}.{ext}",
+                 dir, GetCurrentProcessId());
+
+    memset(&ac, 0, sizeof ac);
+    ac.out_path = tmpl;
+    e = apr_graph_add_action(f.g, BUS(&f), "wav", &ac);
+    ASSERT_FALSE(apr_failed(&e));
+    ASSERT_EQ_INT(1, (int)apr_bus_action_count(apr_graph_bus(f.g, BUS(&f))));
+
+    ctx.bus_name  = L"Main Mix";
+    ctx.extension = L"wav";
+    e = apr_out_expand(tmpl, &ctx, expect, MAX_PATH);
+    ASSERT_FALSE(apr_failed(&e));
+    printf("      would be: [%ls]\n", expect);
+    /* Neither the template nor its expansion exists yet. */
+    ASSERT_EQ_INT((int)INVALID_FILE_ATTRIBUTES, (int)GetFileAttributesW(tmpl));
+    ASSERT_EQ_INT((int)INVALID_FILE_ATTRIBUTES, (int)GetFileAttributesW(expect));
+
+    fix_down(&f);
+    DeleteFileW(expect);
 }
 
 /* ==========================================================================

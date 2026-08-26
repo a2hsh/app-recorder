@@ -719,6 +719,255 @@ TEST(one_bus_can_be_written_to_two_formats_at_once)
     DeleteFileW(mp3);
 }
 
+/* ===========================================================================
+ * RECORDING TWICE
+ *
+ * The author's report, in full:
+ *
+ *   "I recorded a file called test.mp3, stopped, listened to it, and then
+ *   recorded again and stopped. Turns out the file was not updated with the
+ *   new recording, so I deleted it and recorded again, but the new file
+ *   wasn't there."
+ *
+ * Two defects underneath it. The LIFETIME one -- apr_bus_add_action() used to
+ * create the encoder, so a finalized action refused every later recording and
+ * a deleted file left a live handle with no directory entry. And the OVERWRITE
+ * one -- with the lifetime fixed, the second take would still have landed on
+ * top of the first.
+ *
+ * WHAT THESE CASES CAN AND CANNOT SEE, because it matters: every apr_cli_run
+ * builds a graph, records, and destroys it, so a command line CANNOT reach the
+ * lifetime defect at all -- take two gets a brand new action either way.
+ * Verified by reinstating the old lifetime: these cases stayed green and
+ * tests/test_ui_behaviour.c's went red, because the UI keeps one graph across
+ * both presses, which is exactly what the author did.
+ *
+ * So what is asserted here is THE COLLISION POLICY and what the command line
+ * says about it. The lifetime is test_ui_behaviour.c's, and it is red without
+ * the fix.
+ *
+ * Driven by a synthetic source; no audio endpoint is opened in either
+ * direction.
+ * ========================================================================= */
+
+/* One 0.4-second take of a synthetic tone into `path`. */
+static AprCliExit record_once(Cap *c, const wchar_t *path)
+{
+    return RUN(c, L"--fake", L"440,0,0.25", L"--out", path,
+               L"--duration", L"0.4", L"--quiet");
+}
+
+/* "mix.wav" -> "mix-2.wav": what the collision policy does with a name that
+ * is already a recording (include/outpath.h). */
+static void sibling_take(const wchar_t *path, int take, wchar_t *out, size_t cch)
+{
+    const wchar_t *dot = wcsrchr(path, L'.');
+    size_t stem = dot ? (size_t)(dot - path) : wcslen(path);
+    _snwprintf_s(out, cch, _TRUNCATE, L"%.*ls-%d%ls", (int)stem, path, take,
+                 dot ? dot : L"");
+}
+
+TEST(recording_twice_to_one_name_leaves_two_playable_files)
+{
+    Cap      c;
+    wchar_t  path[MAX_PATH], second[MAX_PATH];
+    uint32_t first_bytes = 0, second_bytes = 0;
+
+    tmp_path(path, MAX_PATH, L"twice", L"wav");
+    sibling_take(path, 2, second, MAX_PATH);
+    DeleteFileW(path);
+    DeleteFileW(second);
+
+    ASSERT_EQ_INT(APR_CLI_OK, record_once(&c, path));
+    ASSERT_TRUE(wav_is_playable(path, &first_bytes));
+
+    /* THE SECOND TAKE. Before the lifetime fix this wrote nothing at all: the
+     * action had been finalized by the first stop and refused audio for ever
+     * afterwards. */
+    ASSERT_EQ_INT(APR_CLI_OK, record_once(&c, path));
+
+    /* Two files, both playable, and the FIRST ONE IS STILL THE FIRST TAKE --
+     * a recorder that loses a previous take is the thing this is here to
+     * prevent. */
+    ASSERT_TRUE(wav_is_playable(path, &first_bytes));
+    printf("      take 1: [%ls] %u bytes\n", path, first_bytes);
+    ASSERT_TRUE(file_exists(second));
+    ASSERT_TRUE(wav_is_playable(second, &second_bytes));
+    printf("      take 2: [%ls] %u bytes\n", second, second_bytes);
+    ASSERT_GT_INT(40000, (int)second_bytes);
+
+    DeleteFileW(path);
+    DeleteFileW(second);
+}
+
+TEST(a_take_deleted_between_recordings_comes_back)
+{
+    /* The third act of the report. Deleting the file did not help, because
+     * Windows keeps an open handle valid with no directory entry -- so the
+     * next recording went to a file with no name and appeared to vanish.
+     * Nothing is open between recordings now. */
+    Cap      c;
+    wchar_t  path[MAX_PATH], second[MAX_PATH];
+    uint32_t bytes = 0;
+
+    tmp_path(path, MAX_PATH, L"deleted", L"wav");
+    sibling_take(path, 2, second, MAX_PATH);
+    DeleteFileW(path);
+    DeleteFileW(second);
+
+    ASSERT_EQ_INT(APR_CLI_OK, record_once(&c, path));
+    ASSERT_TRUE(file_exists(path));
+
+    ASSERT_TRUE(DeleteFileW(path) != 0);
+    ASSERT_FALSE(file_exists(path));
+
+    /* The name is free again, so it is used again -- no take number, because
+     * there is no take to protect. */
+    ASSERT_EQ_INT(APR_CLI_OK, record_once(&c, path));
+    ASSERT_TRUE(file_exists(path));
+    ASSERT_TRUE(wav_is_playable(path, &bytes));
+    ASSERT_GT_INT(40000, (int)bytes);
+    ASSERT_FALSE(file_exists(second));
+
+    DeleteFileW(path);
+}
+
+TEST(the_take_that_moved_aside_is_named_out_loud)
+{
+    /* Auto-increment without a sentence is only a politer surprise. The run
+     * says which name was taken and which one the audio went to, and the
+     * "recording to" line names the file that really exists. */
+    Cap     c;
+    wchar_t path[MAX_PATH], second[MAX_PATH];
+
+    tmp_path(path, MAX_PATH, L"named", L"wav");
+    sibling_take(path, 2, second, MAX_PATH);
+    DeleteFileW(path);
+    DeleteFileW(second);
+
+    ASSERT_EQ_INT(APR_CLI_OK, record_once(&c, path));
+
+    ASSERT_EQ_INT(APR_CLI_OK, RUN(&c, L"--fake", L"440,0,0.25", L"--out", path,
+                                  L"--duration", L"0.4"));
+    printf("      said: %ls", c.out);
+    printf("      err:  %ls", c.err);
+    /* The warning names the file the audio really went to, and so does the
+     * closing summary -- which used to print the name that was ASKED for and
+     * would now send the user looking for a file that is not there. */
+    ASSERT_TRUE(has(c.err, second));
+    ASSERT_TRUE(has(c.out, second));
+
+    DeleteFileW(path);
+    DeleteFileW(second);
+}
+
+/* ===========================================================================
+ * Output names are templates
+ * ========================================================================= */
+
+TEST(an_output_name_may_be_a_template_and_the_file_is_the_expansion)
+{
+    Cap     c;
+    wchar_t dir[MAX_PATH], tmpl[MAX_PATH], want[MAX_PATH];
+    DWORD   n = GetTempPathW(MAX_PATH, dir);
+
+    if (n == 0 || n >= MAX_PATH) wcscpy_s(dir, MAX_PATH, L".\\");
+    _snwprintf_s(tmpl, MAX_PATH, _TRUNCATE, L"%lsapr_cli_t%lu_{bus}_{n}.wav",
+                 dir, GetCurrentProcessId());
+    _snwprintf_s(want, MAX_PATH, _TRUNCATE, L"%lsapr_cli_t%lu_Voice_1.wav",
+                 dir, GetCurrentProcessId());
+    DeleteFileW(want);
+
+    ASSERT_EQ_INT(APR_CLI_OK, RUN(&c, L"--bus", L"Voice", L"--fake", L"440,0,0.25",
+                                  L"--out", tmpl, L"--duration", L"0.4", L"--quiet"));
+    printf("      template: [%ls]\n", tmpl);
+    printf("      file:     [%ls]\n", want);
+    ASSERT_TRUE(wav_is_playable(want, NULL));
+    /* And nothing was created under the literal name, braces and all. */
+    ASSERT_FALSE(file_exists(tmpl));
+
+    DeleteFileW(want);
+}
+
+TEST(two_buses_may_share_one_template_because_it_names_two_files)
+{
+    /* Comparing the TEMPLATES rather than what they expand to would refuse
+     * this out of hand -- and it is the ordinary way to record two buses. */
+    Cap     c;
+    wchar_t dir[MAX_PATH], tmpl[MAX_PATH], a[MAX_PATH], b[MAX_PATH];
+    DWORD   n = GetTempPathW(MAX_PATH, dir);
+
+    if (n == 0 || n >= MAX_PATH) wcscpy_s(dir, MAX_PATH, L".\\");
+    _snwprintf_s(tmpl, MAX_PATH, _TRUNCATE, L"%lsapr_cli_s%lu_{bus}.wav",
+                 dir, GetCurrentProcessId());
+    _snwprintf_s(a, MAX_PATH, _TRUNCATE, L"%lsapr_cli_s%lu_One.wav",
+                 dir, GetCurrentProcessId());
+    _snwprintf_s(b, MAX_PATH, _TRUNCATE, L"%lsapr_cli_s%lu_Two.wav",
+                 dir, GetCurrentProcessId());
+    DeleteFileW(a);
+    DeleteFileW(b);
+
+    ASSERT_EQ_INT(APR_CLI_OK, RUN(&c,
+        L"--bus", L"One", L"--fake", L"440,0,0.25", L"--out", tmpl,
+        L"--bus", L"Two", L"--fake", L"220,0,0.25", L"--out", tmpl,
+        L"--duration", L"0.4", L"--quiet"));
+
+    ASSERT_TRUE(wav_is_playable(a, NULL));
+    ASSERT_TRUE(wav_is_playable(b, NULL));
+    DeleteFileW(a);
+    DeleteFileW(b);
+}
+
+TEST(one_template_that_names_one_file_on_two_buses_is_still_a_duplicate)
+{
+    /* The check did not get weaker, only more accurate: two outputs that
+     * expand to the same path are still refused, because two recordings
+     * cannot share one file. */
+    Cap     c;
+    wchar_t dir[MAX_PATH], tmpl[MAX_PATH];
+    DWORD   n = GetTempPathW(MAX_PATH, dir);
+
+    if (n == 0 || n >= MAX_PATH) wcscpy_s(dir, MAX_PATH, L".\\");
+    _snwprintf_s(tmpl, MAX_PATH, _TRUNCATE, L"%lsapr_cli_d%lu_{date}.wav",
+                 dir, GetCurrentProcessId());
+
+    ASSERT_EQ_INT(APR_CLI_CONFIG, RUN(&c,
+        L"--bus", L"One", L"--fake", L"440", L"--out", tmpl,
+        L"--bus", L"Two", L"--fake", L"220", L"--out", tmpl,
+        L"--dry-run"));
+    ASSERT_TRUE(said(&c, L"{date}"));
+}
+
+TEST(a_template_is_never_probed_with_its_braces_in_it)
+{
+    /* The early check has to expand first: probing "x.{ext}" literally would
+     * create a file called exactly that and leave it behind. */
+    Cap     c;
+    wchar_t dir[MAX_PATH], tmpl[MAX_PATH], want[MAX_PATH];
+    DWORD   n = GetTempPathW(MAX_PATH, dir);
+
+    if (n == 0 || n >= MAX_PATH) wcscpy_s(dir, MAX_PATH, L".\\");
+    _snwprintf_s(tmpl, MAX_PATH, _TRUNCATE, L"%lsapr_cli_p%lu_{bus}.wav",
+                 dir, GetCurrentProcessId());
+    _snwprintf_s(want, MAX_PATH, _TRUNCATE, L"%lsapr_cli_p%lu_Main.wav",
+                 dir, GetCurrentProcessId());
+
+    ASSERT_EQ_INT(APR_CLI_OK, RUN(&c, L"--bus", L"Main", L"--fake", L"440",
+                                  L"--out", tmpl, L"--dry-run"));
+    ASSERT_FALSE(file_exists(tmpl));
+    /* --dry-run creates nothing, including the file the probe had to make to
+     * answer the question. */
+    ASSERT_FALSE(file_exists(want));
+}
+
+TEST(the_help_says_what_may_go_in_an_output_name)
+{
+    Cap c;
+    ASSERT_EQ_INT(APR_CLI_OK, RUN(&c, L"help"));
+    ASSERT_TRUE(said(&c, L"{date}"));
+    ASSERT_TRUE(said(&c, L"{n}"));
+}
+
 /* ---------------------------------------------------------------------------
  * The two failures that look exactly like a successful recording
  *

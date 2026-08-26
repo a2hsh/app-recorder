@@ -4,15 +4,21 @@
  * before. What follows is the reasoning behind the parts that look arbitrary.
  *
  * ---------------------------------------------------------------------------
- * EVERY STATE CHANGE IS SAID TWICE, ON TWO DIFFERENT CHANNELS, ON PURPOSE
+ * A STATE CHANGE IS SAID ONCE, ON WHICHEVER CHANNEL CAN ACTUALLY REACH THE USER
  *
  *   say() writes the sentence to the status bar and fires a live-region
  *   change; that is what a screen reader picks up while the window is in
  *   front. But this application spends its recordings MINIMISED, and a
  *   live-region change on an unfocused background window is not reliably
- *   announced by any reader. So anything that happens during a recording also
- *   goes out as a notification-area balloon, which readers do announce
- *   reliably and which a sighted user can see too.
+ *   announced by any reader. So when the window is NOT in front, the sentence
+ *   goes out as a notification-area balloon instead -- which readers do
+ *   announce reliably and which a sighted user can see too.
+ *
+ *   INSTEAD, not as well. An earlier version sent both unconditionally, so a
+ *   screen reader read every event twice and a test run buried the author's
+ *   notification centre during a meeting. A balloon is for something that
+ *   would otherwise be MISSED, never for confirming what the user just did.
+ *   See a_better_channel_exists().
  *
  *   THIS PRODUCT NEVER SPEAKS DIRECTLY. No SAPI, no nvdaControllerClient, no
  *   Tolk. UIA and the shell hand semantics to the screen reader, which then
@@ -95,6 +101,9 @@ struct AprController {
 
     wchar_t session_path[APR_DISC_PATH_CCH];
     wchar_t last_said[CTL_TEXT_CCH];
+
+    /* -1 = ask the real windowing state. 0/1 force it, for tests only. */
+    int fg_override;
 };
 
 /* One session-shaped object at a time; AprSession is a few hundred kilobytes
@@ -127,15 +136,51 @@ static void say0(AprController *c, AprStrId id)
     say(c, id, NULL, 0);
 }
 
-/* The same sentence on both channels. Used for anything that happens DURING a
- * recording, because that is when the window is least likely to be in front.
- * See the file header on why a live region alone is not enough. */
+/* IS THERE A BETTER CHANNEL THAN A BALLOON RIGHT NOW?
+ *
+ * A balloon is for something the user would otherwise MISS -- never for
+ * confirming what they just did. When the window is in front, the status bar
+ * live region has already said it, and a balloon is pure duplication: a screen
+ * reader reads both, so every event is heard twice. The author put it well
+ * while a test run was flooding his notification centre mid-meeting:
+ *
+ *     "I think notifications only run if we started / stopping recording from
+ *      the system tray, or in case of an error, right?"
+ *
+ * That is exactly right, and it collapses to one test rather than a list of
+ * cases: a tray-initiated action implies the window is not in front, so it
+ * needs no special handling. Hidden to tray, minimised, or simply behind
+ * something else all mean the same thing -- no better channel exists.
+ *
+ * `fg_override` exists because a test cannot make itself the foreground
+ * window reliably: -1 asks the real windowing state, 0 and 1 force it. Same
+ * shape as action_wav.c's write gate. */
+static int a_better_channel_exists(const AprController *c)
+{
+    HWND fg;
+
+    if (!c || !c->frame) return 0;
+    if (c->fg_override >= 0) return c->fg_override;
+    if (!IsWindowVisible(c->frame)) return 0;   /* hidden to the tray */
+    if (IsIconic(c->frame)) return 0;           /* minimised */
+    fg = GetForegroundWindow();
+    return fg == c->frame || IsChild(c->frame, fg);
+}
+
+void apr_controller_test_set_foreground(AprController *c, int state)
+{
+    if (c) c->fg_override = state;
+}
+
+/* The same sentence on both channels -- but only when the second one is the
+ * only one that can reach the user. See a_better_channel_exists(). */
 static void say_and_notify(AprController *c, AprStrId in_window, AprStrId balloon,
                            const wchar_t *const *args, size_t nargs)
 {
     wchar_t text[CTL_TEXT_CCH];
 
     say(c, in_window, args, nargs);
+    if (a_better_channel_exists(c)) return;
     apr_str_format(balloon, text, CTL_TEXT_CCH, args, nargs);
     apr_tray_notify(c->tray, APR_S_UI_TRAY_INFO_TITLE, text);
 }
@@ -493,8 +538,10 @@ static int do_remove_output(AprController *c)
     vt = apr_bus_action_at(b, index);
     lstrcpynW(name, vt ? apr_str(vt->display_name_id) : L"", APR_NAME_CCH);
 
-    /* apr_bus_remove_action FINALIZES before it detaches, so this leaves a
-     * playable file rather than an abandoned one (bus.h). */
+    /* Between recordings there is nothing open to abandon -- an action's life
+     * is one recording now (bus.h) -- so this forgets a plan and touches no
+     * file. If a recording WERE under way, apr_bus_remove_action finalizes
+     * before it detaches, which is why it is still the only route. */
     e = apr_bus_remove_action(b, index);
     if (apr_failed(&e)) APR_LOG_ERR(APR_LOG_WARN, &e);
 
@@ -812,10 +859,19 @@ static int session_from_graph(AprController *c, AprSession *s)
             if (!vt || !vt->id) continue;
             strncpy_s(sb->actions[sb->action_count].id,
                       sizeof sb->actions[0].id, vt->id, _TRUNCATE);
-            /* The path the user chose, remembered beside the output that owns
-             * it so the session reopens writing the same files. */
+            /* THE TEMPLATE, not the file the last take happened to land in:
+             * a session reopened tomorrow must save under tomorrow's name
+             * (bus.h, outpath.h). apr_bus_action_path() is the one the user
+             * gave; apr_bus_action_current_path() is where audio went, and
+             * writing THAT down would freeze a session to one filename. */
             lstrcpynW(sb->actions[sb->action_count].path,
                       apr_bus_action_path(b, k), APR_DISC_PATH_CCH);
+            /* The rest of the spec, which the bus now keeps too. Without
+             * these a session reopened at a different bitrate than it was
+             * saved at, silently. */
+            sb->actions[sb->action_count].bitrate_kbps =
+                apr_bus_action_bitrate(b, k);
+            sb->actions[sb->action_count].quality = apr_bus_action_quality(b, k);
             sb->action_count++;
         }
         s->bus_count++;
@@ -1029,6 +1085,14 @@ static void handle_notice(AprController *c, AprRunNotice *n)
                            CTL_TEXT_CCH, args, 1);
             apr_tray_notify(c->tray, APR_S_UI_TRAY_INFO_TITLE, balloon);
         }
+        break;
+
+    case APR_RUN_EV_OUTPUT_RENAMED:
+        /* The name that was asked for was already a recording. It has been
+         * kept and this take has moved aside (outpath.h) -- which is only
+         * honest if the user is told, so this is said and shown. */
+        args[0] = n->path;
+        say(c, APR_S_UI_ANN_OUTPUT_RENAMED, args, 1);
         break;
 
     case APR_RUN_EV_FINISHING:
@@ -1370,6 +1434,7 @@ AprErr apr_controller_create(AprUiApp *app, AprController **out)
     /* Not fatal if the shell refuses the icon: the window still works. */
     (void)apr_tray_create(c->frame, &c->tray);
 
+    c->fg_override = -1;   /* calloc gives 0, which would MEAN something */
     apr_ui_app_set_command_handler(app, on_command, c);
     apr_ui_app_set_close_handler(app, on_close, c);
     apr_ui_app_set_message_handler(app, on_message, c);

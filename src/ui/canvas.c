@@ -1221,9 +1221,11 @@ static int do_remove(CanvasState *st)
     if (st->node[i].kind == APR_NODE_ACTION) {
         /* This used to be refused out loud, because bus.h had no "remove one
          * action" and inventing one here would have made the canvas a second
-         * owner of the bus's action list. apr_bus_remove_action() now exists
-         * -- and it finalizes before it detaches, so removing an output still
-         * leaves a playable file (AGENTS.md rule 4). */
+         * owner of the bus's action list. apr_bus_remove_action() now exists,
+         * and it finalizes anything it finds open before detaching -- so
+         * removing an output mid-recording still leaves a playable file
+         * (AGENTS.md rule 4), and removing one between recordings touches no
+         * file at all. */
         AprBus *b = apr_graph_bus(st->graph, st->node[i].model_id);
         if (!b) {
             say(st, APR_S_UI_ANN_REMOVE_REFUSED, NULL, 0);

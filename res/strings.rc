@@ -71,7 +71,7 @@
 #define APR_EN_CLI_USAGE_HEADER          "Usage: apprecorder [command] [options]"
 #define APR_EN_CLI_OPT_PID               "--pid <id>             Capture the application with this process id. May be repeated."
 #define APR_EN_CLI_OPT_DEVICE            "--device <name>        Capture this hardware input, for example the GoXLR Chat Mic."
-#define APR_EN_CLI_OPT_OUT               "--out <path>           Write this bus to this file. May be repeated."
+#define APR_EN_CLI_OPT_OUT               "--out <name>           Save this bus to this file. May be repeated."
 #define APR_EN_CLI_OPT_FORMAT            "--format <id>          Write the next --out in this format instead of the one its file extension names."
 #define APR_EN_CLI_OPT_LANG              "--lang <tag>           Interface language, for example en-US or ar-SA."
 
@@ -137,6 +137,10 @@
 #define APR_EN_CLI_OUTPUTS_HEADER               "Outputs. Each one joins the bus opened most recently."
 #define APR_EN_CLI_OPT_BITRATE                  "--bitrate <kbps>       Bitrate for the next --out, where the format has one. 0 leaves it to the encoder."
 #define APR_EN_CLI_OPT_QUALITY                  "--quality <n>          Quality for the next --out, where the format has one. 0 leaves it to the encoder."
+/* The name of an output is a TEMPLATE (include/outpath.h), so the help has
+ * to say what may go in one. One line, because a translator must be able to
+ * rewrite the whole sentence rather than a column of it. */
+#define APR_EN_CLI_OPT_OUT_TOKENS               "--out names may contain {date}, {time}, {bus}, {n} and {ext}. A name that is already a recording is never overwritten: the new take is saved beside it."
 #define APR_EN_CLI_SESSION_HEADER               "The session as a whole."
 #define APR_EN_CLI_OPT_RATE                     "--rate <hz>            Sample rate every source and every file uses. 48000 by default."
 #define APR_EN_CLI_OPT_CHANNELS                 "--channels <n>         Channel count every source and every file uses. 2 by default."
@@ -169,7 +173,7 @@
 #define APR_EN_ERR_OUT_OF_RANGE                 "%1!s! accepts %2!s! up to %3!s!, and it was given %4!s!."
 #define APR_EN_ERR_GAIN_WITHOUT_SOURCE          "--gain sets the gain of the source written before it, so a source has to come first."
 #define APR_EN_ERR_BUS_HAS_NO_SOURCE            "The bus %1!s! has nothing to record. Give it a source with --pid, --exe, --device or --fake."
-#define APR_EN_ERR_BUS_HAS_NO_OUTPUT            "The bus %1!s! has nowhere to go. Give it a file with --out."
+#define APR_EN_ERR_BUS_HAS_NO_OUTPUT            "The bus %1!s! has nowhere to go. Give it a file to save to with --out."
 #define APR_EN_ERR_PID_NOT_RUNNING              "No process on this computer has the id %1!s!."
 #define APR_EN_ERR_EXE_NOT_PLAYING              "Nothing called %1!s! is playing audio right now. Run apprecorder list-apps to see what is."
 #define APR_EN_ERR_EXE_AMBIGUOUS                "Several things called %1!s! are playing audio at once: %2!s!. Name the one you want with --pid."
@@ -189,6 +193,10 @@
 #define APR_EN_WARN_SYSTEM_CAPTURE_LAUNCHER     "If %1!s! is a terminal, a shell or a launcher, then everything you have run from it is held back too, including programs you would not think of as belonging to it."
 #define APR_EN_WARN_STILL_FINISHING             "Still finishing. apprecorder does not abandon a recording part-written, so the files are being closed now."
 #define APR_EN_WARN_ACTION_FAILED               "%1!s! stopped taking audio: %2!s! It is still being closed, and what it holds still plays."
+/* The honest half of the collision policy: the earlier take was kept and
+ * this one moved. Both names, because "saved somewhere else" without the
+ * somewhere is not a sentence anybody can act on. */
+#define APR_EN_WARN_OUTPUT_RENAMED              "That name is already a recording, so this take is being saved as %1!s! instead. Nothing was overwritten."
 #define APR_EN_STATUS_DRY_RUN_HEADER            "Dry run. This is what apprecorder would do, and it is doing none of it."
 #define APR_EN_STATUS_DRY_RUN_OK                "The command line describes a recording apprecorder can make. No audio device was opened and no file was written."
 #define APR_EN_STATUS_PLAN_SESSION              "Session format: %1!s! Hz, %2!s! channels."
@@ -263,7 +271,7 @@
 #define APR_EN_UI_PANE_TREE              "Structure"
 #define APR_EN_UI_PANE_STATUS            "Status"
 #define APR_EN_UI_DESC_CANVAS            "The recording graph, drawn as nodes. Press Tab to move between nodes, and F6 to leave this pane."
-#define APR_EN_UI_DESC_TREE              "The same recording graph as a tree: every bus, the sources feeding it, and the files it writes."
+#define APR_EN_UI_DESC_TREE              "The same recording graph as a tree: every bus, the sources feeding it, and the files it saves."
 #define APR_EN_UI_STATUS_READY           "Ready."
 #define APR_EN_UI_PANE_SPLITTER          "Panel divider"
 #define APR_EN_UI_DESC_SPLITTER          "Sets how much room the structure panel takes. Press the left and right arrow keys to move it, or Home and End for its narrowest and widest."
@@ -328,10 +336,10 @@
 #define APR_EN_UI_NODE_LABEL_SOURCE_GAIN        "Source, %1!s! decibels"
 #define APR_EN_UI_NODE_DESC_SOURCE_FEEDING      "Feeds %1!s!. Press Control and Down Arrow to move to what it feeds, or Control and E to feed another bus."
 #define APR_EN_UI_NODE_DESC_SOURCE_ALONE        "This source feeds nothing yet. Press Control and E, move to a bus, then press Control and E again."
-#define APR_EN_UI_NODE_DESC_BUS_FULL            "Mixes %1!s! and writes %2!s!. Press Control and Up Arrow to move to a source feeding it, or Control and Down Arrow to move to a file it writes."
-#define APR_EN_UI_NODE_DESC_BUS_NO_SOURCES      "Writes %1!s!, but nothing feeds this bus yet. Move to a source, press Control and E, come back here and press Control and E again."
-#define APR_EN_UI_NODE_DESC_BUS_NO_OUTPUTS      "Mixes %1!s!, but this bus writes no file yet. Press Control and 3 to add one."
-#define APR_EN_UI_NODE_DESC_BUS_EMPTY           "Nothing feeds this bus and it writes no file yet."
+#define APR_EN_UI_NODE_DESC_BUS_FULL            "Mixes %1!s! and saves %2!s!. Press Control and Up Arrow to move to a source feeding it, or Control and Down Arrow to move to a file it saves."
+#define APR_EN_UI_NODE_DESC_BUS_NO_SOURCES      "Saves %1!s!, but nothing feeds this bus yet. Move to a source, press Control and E, come back here and press Control and E again."
+#define APR_EN_UI_NODE_DESC_BUS_NO_OUTPUTS      "Mixes %1!s!, but this bus saves no file yet. Press Control and 3 to add one."
+#define APR_EN_UI_NODE_DESC_BUS_EMPTY           "Nothing feeds this bus and it saves no file yet."
 #define APR_EN_UI_NODE_DESC_ACTION              "Written from %1!s!. Press Control and Up Arrow to move to that bus."
 #define APR_EN_UI_LIST_PAIR                     "%1!s! and %2!s!"
 #define APR_EN_UI_LIST_MORE                     "%1!s!, %2!s!"
@@ -344,7 +352,7 @@
 #define APR_EN_UI_ANN_DISCONNECT_NONE           "%1!s! was not feeding %2!s!."
 #define APR_EN_UI_ANN_CANCELLED                 "Cancelled."
 #define APR_EN_UI_ANN_REMOVED                   "%1!s! removed."
-#define APR_EN_UI_ANN_REMOVE_REFUSED            "A file is removed together with the bus that writes it, not on its own."
+#define APR_EN_UI_ANN_REMOVE_REFUSED            "A file is removed together with the bus that saves it, not on its own."
 #define APR_EN_UI_ANN_GAIN                      "%1!s!, %2!s! decibels."
 #define APR_EN_UI_ANN_GAIN_NO_EDGE              "%1!s! feeds no bus yet, so there is no level to set."
 #define APR_EN_UI_ANN_NO_EDGE_DOWN              "%1!s! feeds nothing yet."
@@ -394,7 +402,7 @@
  * welded to the end by C. */
 
 #define APR_EN_UI_TREE_NAME                     "Recording graph"
-#define APR_EN_UI_TREE_DESC                     "Every bus in this session, the sources feeding it and the files it writes. Up Arrow and Down Arrow move through the graph, Left Arrow and Right Arrow collapse and expand a bus, and typing the first letters of a name jumps to it."
+#define APR_EN_UI_TREE_DESC                     "Every bus in this session, the sources feeding it and the files it saves. Up Arrow and Down Arrow move through the graph, Left Arrow and Right Arrow collapse and expand a bus, and typing the first letters of a name jumps to it."
 #define APR_EN_UI_TREE_EMPTY                    "This session has no buses yet. Use Add Bus on the Edit menu to make one."
 #define APR_EN_UI_TREE_UNASSIGNED_GROUP         "Sources not connected to any bus"
 #define APR_EN_UI_TREE_BUS                      "%1!s!, bus, mixing %2!s! to %3!s!"
@@ -499,7 +507,7 @@
 #define APR_EN_UI_ANN_ARM_FAILED         "Some sources could not be started. The recording continues without them."
 #define APR_EN_UI_ANN_SOURCE_DIED        "%1!s! has exited. It records silence from here on."
 #define APR_EN_UI_ANN_SOURCE_MUTED       "%1!s! is muted in the Windows volume mixer, so it records silence."
-#define APR_EN_UI_ANN_ACTION_FAILED      "%1!s! stopped writing: %2!s! The file that exists is still playable."
+#define APR_EN_UI_ANN_ACTION_FAILED      "%1!s! stopped saving: %2!s! The file that exists is still playable."
 #define APR_EN_UI_ANN_ALREADY_RECORDING  "A recording is already running."
 #define APR_EN_UI_ANN_NOT_RECORDING      "Nothing is being recorded."
 #define APR_EN_UI_ANN_NOTHING_TO_RECORD  "There is nothing to record yet. Add a source, a bus and an output first."
@@ -515,6 +523,7 @@
 #define APR_EN_UI_CLOSE_KEEP_RECORDING   "Keep recording"
 #define APR_EN_UI_CLOSE_TO_TRAY          "Leave it recording in the notification area"
 #define APR_EN_UI_ANN_CLOSING_FILES      "Closing the files. This window will close when they are safely written."
+#define APR_EN_UI_ANN_OUTPUT_RENAMED     "That name is already a recording, so this take is being saved as %1!s! instead. Nothing was overwritten."
 
 /* ---- dialogs ---- */
 #define APR_EN_UI_DLG_OK                   "OK"
@@ -542,12 +551,13 @@
 #define APR_EN_UI_DLG_RENAME_BUS_TITLE     "Rename this bus"
 #define APR_EN_UI_DLG_BUS_NAME             "Bus name"
 #define APR_EN_UI_DLG_ADD_OUTPUT_TITLE     "Add an output"
-#define APR_EN_UI_DLG_OUT_BUS              "Which bus to write"
+#define APR_EN_UI_DLG_OUT_BUS              "Which bus to record"
 #define APR_EN_UI_DLG_OUT_FORMAT           "Format"
-#define APR_EN_UI_DLG_OUT_PATH             "File to write"
+#define APR_EN_UI_DLG_OUT_PATH             "Save to file"
+#define APR_EN_UI_DLG_OUT_PATH_TOKENS     "The name may contain {date}, {time}, {bus}, {n} and {ext}. A name that is already a recording is never overwritten."
 #define APR_EN_UI_DLG_OUT_BITRATE          "Bitrate in kilobits per second, 0 for the format's own default"
 #define APR_EN_UI_DLG_OUT_QUALITY          "Quality, 0 for the format's own default"
-#define APR_EN_UI_DLG_SAVE_AUDIO_TITLE     "Where to write this recording"
+#define APR_EN_UI_DLG_SAVE_AUDIO_TITLE     "Where to save this recording"
 #define APR_EN_UI_DLG_FILTER_AUDIO         "Audio files"
 #define APR_EN_UI_DLG_FILTER_ALL           "All files"
 #define APR_EN_UI_DLG_FILTER_SESSION       "apprecorder sessions"
@@ -575,13 +585,13 @@
 #define APR_EN_UI_DLG_ABOUT_TITLE          "About apprecorder"
 #define APR_EN_UI_DLG_ABOUT_BODY           "%1!s! -- %2!s!"
 #define APR_EN_UI_DLG_NAME_NEEDED          "Give it a name first."
-#define APR_EN_UI_DLG_PATH_NEEDED          "Choose a file to write first."
+#define APR_EN_UI_DLG_PATH_NEEDED          "Choose where to save the recording first."
 #define APR_EN_UI_DLG_PICK_NEEDED          "Choose something from the list first."
-#define APR_EN_UI_DLG_NO_BUSES             "There is no bus to write yet. Add a bus first."
+#define APR_EN_UI_DLG_NO_BUSES             "There is no bus to record yet. Add a bus first."
 #define APR_EN_UI_DLG_SOURCE_ADDED         "Added %1!s!."
 #define APR_EN_UI_DLG_BUS_ADDED            "Added the bus %1!s!."
 #define APR_EN_UI_DLG_BUS_RENAMED          "The bus is now called %1!s!."
-#define APR_EN_UI_DLG_OUTPUT_ADDED         "%1!s! will be written to %2!s!."
+#define APR_EN_UI_DLG_OUTPUT_ADDED         "%1!s! will be saved to %2!s!."
 #define APR_EN_UI_DLG_ADD_FAILED           "That could not be added: %1!s!"
 #define APR_EN_UI_DLG_SESSION_LOADED       "Loaded the session %1!s!."
 #define APR_EN_UI_DLG_SESSION_SAVED        "Saved the session to %1!s!."
@@ -591,9 +601,9 @@
 #define APR_EN_UI_DLG_KEY_CTRL             "Ctrl"
 #define APR_EN_UI_DLG_KEY_SHIFT            "Shift"
 #define APR_EN_UI_DLG_KEY_ALT              "Alt"
-#define APR_EN_UI_DLG_OUTPUT_REMOVED       "%1!s! is no longer being written."
+#define APR_EN_UI_DLG_OUTPUT_REMOVED       "%1!s! is no longer being saved."
 #define APR_EN_UI_DLG_PICK_OUTPUT          "Which output to remove"
-#define APR_EN_UI_DLG_OUTPUT_ROW           "%1!s! to %2!s!"
+#define APR_EN_UI_DLG_OUTPUT_ROW           "%1!s! saved from %2!s!"
 
 /* ---- the notification area ---- */
 #define APR_EN_UI_TRAY_ICON_NAME           "apprecorder"
@@ -610,7 +620,7 @@
 #define APR_EN_UI_TRAY_INFO_STOPPED        "Recording stopped. %1!s! recorded."
 #define APR_EN_UI_TRAY_INFO_SOURCE_DIED    "%1!s! has exited. It records silence from here on."
 #define APR_EN_UI_TRAY_INFO_SOURCE_MUTED   "%1!s! is muted in Windows, so it records silence."
-#define APR_EN_UI_TRAY_INFO_ACTION_FAILED  "%1!s! stopped writing. The file that exists is still playable."
+#define APR_EN_UI_TRAY_INFO_ACTION_FAILED  "%1!s! stopped saving. The file that exists is still playable."
 #define APR_EN_UI_TRAY_INFO_MINIMIZED      "apprecorder is still running here. Press Windows+B and then the arrow keys to reach it."
 
 #define APR_EN_UI_MENU_DISCONNECT           "&Disconnect\tCtrl+Shift+E"
@@ -770,6 +780,7 @@ END
 #define APR_AR_CLI_OUTPUTS_HEADER(id)           /* not translated yet */
 #define APR_AR_CLI_OPT_BITRATE(id)              /* not translated yet */
 #define APR_AR_CLI_OPT_QUALITY(id)              /* not translated yet */
+#define APR_AR_CLI_OPT_OUT_TOKENS(id)           /* not translated yet */
 #define APR_AR_CLI_SESSION_HEADER(id)           /* not translated yet */
 #define APR_AR_CLI_OPT_RATE(id)                 /* not translated yet */
 #define APR_AR_CLI_OPT_CHANNELS(id)             /* not translated yet */
@@ -822,6 +833,7 @@ END
 #define APR_AR_WARN_SYSTEM_CAPTURE_LAUNCHER(id) /* not translated yet */
 #define APR_AR_WARN_STILL_FINISHING(id)         /* not translated yet */
 #define APR_AR_WARN_ACTION_FAILED(id)           /* not translated yet */
+#define APR_AR_WARN_OUTPUT_RENAMED(id)          /* not translated yet */
 #define APR_AR_STATUS_DRY_RUN_HEADER(id)        /* not translated yet */
 #define APR_AR_STATUS_DRY_RUN_OK(id)            /* not translated yet */
 #define APR_AR_STATUS_PLAN_SESSION(id)          /* not translated yet */
@@ -1038,6 +1050,7 @@ END
 #define APR_AR_UI_CLOSE_KEEP_RECORDING(id)   /* not translated yet */
 #define APR_AR_UI_CLOSE_TO_TRAY(id)          /* not translated yet */
 #define APR_AR_UI_ANN_CLOSING_FILES(id)      /* not translated yet */
+#define APR_AR_UI_ANN_OUTPUT_RENAMED(id)        /* not translated yet */
 
 #define APR_AR_UI_DLG_OK(id)                   /* not translated yet */
 #define APR_AR_UI_DLG_CANCEL(id)               /* not translated yet */
@@ -1067,6 +1080,7 @@ END
 #define APR_AR_UI_DLG_OUT_BUS(id)              /* not translated yet */
 #define APR_AR_UI_DLG_OUT_FORMAT(id)           /* not translated yet */
 #define APR_AR_UI_DLG_OUT_PATH(id)             /* not translated yet */
+#define APR_AR_UI_DLG_OUT_PATH_TOKENS(id)  /* not translated yet */
 #define APR_AR_UI_DLG_OUT_BITRATE(id)          /* not translated yet */
 #define APR_AR_UI_DLG_OUT_QUALITY(id)          /* not translated yet */
 #define APR_AR_UI_DLG_SAVE_AUDIO_TITLE(id)     /* not translated yet */

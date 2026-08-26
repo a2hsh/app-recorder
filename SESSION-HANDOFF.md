@@ -4716,3 +4716,269 @@ for this window, because the mechanism above is the MSAA one.
   so it marshals, but nobody has yet put an out-of-process client on the running
   app and read the name back.
 - Device capture is still never `start()`ed by any test.
+
+---
+
+## 2026-08-26 (evening) — AN ACTION'S LIFETIME IS ONE RECORDING, AND A TAKE IS NEVER OVERWRITTEN
+
+**30 suites, 568 cases, 24,497 assertions, 0 failures — Debug and Release,
+`/W4 /WX` clean.** One new suite (`tests/test_outpath.c`, 18 cases), one new
+module, three defects fixed. The author reported the first one while testing.
+
+### The report, and why all three of its symptoms are one bug
+
+> *"I recorded a file called test.mp3, stopped, listened to it, and then
+> recorded again and stopped. Turns out the file was not updated with the new
+> recording, so I deleted it and recorded again, but the new file wasn't
+> there."*
+
+`apr_bus_add_action()` called `vt->create(cfg, &state)` **immediately**, so the
+output file was opened when the user ADDED the output. The runner never created
+actions; it used the existing ones and finalized them at stop.
+
+- Take 1 worked. `finalize` closed the encoder **permanently**.
+- Take 2 wrote nothing: the action was finalized and `on_audio` refused.
+- After the delete, Windows kept the handle valid with **no directory entry**,
+  so take 3 went to a file with no name and appeared to vanish.
+
+### Fix 1 — the lifetime (`include/bus.h`, `src/core/bus.c`)
+
+**A bus now holds a SPEC — the vtable plus its config — not an open encoder.**
+
+| when | what happens |
+|---|---|
+| `apr_bus_add_action` | records the spec; **validates the path**; creates nothing |
+| `apr_bus_start` | resolves each name and calls `create` — the file appears here |
+| `apr_bus_stop` | `finalize`, then `destroy`, then `state = NULL` |
+
+`close_action()` is the single teardown, so finalize-then-destroy has exactly
+one order and `apr_bus_remove_action` / `apr_bus_stop` / `apr_bus_destroy` all
+share it. Failed flags are cleared at **start**, not at stop, so a caller can
+still ask after the fact which output went wrong.
+
+### Where the early validation went (a deliberate trade, not a loss)
+
+Opening the file used to be what caught an unwritable path — at add time, while
+the person who typed it was still there. The OPEN moved to record time; the
+**CHECK stayed**. `apr_bus_add_action` calls `apr_out_validate()`, which
+expands the template and asks the folder whether something may be created in
+it, **leaving nothing behind**. Validate at add, open at record.
+
+### Fix 2 — `src/platform/outpath.c` + `include/outpath.h` (new)
+
+One owner for three questions three callers were about to ask separately: can
+this path be written, what does this name expand to, what happens when it is
+taken. `cli.c`'s private `probe_writable` was folded into it (AGENTS.md rule 3).
+
+**Template syntax** — braces, so an ordinary Windows path is its own template:
+
+| token | expands to |
+|---|---|
+| `{date}` | `2026-08-26` |
+| `{time}` | `14-03-52` (hyphens: a colon opens an ADS, not a recording) |
+| `{bus}` | the bus name, with `< > : " / \ | ? *` and controls replaced by `-` |
+| `{ext}` | the extension the chosen format writes |
+| `{n}` | the lowest number for which the whole path does not exist **on disk** |
+| `{{` | a literal `{` |
+
+An unknown token is copied through unchanged — a brace is legal in a path and
+nothing that used to work may stop.
+
+**Default:** `%USERPROFILE%\Music\{bus} {date} {time}.{ext}`, pre-filled into
+the Add Output dialog. It ends in `{ext}` so it follows the format combo
+instead of going stale at `.wav`. Environment variable rather than shell32, so
+the module stays pure file system and needs no COM apartment.
+
+**COLLISION POLICY: AUTO-INCREMENT, NOT A PROMPT.** `mix.wav` becomes
+`mix-2.wav`, then `mix-3.wav`. Three reasons, spelled out in `outpath.h`:
+
+1. There is often nobody to ask — this runs from the runner at the instant
+   recording starts, which is also `--quiet` in a script or a scheduled task.
+   A prompt cannot be the single policy for both front ends.
+2. **A modal between the press and the first sample is lost audio.** The thing
+   being recorded does not wait for a dialog.
+3. A Record key that just records is the right shape for this user.
+
+**And it is never silent.** `apr_out_resolve` reports whether it had to move
+the name aside; the bus keeps it (`apr_bus_action_renamed`); the runner raises
+the new `APR_RUN_EV_OUTPUT_RENAMED`; the CLI warns and the UI announces *"That
+name is already a recording, so this take is being saved as X instead. Nothing
+was overwritten."* A `{n}` template never reports — asking for a number and
+getting one is not a surprise.
+
+### Two paths, and both are needed
+
+- `apr_bus_action_path()` — **what the user asked for**, tokens and all. This
+  is what a session file stores, so reopening tomorrow records under tomorrow's
+  name rather than freezing to yesterday's filename.
+- `apr_bus_action_current_path()` — **where the audio actually went**. What the
+  CLI's "Recording to" / "Finishing" / "Wrote" lines now print (they printed
+  the plan's argument before, which would name a file that does not exist), and
+  what the rename announcement carries.
+
+Session save also round-trips `bitrateKbps` and `quality` now — the bus keeps
+the whole spec, and the schema already had the fields.
+
+### Fix 3 — the register (`res/strings.rc`, English only)
+
+The author: *"the naming of the recording is a bit too technical for end users:
+it says 'write file to' instead of 'save file to'."* He is right — this is a
+recorder for people, not a signal-flow tool. Reworded, with no id churn:
+
+`UI_DLG_OUT_PATH` "File to write" -> **"Save to file"**; `UI_DLG_OUT_BUS`
+"Which bus to write" -> "Which bus to record"; `UI_DLG_SAVE_AUDIO_TITLE`
+"Where to write" -> "Where to save"; `UI_DLG_PATH_NEEDED` -> "Choose where to
+save the recording first."; `UI_DLG_NO_BUSES` "no bus to write" -> "no bus to
+record"; `UI_DLG_OUTPUT_ADDED` "will be written to" -> "will be saved to";
+`UI_DLG_OUTPUT_REMOVED` "no longer being written" -> "no longer being saved";
+`UI_DLG_OUTPUT_ROW` "%1 to %2" -> "%1 saved from %2"; `UI_ANN_ACTION_FAILED`
+and `UI_TRAY_INFO_ACTION_FAILED` "stopped writing" -> "stopped saving"; the
+four `UI_NODE_DESC_BUS_*` descriptions plus `UI_ANN_REMOVE_REFUSED`,
+`UI_DESC_TREE` and `UI_TREE_DESC` "writes" -> "saves"; `CLI_OPT_OUT` "Write
+this bus to this file" -> "Save this bus to this file";
+`ERR_BUS_HAS_NO_OUTPUT` gained "to save to".
+
+**Four new ids only**, each declared untranslated in the ar-SA block:
+`CLI_OPT_OUT_TOKENS`, `WARN_OUTPUT_RENAMED`, `UI_ANN_OUTPUT_RENAMED`,
+`UI_DLG_OUT_PATH_TOKENS`. (500+ Arabic strings are already pending.)
+
+### A fourth thing, found on the way: failures were only reported at the END
+
+`report_action_failures()` ran once, after `apr_graph_stop()`. An encoder that
+died at minute two was announced when the recording finished. It is now
+`poll_actions()`, called before "started" and on every tick, with a per-output
+bit in `BusSlot` so each thing is said exactly once. An output that cannot even
+be **created** is therefore audible at the start of the run rather than an hour
+later.
+
+### Verified RED, and one honest limitation
+
+Both halves were reinstated and the suites re-run:
+
+- **Old lifetime** (create at add, finalize once, never reopen):
+  `test_ui_behaviour`'s `recording_twice_through_one_graph...` went **red**.
+  `test_cli`'s stayed **green** — and that is not a weak case, it is what the
+  command line can see: every `apr_cli_run` builds and destroys its own graph,
+  so a CLI invocation cannot reach the lifetime defect at all. The UI keeps one
+  graph across both presses, which is exactly what the author did. The comment
+  in `test_cli.c` says so, so nobody reads those cases as lifetime coverage.
+- **No collision policy**: `test_cli`'s record-twice, `test_outpath`'s
+  `a_name_that_is_already_a_recording_is_never_overwritten` and
+  `test_ui_behaviour`'s rename announcement all went **red**.
+
+### Tests
+
+- `tests/test_outpath.c` (new, 18) — tokens, sanitising, `{{`, overflow, the
+  collision policy including the third take and a dot in a folder name, `{n}`
+  resolved against the disk, the probe leaving an existing file alone, the
+  early check.
+- `tests/test_cli.c` (+8) — record twice to one name -> two playable files;
+  delete between takes -> it comes back; the moved take named in BOTH the
+  warning and the closing summary; a template expands to the file; two buses
+  may share one template; two templates naming one file are still a duplicate;
+  a template is never probed with its braces in it; the help says what may go
+  in a name.
+- `tests/test_ui_behaviour.c` (+5) — **this suite had never pressed Record.**
+  Two takes through one graph -> two playable files with take one intact;
+  delete between takes -> it comes back; the rename announced DURING the take
+  (afterwards you would only catch the stop sentence); an unwritable folder
+  refused at ADD time with nothing created; a writable one accepted at add time
+  with nothing created.
+
+### AGENTS.md rule 1 disclosure
+
+**Nothing was rendered to any output device. No audio was played at all.**
+`APR_SRC_FAKE` throughout; no endpoint was opened in either direction; the
+hardware-enumerating dialogs were opened and CANCELLED. Every WAV produced was
+under `%TEMP%` and has been deleted, including the ones the RED experiments'
+early exits left behind. `spike_silentplayer` was not needed or run.
+
+### For the author
+
+The Release `apprecorder_ui_app.exe` was locked (the app was running), so the
+**old image was renamed to `apprecorder_ui_app.locked-20260826-123014.exe`**
+rather than killing the process. It is safe to delete once that instance exits.
+Debug relinked with no trouble.
+
+### Still open
+
+- `{n}` is resolved against the disk, so a folder something else is also
+  writing into could hand out the same number twice in a race. `CREATE_ALWAYS`
+  in the WAV action means the loser would be overwritten. Not reachable from
+  one process.
+- The Add Output dialog grew to 216 dialog units for the token hint, sized for
+  Arabic (26 units, not the 14 English needs). Not yet seen with a translated
+  string in it.
+- `apr_bus_add_action` now refuses while the bus is running. The UI already
+  disabled editing during a recording, so nothing reaches it — but it is a new
+  refusal and nothing tests it.
+
+---
+
+## 2026-08-26 — Notification flood (my fault, twice over) + per-recording lifetime
+
+**30/30 suites green, Release.**
+
+### The flood: a TEST was notifying a real person
+
+Three suites build a real `AprController`, which builds a real `AprTray`, which
+registers a real shell icon — so **every run of the test suite fired real
+Windows notifications at the author, announced aloud by his screen reader.** He
+was in a meeting: *"I can't focus, I'm on a meeting and I got so many
+notifications, still getting them."*
+
+I made it worse by running the full suite myself while he was on that call, on
+top of an app instance I had left running.
+
+**Fix:** `apr_tray_create` skips the shell registration when
+`APPRECORDER_NO_TRAY` is set. The tray object stays real, so the tests still
+exercise its logic; only the registration is skipped, and everything downstream
+(`tip`, menu, `notify`) is already gated on `t->added`, so it all no-ops with no
+further checks. **Set by CMake for every test**, present and future, so a new UI
+suite cannot forget.
+
+**Rule worth keeping: a test must leave no trace on the machine running it.**
+Notification area, clipboard, audio device, foreground window — all of it.
+
+### The balloon rule — the author's formulation, which was better than mine
+
+> *"I think notifications only run if we started / stopping recording from the
+> system tray, or in case of an error, right?"*
+
+Exactly right, and it collapses to **one** test rather than a list of cases:
+**balloon only when the window is not in front.** A tray-initiated action
+implies the window is not in front, so it needs no special case at all. Hidden
+to tray, minimised, or simply behind something else all mean the same thing —
+no better channel exists.
+
+`say_and_notify()` fired **unconditionally** before, with no foreground check
+anywhere in the file. Now `a_better_channel_exists()` gates it. `fg_override`
+(-1 real, 0/1 forced) exists because a test cannot reliably make itself the
+foreground window — same shape as `action_wav.c`'s write gate. **It defaults to
+-1 explicitly, because `calloc` gives 0 and 0 would mean something.**
+
+The file header said *"EVERY STATE CHANGE IS SAID TWICE… ON PURPOSE"*. It now
+says once, on whichever channel can reach the user — **instead, not as well**.
+Note this only became audible after commit `1a436be` fixed the live region;
+before that the duplication was silent because the first channel was dead.
+
+### Per-recording action lifetime — the `test.mp3` bug — LANDED
+
+The killed agent got further than expected. Tests now passing:
+
+- `recording_twice_through_one_graph_leaves_two_playable_files`
+- `a_take_deleted_between_recordings_comes_back`
+- `a_writable_name_is_accepted_at_add_time_and_still_creates_nothing`
+- `an_output_whose_folder_is_not_there_is_refused_when_it_is_added`
+- `a_take_that_moved_aside_is_announced_while_it_is_happening`
+
+So: the file is **no longer created when the output is added**, early validation
+of the path is **kept** at add time, recording twice yields two files, a deleted
+take comes back, and a collision **moves the old take aside** rather than
+overwriting it — announced while it happens.
+
+### Still outstanding
+
+- The wording pass (*"write file to"* → *"save file to"*) and filename
+  templating were in the same brief and are **not confirmed done** — verify.
+- The `command` action for Gemini transcription is approved and queued.

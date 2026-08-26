@@ -47,6 +47,14 @@ typedef struct SourceSlot {
 typedef struct BusSlot {
     AprBusId        id;
     volatile LONG64 frames;
+
+    /* Loop thread only. One bit per output, so that "this output failed" and
+     * "this output was renamed" are each said ONCE. Without them, moving the
+     * failure report into the loop -- which is what makes an output that
+     * cannot even be created audible at the START of a run -- would repeat the
+     * same sentence a hundred times a second. */
+    unsigned char reported_failed[APR_MAX_ACTIONS_PER_BUS];
+    unsigned char reported_renamed[APR_MAX_ACTIONS_PER_BUS];
 } BusSlot;
 
 struct AprRunner {
@@ -97,8 +105,9 @@ static int load32(const volatile LONG *p)
  * Notices
  * ----------------------------------------------------------------------- */
 
-static void notice(AprRunner *r, AprRunEvent ev, size_t src, size_t bus,
-                   size_t action, const wchar_t *name, const AprErr *err)
+static void notice_path(AprRunner *r, AprRunEvent ev, size_t src, size_t bus,
+                        size_t action, const wchar_t *name,
+                        const wchar_t *path, const AprErr *err)
 {
     AprRunNotice n;
 
@@ -111,8 +120,15 @@ static void notice(AprRunner *r, AprRunEvent ev, size_t src, size_t bus,
     n.action_index = action;
     n.err          = err ? *err : apr_ok();
     if (name) lstrcpynW(n.name, name, (int)APR_NAME_CCH);
+    if (path) lstrcpynW(n.path, path, (int)APR_OUT_PATH_CCH);
 
     r->observer(r->user, &n);
+}
+
+static void notice(AprRunner *r, AprRunEvent ev, size_t src, size_t bus,
+                   size_t action, const wchar_t *name, const AprErr *err)
+{
+    notice_path(r, ev, src, bus, action, name, NULL, err);
 }
 
 /* --------------------------------------------------------------------------
@@ -176,22 +192,42 @@ static void sample_bus_frames(AprRunner *r)
     }
 }
 
-static void report_action_failures(AprRunner *r)
+/* WHAT EACH OUTPUT IS DOING, said once each.
+ *
+ * Called every tick, not only at the end. An output whose file could not even
+ * be created fails inside apr_bus_start(), and reporting that only at
+ * apr_graph_stop() would have told the author an hour after it mattered. The
+ * per-output bits above are what keep "once each" true at 100 Hz. */
+static void poll_actions(AprRunner *r)
 {
     size_t bi, k;
 
     for (bi = 0; bi < r->bus_count; bi++) {
         AprBus *b = apr_graph_bus(r->graph, r->bus[bi].id);
         if (!b) continue;
-        for (k = 0; k < apr_bus_action_count(b); k++) {
-            if (apr_bus_action_failed(b, k)) {
-                const AprActionVTable *vt = apr_bus_action_at(b, k);
+        for (k = 0; k < apr_bus_action_count(b) &&
+                    k < APR_MAX_ACTIONS_PER_BUS; k++) {
+            const AprActionVTable *vt = apr_bus_action_at(b, k);
+            const wchar_t *who = (vt && vt->display_name_id)
+                                   ? apr_str(vt->display_name_id)
+                                   : apr_bus_name(b);
+
+            /* The name that was asked for is not the name on disk: the take
+             * that was already there has been kept and this one has moved.
+             * Said out loud, because the alternative to a surprise here is a
+             * lost recording (outpath.h). */
+            if (apr_bus_action_renamed(b, k) && !r->bus[bi].reported_renamed[k]) {
+                r->bus[bi].reported_renamed[k] = 1;
+                notice_path(r, APR_RUN_EV_OUTPUT_RENAMED, SIZE_MAX, bi, k, who,
+                            apr_bus_action_current_path(b, k), NULL);
+            }
+
+            if (apr_bus_action_failed(b, k) && !r->bus[bi].reported_failed[k]) {
                 AprErr e = apr_bus_action_error(b, k);
-                const wchar_t *who = (vt && vt->display_name_id)
-                                       ? apr_str(vt->display_name_id)
-                                       : apr_bus_name(b);
+                r->bus[bi].reported_failed[k] = 1;
                 InterlockedExchange(&r->incomplete, 1);
-                notice(r, APR_RUN_EV_ACTION_FAILED, SIZE_MAX, bi, k, who, &e);
+                notice_path(r, APR_RUN_EV_ACTION_FAILED, SIZE_MAX, bi, k, who,
+                            apr_bus_action_current_path(b, k), &e);
             }
         }
     }
@@ -229,6 +265,11 @@ AprErr apr_runner_run(AprRunner *r)
     }
     start = apr_qpc_now();
 
+    /* BEFORE "started", not after. The files exist by now -- apr_graph_start()
+     * is what created them -- so an output that could not be opened, or one
+     * that had to move aside for a take already on disk, is said first and the
+     * "recording to ..." line that follows is then true. */
+    poll_actions(r);
     notice(r, APR_RUN_EV_STARTED, SIZE_MAX, SIZE_MAX, SIZE_MAX, NULL, NULL);
 
     for (;;) {
@@ -252,6 +293,7 @@ AprErr apr_runner_run(AprRunner *r)
         now = apr_qpc_now();
         (void)apr_graph_tick(r->graph, now);
         poll_sources(r);
+        poll_actions(r);
         sample_bus_frames(r);
 
         elapsed_ms = (int64_t)apr_mul_div_u64(now - start, 1000u, freq, NULL);
@@ -272,7 +314,7 @@ AprErr apr_runner_run(AprRunner *r)
     notice(r, APR_RUN_EV_FINISHING, SIZE_MAX, SIZE_MAX, SIZE_MAX, NULL, NULL);
 
     e = apr_graph_stop(r->graph);
-    report_action_failures(r);
+    poll_actions(r);
     if (apr_failed(&e)) InterlockedExchange(&r->incomplete, 1);
 
     InterlockedExchange(&r->running, 0);

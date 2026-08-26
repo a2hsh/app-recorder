@@ -58,6 +58,7 @@
 #include "discover.h"
 #include "graph.h"
 #include "log.h"
+#include "outpath.h"
 #include "runner.h"
 #include "session.h"
 #include "strings.h"
@@ -982,30 +983,33 @@ static const AprActionVTable *action_for_extension(const wchar_t *ext)
     return NULL;
 }
 
-/* Can this path be created and written? Creates nothing that was not already
- * there: a file it had to create is deleted again, which is what makes this
- * safe inside --dry-run. */
-static AprErr probe_writable(const wchar_t *path)
-{
-    HANDLE h;
-    BOOL   created;
-
-    SetLastError(0);
-    h = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                    NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h == INVALID_HANDLE_VALUE)
-        return APR_ERR_LAST(L"cannot write %ls", path);
-
-    created = (GetLastError() != ERROR_ALREADY_EXISTS);
-    CloseHandle(h);
-    if (created) DeleteFileW(path);
-    return apr_ok();
-}
+/* "Can this path be created and written" lives in src/platform/outpath.c now:
+ * the bus needs the same answer at the moment an output is added, and two
+ * copies of a CreateFileW probe would be exactly the DRY failure AGENTS.md
+ * rule 3 names (outpath.h). What was here is what is there. */
 
 static void full_path(const wchar_t *in, wchar_t *out, size_t cch)
 {
     if (GetFullPathNameW(in, (DWORD)cch, out, NULL) == 0)
         copy_cch(out, cch, in);
+}
+
+/* An output path is a TEMPLATE (outpath.h), so every question below -- is this
+ * writable, is it the same file as that one -- has to be asked of what it
+ * expands to and never of the braces themselves. Probing "mix.{ext}" literally
+ * would create a file called exactly that. */
+static void expanded_output_path(const AprCliBus *b, const AprCliOutput *o,
+                                 wchar_t *out, size_t cch)
+{
+    AprOutContext ctx;
+    const AprActionVTable *vt = apr_action_find(o->action_id);
+    AprErr e;
+
+    ctx.bus_name  = b->name;
+    ctx.extension = vt ? vt->extension : NULL;
+
+    e = apr_out_expand(o->path, &ctx, out, cch);
+    if (apr_failed(&e)) copy_cch(out, cch, o->path);
 }
 
 /* One predicate, used both to count matches and to list them. */
@@ -1276,19 +1280,27 @@ AprCliExit apr_cli_resolve(AprCliPlan *plan, const AprCliIo *io)
                 return fail(&cx, APR_CLI_CONFIG, APR_S_ERR_UNKNOWN_FORMAT, args, 1);
             }
 
-            /* Two recordings cannot share a file, and the comparison has to be
-             * of the resolved paths -- "a.wav" and ".\a.wav" are one file. */
+            /* Two recordings cannot share a file, and the comparison has to
+             * be of the EXPANDED, resolved paths: "a.wav" and ".\a.wav" are
+             * one file, while two buses both saving to "{bus}.wav" are not --
+             * comparing the templates would refuse that second, correct, case
+             * out of hand. */
             {
-                wchar_t mine[APR_CLI_SPEC_CCH];
+                wchar_t mine[APR_CLI_SPEC_CCH], full_mine[APR_CLI_SPEC_CCH];
                 size_t  bj, oj;
-                full_path(o->path, mine, APR_CLI_SPEC_CCH);
+
+                expanded_output_path(b, o, mine, APR_CLI_SPEC_CCH);
+                full_path(mine, full_mine, APR_CLI_SPEC_CCH);
+
                 for (bj = 0; bj <= bi; bj++) {
                     size_t limit = (bj == bi) ? oi : plan->buses[bj].output_count;
                     for (oj = 0; oj < limit; oj++) {
-                        wchar_t other[APR_CLI_SPEC_CCH];
-                        full_path(plan->buses[bj].outputs[oj].path, other,
-                                  APR_CLI_SPEC_CCH);
-                        if (ieq(mine, other)) {
+                        wchar_t other[APR_CLI_SPEC_CCH], full_other[APR_CLI_SPEC_CCH];
+                        expanded_output_path(&plan->buses[bj],
+                                             &plan->buses[bj].outputs[oj],
+                                             other, APR_CLI_SPEC_CCH);
+                        full_path(other, full_other, APR_CLI_SPEC_CCH);
+                        if (ieq(full_mine, full_other)) {
                             args[0] = o->path;
                             return fail(&cx, APR_CLI_CONFIG,
                                         APR_S_ERR_DUPLICATE_OUTPUT, args, 1);
@@ -1297,13 +1309,25 @@ AprCliExit apr_cli_resolve(AprCliPlan *plan, const AprCliIo *io)
                 }
             }
 
-            e = probe_writable(o->path);
-            if (apr_failed(&e)) {
-                wchar_t why[512];
-                args[0] = o->path;
-                args[1] = errtext(&e, why, 512);
-                return fail(&cx, APR_CLI_OUTPUT, APR_S_ERR_OUTPUT_NOT_WRITABLE,
-                            args, 2);
+            /* THE EARLY CHECK, and it is the same one the bus makes when a UI
+             * adds an output: expand the name and ask the folder whether
+             * something may be created in it. Nothing is opened for the
+             * recording here -- that happens at apr_bus_start() (bus.h). */
+            {
+                AprOutContext ctx;
+                const AprActionVTable *ovt = apr_action_find(o->action_id);
+                wchar_t shown[APR_CLI_SPEC_CCH];
+
+                ctx.bus_name  = b->name;
+                ctx.extension = ovt ? ovt->extension : NULL;
+                e = apr_out_validate(o->path, &ctx, shown, APR_CLI_SPEC_CCH);
+                if (apr_failed(&e)) {
+                    wchar_t why[512];
+                    args[0] = shown[0] ? shown : o->path;
+                    args[1] = errtext(&e, why, 512);
+                    return fail(&cx, APR_CLI_OUTPUT,
+                                APR_S_ERR_OUTPUT_NOT_WRITABLE, args, 2);
+                }
             }
         }
     }
@@ -1333,7 +1357,8 @@ static void print_usage(const Ctx *cx)
         APR_S_CLI_OPT_SYSTEM_MINUS_TREE,
         (AprStrId)0,
         APR_S_CLI_OUTPUTS_HEADER,
-        APR_S_CLI_OPT_OUT, APR_S_CLI_OPT_FORMAT, APR_S_CLI_OPT_BITRATE,
+        APR_S_CLI_OPT_OUT, APR_S_CLI_OPT_OUT_TOKENS,
+        APR_S_CLI_OPT_FORMAT, APR_S_CLI_OPT_BITRATE,
         APR_S_CLI_OPT_QUALITY,
         (AprStrId)0,
         APR_S_CLI_SESSION_HEADER,
@@ -1752,16 +1777,36 @@ static AprCliExit build_graph(const Ctx *cx, const AprCliPlan *p, RunState *st)
 typedef struct RunObs {
     const Ctx        *cx;
     const AprCliPlan *p;
+    const AprGraph   *g;
 } RunObs;
 
+/* The file an output is writing, or -- before it opens one, and for the
+ * built-in sink that writes none -- the name that was asked for. One helper,
+ * because "which file do we name to the user" must have one answer whether it
+ * is being asked while recording or in the closing summary. */
+static const wchar_t *written_path(const AprBus *b, size_t index)
+{
+    const wchar_t *real = apr_bus_action_current_path(b, index);
+    return real[0] ? real : apr_bus_action_path(b, index);
+}
+
+/* THE FILE, NOT THE TEMPLATE. This used to print the plan's `--out` argument,
+ * which was the same string as the filename right up until an output path
+ * became a template and the collision policy became able to move a take aside
+ * (outpath.h). What a script parses and what a person goes looking for is the
+ * name on disk, so that is what is printed; the graph is the only thing that
+ * knows it. */
 static void say_output_lines(const RunObs *o, AprStrId id)
 {
     size_t bi, oi;
 
-    for (bi = 0; bi < o->p->bus_count; bi++) {
-        for (oi = 0; oi < o->p->buses[bi].output_count; oi++) {
+    for (bi = 0; o->g && bi < apr_graph_bus_count(o->g); bi++) {
+        AprBus *b = apr_graph_bus_at(o->g, bi);
+        if (!b) continue;
+        for (oi = 0; oi < apr_bus_action_count(b); oi++) {
             const wchar_t *args[1];
-            args[0] = o->p->buses[bi].outputs[oi].path;
+            args[0] = written_path(b, oi);
+            if (!args[0][0]) continue;
             note(o->cx, id, args, 1);
         }
     }
@@ -1807,6 +1852,14 @@ static void cli_observer(void *user, const AprRunNotice *n)
         warn(o->cx, APR_S_WARN_ACTION_FAILED, args, 2);
         break;
 
+    case APR_RUN_EV_OUTPUT_RENAMED:
+        /* The take already on disk was kept and this one moved aside. Said
+         * out loud, at the moment it happens, because a rename nobody hears
+         * about is only a politer kind of surprise (outpath.h). */
+        args[0] = n->path;
+        warn(o->cx, APR_S_WARN_OUTPUT_RENAMED, args, 1);
+        break;
+
     case APR_RUN_EV_FINISHING:
         say_output_lines(o, APR_S_STATUS_FINISHING);
         break;
@@ -1826,6 +1879,7 @@ static AprCliExit record_loop(const Ctx *cx, const AprCliPlan *p, RunState *st)
 
     obs.cx = cx;
     obs.p  = p;
+    obs.g  = st->g;
 
     memset(&cfg, 0, sizeof cfg);
     cfg.graph       = st->g;
@@ -1867,6 +1921,12 @@ static AprCliExit record_loop(const Ctx *cx, const AprCliPlan *p, RunState *st)
 }
 
 
+/* WHAT WAS ACTUALLY WRITTEN, read out of the graph rather than out of the
+ * plan. The graph is still alive here -- do_record destroys it in its
+ * __finally, after this -- and it is the only thing that knows what each
+ * output's name expanded to and whether the collision policy moved it. A
+ * summary that named the template would send the user looking for a file that
+ * is not there. */
 static void report_result(const Ctx *cx, const AprCliPlan *p, RunState *st,
                           AprCliExit code)
 {
@@ -1878,16 +1938,19 @@ static void report_result(const Ctx *cx, const AprCliPlan *p, RunState *st,
         jnum(cx, 1, L"exitCode", (int64_t)code, 1);
         jbool(cx, 1, L"dryRun", 0, 1);
         jline(cx, 1, L"\"outputs\": [");
-        for (bi = 0; bi < p->bus_count; bi++) {
-            for (oi = 0; oi < p->buses[bi].output_count; oi++) {
+        for (bi = 0; bi < apr_graph_bus_count(st->g); bi++) {
+            AprBus *b = apr_graph_bus_at(st->g, bi);
+            if (!b) continue;
+            for (oi = 0; oi < apr_bus_action_count(b); oi++) {
+                const AprActionVTable *vt = apr_bus_action_at(b, oi);
                 wchar_t fw[16];
-                int last = (bi + 1 == p->bus_count) &&
-                           (oi + 1 == p->buses[bi].output_count);
-                wide_of(p->buses[bi].outputs[oi].action_id, fw, 16);
+                int last = (bi + 1 == apr_graph_bus_count(st->g)) &&
+                           (oi + 1 == apr_bus_action_count(b));
+                wide_of(vt && vt->id ? vt->id : "", fw, 16);
                 jline(cx, 2, L"{");
-                jstr(cx, 3, L"path", p->buses[bi].outputs[oi].path, 1);
+                jstr(cx, 3, L"path", written_path(b, oi), 1);
                 jstr(cx, 3, L"format", fw, 1);
-                jstr(cx, 3, L"bus", p->buses[bi].name, 1);
+                jstr(cx, 3, L"bus", apr_bus_name(b), 1);
                 jreal(cx, 3, L"seconds",
                       p->rate ? (double)st->frames_out[bi] / (double)p->rate : 0.0, 0);
                 jline(cx, 2, L"}%ls", last ? L"" : L",");
@@ -1898,15 +1961,18 @@ static void report_result(const Ctx *cx, const AprCliPlan *p, RunState *st,
         return;
     }
 
-    for (bi = 0; bi < p->bus_count; bi++) {
-        for (oi = 0; oi < p->buses[bi].output_count; oi++) {
+    for (bi = 0; bi < apr_graph_bus_count(st->g); bi++) {
+        AprBus *b = apr_graph_bus_at(st->g, bi);
+        if (!b) continue;
+        for (oi = 0; oi < apr_bus_action_count(b); oi++) {
             NumBuf sb;
             const wchar_t *args[2];
             int64_t ms = p->rate
                 ? (int64_t)apr_mul_div_u64(st->frames_out[bi], 1000u, p->rate, NULL)
                 : 0;
-            args[0] = p->buses[bi].outputs[oi].path;
+            args[0] = written_path(b, oi);
             args[1] = fixed(&sb, ms, 3);
+            if (!args[0][0]) continue;
             note(cx, APR_S_STATUS_WROTE, args, 2);
         }
     }

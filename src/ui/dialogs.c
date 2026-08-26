@@ -46,6 +46,7 @@
 #include <wchar.h>
 
 #include "log.h"
+#include "outpath.h"
 #include "ui_app.h"
 
 #pragma comment(lib, "comdlg32.lib")
@@ -1250,6 +1251,22 @@ static INT_PTR CALLBACK output_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             if (SendMessageW(bus, CB_GETCURSEL, 0, 0) == CB_ERR)
                 SendMessageW(bus, CB_SETCURSEL, 0, 0);
         }
+        /* A DEFAULT THAT CANNOT OVERWRITE ANYTHING. The field used to open
+         * empty, which made "type a name" the first step of every recording
+         * and made reusing yesterday's name the path of least resistance --
+         * which is how a take gets lost. This is a timestamped template
+         * (outpath.h); it is editable, and {ext} follows the format combo
+         * above so changing the format does not leave a stale extension. */
+        {
+            wchar_t deft[APR_OUT_PATH_CCH];
+            apr_out_default_template(deft, APR_OUT_PATH_CCH);
+            SetDlgItemTextW(dlg, IDC_PATH, deft);
+        }
+        /* The tokens are on screen as a label AND on the path field as its
+         * accessible description, because a static beside a control is not
+         * something a screen reader reads when you tab into the control. */
+        apr_ui_set_accessible_description(GetDlgItem(dlg, IDC_PATH),
+                                          APR_S_UI_DLG_OUT_PATH_TOKENS);
         SetDlgItemTextW(dlg, IDC_BITRATE, L"0");
         SetDlgItemTextW(dlg, IDC_QUALITY, L"0");
         SetFocus(bus);
@@ -1335,7 +1352,7 @@ int apr_dlg_add_output(HWND owner, const AprGraph *g, AprBusId prefer,
     st.g = g;
     st.prefer = prefer;
 
-    dt_begin(&b, storage, sizeof storage, DS_CENTER, 0, 340, 190,
+    dt_begin(&b, storage, sizeof storage, DS_CENTER, 0, 340, 216,
              apr_str(APR_S_UI_DLG_ADD_OUTPUT_TITLE));
 
     dt_item(&b, SS_LEFT | WS_GROUP, 0, 8, 8, 324, 14, IDC_BUS + 100,
@@ -1355,19 +1372,26 @@ int apr_dlg_add_output(HWND owner, const AprGraph *g, AprBusId prefer,
     dt_item(&b, BS_PUSHBUTTON | WS_TABSTOP, 0, 240, 99, 92, 18,
             IDC_BROWSE, ATOM_BUTTON, apr_str(APR_S_UI_DLG_BROWSE));
 
-    dt_item(&b, SS_LEFT | WS_GROUP, 0, 8, 122, 254, 14, IDC_BITRATE + 100,
+    /* Twenty-six units, not the fourteen the English sentence needs on one
+     * line: Arabic wants more vertical room at the same point size, and a
+     * label sized to its English is a label that clips when translated
+     * (AGENTS.md rule 6). */
+    dt_item(&b, SS_LEFT | WS_GROUP, 0, 8, 118, 324, 26, IDC_PATH + 200,
+            ATOM_STATIC, apr_str(APR_S_UI_DLG_OUT_PATH_TOKENS));
+
+    dt_item(&b, SS_LEFT | WS_GROUP, 0, 8, 148, 254, 14, IDC_BITRATE + 100,
             ATOM_STATIC, apr_str(APR_S_UI_DLG_OUT_BITRATE));
-    dt_item(&b, ES_NUMBER | WS_BORDER | WS_TABSTOP, 0, 266, 120, 66, 14,
+    dt_item(&b, ES_NUMBER | WS_BORDER | WS_TABSTOP, 0, 266, 146, 66, 14,
             IDC_BITRATE, ATOM_EDIT, L"");
 
-    dt_item(&b, SS_LEFT | WS_GROUP, 0, 8, 142, 254, 14, IDC_QUALITY + 100,
+    dt_item(&b, SS_LEFT | WS_GROUP, 0, 8, 168, 254, 14, IDC_QUALITY + 100,
             ATOM_STATIC, apr_str(APR_S_UI_DLG_OUT_QUALITY));
-    dt_item(&b, ES_NUMBER | WS_BORDER | WS_TABSTOP, 0, 266, 140, 66, 14,
+    dt_item(&b, ES_NUMBER | WS_BORDER | WS_TABSTOP, 0, 266, 166, 66, 14,
             IDC_QUALITY, ATOM_EDIT, L"");
 
-    dt_item(&b, BS_DEFPUSHBUTTON | WS_TABSTOP | WS_GROUP, 0, 138, 166, 92, 18,
+    dt_item(&b, BS_DEFPUSHBUTTON | WS_TABSTOP | WS_GROUP, 0, 138, 192, 92, 18,
             IDOK, ATOM_BUTTON, apr_str(APR_S_UI_DLG_OK));
-    dt_item(&b, BS_PUSHBUTTON | WS_TABSTOP, 0, 238, 166, 92, 18,
+    dt_item(&b, BS_PUSHBUTTON | WS_TABSTOP, 0, 238, 192, 92, 18,
             IDCANCEL, ATOM_BUTTON, apr_str(APR_S_UI_DLG_CANCEL));
 
     t = dt_end(&b);

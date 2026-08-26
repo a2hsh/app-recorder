@@ -9,11 +9,7 @@
 
 #include "log.h"
 #include "mix.h"
-
-/* Long enough for a full Windows path. Stated here rather than pulled from
- * discover.h so that bus.h does not acquire a dependency on the discovery
- * layer for one array bound. */
-#define APR_BUS_ACTION_PATH_CCH 260
+#include "outpath.h"
 
 typedef struct BusEdge {
     AprSource       *src;
@@ -21,17 +17,37 @@ typedef struct BusEdge {
     float            gain;
 } BusEdge;
 
+/* ONE OUTPUT, AS A SPEC. There is no open encoder here between recordings --
+ * see the lifetime note in bus.h for the data loss that taught us that.
+ *
+ * `state` is non-NULL only between apr_bus_start() and apr_bus_stop(). */
 typedef struct BusAction {
     const AprActionVTable *vt;
-    void                  *state;
-    int                    failed;
-    int                    finalized;
-    AprErr                 err;
-    /* Copied, not borrowed: AprActionConfig::out_path is only valid for the
-     * length of create(), and a session saved an hour later still has to be
-     * able to say what this output writes. */
-    wchar_t                path[APR_BUS_ACTION_PATH_CCH];
+
+    /* The spec. Copied, not borrowed: AprActionConfig::out_path is valid only
+     * for the length of the add_action() call, and this has to answer "what
+     * does this output write" for as long as the graph lives -- to a session
+     * save an hour later, and to every recording after this one. */
+    wchar_t path[APR_OUT_PATH_CCH];      /* the template, as the user gave it */
+    int     bitrate_kbps;
+    int     quality;
+
+    /* The recording in progress, or the last one. */
+    void   *state;
+    int     failed;
+    int     finalized;
+    AprErr  err;
+    wchar_t current[APR_OUT_PATH_CCH];   /* what the template resolved to */
+    int     renamed;                     /* the asked-for name was taken */
 } BusAction;
+
+/* An action with no extension writes no file -- the built-in "none" sink is
+ * the case, and it is what lets a bus be metered or tested with nothing on
+ * disk. Everything path-shaped below is skipped for one. */
+static int action_writes_a_file(const AprActionVTable *vt)
+{
+    return vt && vt->extension && vt->extension[0];
+}
 
 struct AprBus {
     AprBusId  id;
@@ -108,10 +124,14 @@ void apr_bus_destroy(AprBus *b)
     size_t i;
 
     if (!b) return;
+    /* Finalizes and destroys any recording still open. Nothing should be left
+     * for the loop below now that an action's life ends with its recording;
+     * it stays as a belt, not because a state is expected to be found. */
     apr_bus_stop(b);
     for (i = 0; i < b->action_count; i++) {
         if (b->actions[i].vt && b->actions[i].state) {
             b->actions[i].vt->destroy(b->actions[i].state);
+            b->actions[i].state = NULL;
         }
     }
     for (i = 0; i < b->edge_count; i++) apr_source_reader_close(b->edges[i].rd);
@@ -246,45 +266,101 @@ float apr_bus_gain(const AprBus *b, AprSourceId id)
  * Actions
  * ------------------------------------------------------------------------- */
 
+/* The context every template on this bus expands against. */
+static AprOutContext out_ctx(const AprBus *b, const AprActionVTable *vt)
+{
+    AprOutContext c;
+    c.bus_name  = b->name;
+    c.extension = vt ? vt->extension : NULL;
+    return c;
+}
+
+/* NOTHING IS CREATED HERE. See the lifetime note in bus.h: the file is opened
+ * at apr_bus_start(). What DOES happen here is the check that used to be a
+ * side effect of creating it -- an unwritable folder is refused now, while the
+ * person who typed the name is still standing there. */
 AprErr apr_bus_add_action(AprBus *b, const AprActionVTable *vt,
                           const AprActionConfig *cfg)
 {
-    void  *state = NULL;
-    AprErr e;
+    BusAction *a;
 
     if (!b || !vt || !cfg) return APR_ERR(APR_E_INVALID_ARG, L"bus, action or config is null");
     if (b->action_count >= APR_MAX_ACTIONS_PER_BUS) {
         return APR_ERR(APR_E_STATE, L"bus %u already has %d actions",
                        b->id, APR_MAX_ACTIONS_PER_BUS);
     }
+    if (b->running) {
+        /* Adding an output halfway through would produce a file that starts in
+         * the middle of the session and lines up with nothing. */
+        return APR_ERR(APR_E_STATE, L"bus %u is recording", b->id);
+    }
 
-    e = vt->create(cfg, &state);
-    if (apr_failed(&e)) return e;
+    if (action_writes_a_file(vt)) {
+        AprOutContext ctx = out_ctx(b, vt);
+        AprErr        e;
 
-    b->actions[b->action_count].vt        = vt;
-    b->actions[b->action_count].state     = state;
-    b->actions[b->action_count].failed    = 0;
-    b->actions[b->action_count].finalized = 0;
-    b->actions[b->action_count].err       = apr_ok();
-    b->actions[b->action_count].path[0]   = L'\0';
+        if (!cfg->out_path || !cfg->out_path[0]) {
+            return APR_ERR(APR_E_INVALID_ARG, L"the \"%hs\" output needs a name",
+                           vt->id ? vt->id : "(null)");
+        }
+        if (wcslen(cfg->out_path) + 1 > APR_OUT_PATH_CCH) {
+            return APR_ERR(APR_E_INVALID_ARG,
+                           L"that name is longer than %d characters",
+                           APR_OUT_PATH_CCH - 1);
+        }
+        /* THE EARLY CHECK. Expands the template and asks the folder whether
+         * something may be created in it; creates nothing that was not there
+         * and leaves nothing behind (outpath.h). */
+        e = apr_out_validate(cfg->out_path, &ctx, NULL, 0);
+        if (apr_failed(&e)) return e;
+    }
+
+    a = &b->actions[b->action_count];
+    memset(a, 0, sizeof *a);
+    a->vt           = vt;
+    a->bitrate_kbps = cfg->bitrate_kbps;
+    a->quality      = cfg->quality;
+    a->err          = apr_ok();
     if (cfg->out_path) {
         size_t k = 0;
-        for (; k + 1 < APR_BUS_ACTION_PATH_CCH && cfg->out_path[k]; k++) {
-            b->actions[b->action_count].path[k] = cfg->out_path[k];
+        for (; k + 1 < APR_OUT_PATH_CCH && cfg->out_path[k]; k++) {
+            a->path[k] = cfg->out_path[k];
         }
-        b->actions[b->action_count].path[k] = L'\0';
+        a->path[k] = L'\0';
     }
     b->action_count++;
     return apr_ok();
 }
 
-/* FINALIZE, THEN DESTROY, THEN CLOSE THE GAP -- in that order and with no way
- * to skip the first step. An encoder detached without finalizing leaves a file
- * with no index, no trailing sizes and, for some formats, nothing that opens.
- * See the header. */
-AprErr apr_bus_remove_action(AprBus *b, size_t index)
+/* Finalize and destroy whatever recording this action has open. Idempotent,
+ * and it is the ONLY place an action's state is torn down, so there is exactly
+ * one order for it: finalize (a half-written file must still open), then
+ * destroy, then forget. Returns the finalize's result. */
+static AprErr close_action(BusAction *a)
 {
     AprErr e = apr_ok();
+
+    if (!a->vt || !a->state) return e;
+
+    if (!a->finalized) {
+        e = a->vt->finalize(a->state);
+        a->finalized = 1;
+    }
+    a->vt->destroy(a->state);
+    a->state = NULL;
+    return e;
+}
+
+/* IF SOMETHING IS OPEN, FINALIZE IT FIRST -- with no way to skip that step. An
+ * encoder detached without finalizing leaves a file with no index, no trailing
+ * sizes and, for some formats, nothing that opens.
+ *
+ * Between recordings there is nothing open at all now, so removing an output
+ * from an idle graph touches no file: it forgets a plan, which is what it
+ * always looked like from the outside. See the header. */
+AprErr apr_bus_remove_action(AprBus *b, size_t index)
+{
+    AprErr e;
     size_t i;
 
     if (!b) return APR_ERR(APR_E_INVALID_ARG, L"apr_bus_remove_action: bus is null");
@@ -292,13 +368,7 @@ AprErr apr_bus_remove_action(AprBus *b, size_t index)
         return APR_ERR(APR_E_NOT_FOUND, L"bus %u has no action %zu", b->id, index);
     }
 
-    if (b->actions[index].vt && b->actions[index].state) {
-        if (!b->actions[index].finalized) {
-            e = b->actions[index].vt->finalize(b->actions[index].state);
-            b->actions[index].finalized = 1;
-        }
-        b->actions[index].vt->destroy(b->actions[index].state);
-    }
+    e = close_action(&b->actions[index]);
 
     for (i = index; i + 1 < b->action_count; i++) {
         b->actions[i] = b->actions[i + 1];
@@ -322,6 +392,26 @@ const AprActionVTable *apr_bus_action_at(const AprBus *b, size_t index)
 const wchar_t *apr_bus_action_path(const AprBus *b, size_t index)
 {
     return (b && index < b->action_count) ? b->actions[index].path : L"";
+}
+
+const wchar_t *apr_bus_action_current_path(const AprBus *b, size_t index)
+{
+    return (b && index < b->action_count) ? b->actions[index].current : L"";
+}
+
+int apr_bus_action_renamed(const AprBus *b, size_t index)
+{
+    return (b && index < b->action_count) ? b->actions[index].renamed : 0;
+}
+
+int apr_bus_action_bitrate(const AprBus *b, size_t index)
+{
+    return (b && index < b->action_count) ? b->actions[index].bitrate_kbps : 0;
+}
+
+int apr_bus_action_quality(const AprBus *b, size_t index)
+{
+    return (b && index < b->action_count) ? b->actions[index].quality : 0;
 }
 
 int apr_bus_action_failed(const AprBus *b, size_t index)
@@ -380,10 +470,68 @@ static void render(AprBus *b, uint64_t bus_frame, size_t n, uint64_t now_ticks)
     }
 }
 
+/* Open one output for the recording that is about to start: resolve the name,
+ * then create the encoder. The action's whole life is between here and
+ * apr_bus_stop(). */
+static void open_action(AprBus *b, BusAction *a)
+{
+    AprActionConfig cfg;
+    AprErr          e;
+
+    a->failed     = 0;
+    a->finalized  = 0;
+    a->err        = apr_ok();
+    a->state      = NULL;
+    a->current[0] = L'\0';
+    a->renamed    = 0;
+
+    memset(&cfg, 0, sizeof cfg);
+    cfg.sample_rate  = b->rate;
+    cfg.channels     = b->channels;
+    cfg.bitrate_kbps = a->bitrate_kbps;
+    cfg.quality      = a->quality;
+
+    if (action_writes_a_file(a->vt)) {
+        AprOutContext ctx = out_ctx(b, a->vt);
+
+        /* THE COLLISION POLICY LIVES IN outpath.c AND IS APPLIED HERE, at the
+         * only instant that can know whether the name is taken: now. The take
+         * already on disk is never overwritten. */
+        e = apr_out_resolve(a->path, &ctx, a->current, APR_OUT_PATH_CCH,
+                            &a->renamed);
+        if (apr_failed(&e)) {
+            a->failed = 1;
+            a->err    = e;
+            APR_LOG_ERR(APR_LOG_ERROR, &e);
+            return;
+        }
+        cfg.out_path = a->current;
+    }
+
+    e = a->vt->create(&cfg, &a->state);
+    if (apr_failed(&e)) {
+        /* One output that will not open must not cost the session (design 10),
+         * so it is marked and skipped exactly as one that fails mid-recording
+         * is. apr_bus_action_error() carries the reason, and the runner says it
+         * out loud at the start rather than at the end. */
+        a->state  = NULL;
+        a->failed = 1;
+        a->err    = e;
+        APR_LOG_ERR(APR_LOG_ERROR, &e);
+    }
+}
+
 AprErr apr_bus_start(AprBus *b, uint64_t start_ticks)
 {
+    size_t i;
+
     if (!b) return APR_ERR(APR_E_INVALID_ARG, L"null bus");
     if (b->running) return apr_ok();
+
+    /* EVERY ACTION IS CREATED HERE, NOT WHEN IT WAS ADDED. That is the whole
+     * of the lifetime fix -- see bus.h. */
+    for (i = 0; i < b->action_count; i++) open_action(b, &b->actions[i]);
+
     apr_clock_anchor(&b->clock, start_ticks);
     b->frames_out = 0;
     b->running    = 1;
@@ -424,14 +572,16 @@ AprErr apr_bus_stop(AprBus *b)
     if (!b) return APR_ERR(APR_E_INVALID_ARG, L"null bus");
 
     /* EVERY action is finalized on EVERY exit path, failed ones included: a
-     * half-written recording must still open in a player (design 10). */
+     * half-written recording must still open in a player (design 10). Then it
+     * is DESTROYED, because the encoder's life is this recording and the next
+     * apr_bus_start() makes a fresh one.
+     *
+     * The failed flags are NOT cleared here -- apr_bus_start() clears them --
+     * so a caller can still ask, after the fact, which output went wrong. */
     for (i = 0; i < b->action_count; i++) {
         BusAction *a = &b->actions[i];
-        AprErr     e;
+        AprErr     e = close_action(a);
 
-        if (a->finalized || !a->vt || !a->state) continue;
-        e = a->vt->finalize(a->state);
-        a->finalized = 1;
         if (apr_failed(&e)) {
             APR_LOG_ERR(APR_LOG_ERROR, &e);
             if (!apr_failed(&first)) first = e;

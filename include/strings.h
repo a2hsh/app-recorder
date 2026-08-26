@@ -192,6 +192,7 @@
     X(CLI_OPT_SYSTEM_MINUS_TREE,   1071)                                      \
     X(CLI_OUTPUTS_HEADER,          1072)                                      \
     X(CLI_OPT_BITRATE,             1073)                                      \
+    X(CLI_OPT_OUT_TOKENS,          1173)                                      \
     X(CLI_OPT_QUALITY,             1074)                                      \
     X(CLI_SESSION_HEADER,          1075)                                      \
     X(CLI_OPT_RATE,                1076)                                      \
@@ -251,6 +252,7 @@
     X(WARN_SYSTEM_CAPTURE_LAUNCHER, 1133)                                     \
     X(WARN_STILL_FINISHING,        1134)                                      \
     X(WARN_ACTION_FAILED,          1135)                                      \
+    X(WARN_OUTPUT_RENAMED,         1136)                                      \
     X(STATUS_DRY_RUN_HEADER,       1140)                                      \
     X(STATUS_DRY_RUN_OK,           1141)                                      \
     X(STATUS_PLAN_SESSION,         1142)                                      \
@@ -517,7 +519,8 @@
     X(UI_CLOSE_STOP_AND_EXIT,       1623)                                 \
     X(UI_CLOSE_KEEP_RECORDING,      1624)                                 \
     X(UI_CLOSE_TO_TRAY,             1625)                                 \
-    X(UI_ANN_CLOSING_FILES,         1626)
+    X(UI_ANN_CLOSING_FILES,         1626)                                 \
+    X(UI_ANN_OUTPUT_RENAMED,        1627)
 
 
 /* ---- the dialogs: the half of the product that turns "navigate a graph" into
@@ -611,7 +614,8 @@
     X(UI_DLG_OUTPUT_REMOVED,        1724)                                 \
     X(UI_DLG_PICK_OUTPUT,           1725)                                 \
     X(UI_DLG_OUTPUT_ROW,            1726)                                      \
-    X(UI_DLG_RESOLVE_CONSENT,     1727)
+    X(UI_DLG_RESOLVE_CONSENT,     1727)                                    \
+    X(UI_DLG_OUT_PATH_TOKENS,     1728)
 
 
 /* ---- the notification area.
