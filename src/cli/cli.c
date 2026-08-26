@@ -518,39 +518,100 @@ static AprCliExit number_error(const Ctx *cx, const wchar_t *opt,
     return fail(cx, APR_CLI_USAGE, APR_S_ERR_BAD_NUMBER, args, 2);
 }
 
-/* Reads "<hz>[,<ppm>[,<amplitude>]]". */
+/* --- the health half of a --fake spec ---------------------------------------
+ *
+ * A synthetic source can be asked to go silent or to die part way through, so
+ * that the two failures which look exactly like a successful recording can be
+ * exercised from a command line. capture.h explains why they look like
+ * success; what matters here is that both are described on the source itself,
+ * in the same comma-separated spec as its tone and its drift, rather than on
+ * a flag of their own -- health is part of describing a synthetic source.
+ *
+ * A frame is never 0: capture.h reserves 0 for "never", and frame 0 is what
+ * the bare words `muted` and `dead` are for. Refusing a 0 frame here keeps
+ * those two spellings from meaning two different things.
+ * -------------------------------------------------------------------------- */
+
+/* The ceiling is session.h's, not a second one of ours: what can be typed has
+ * to be what can be written down and read back again. */
+static int fake_frame(const wchar_t *v, uint64_t *out)
+{
+    int64_t n;
+    if (!parse_i64(v, &n) || n < 1 || n > APR_SESSION_MAX_FRAME) return 0;
+    *out = (uint64_t)n;
+    return 1;
+}
+
+static int is_fake_health(const wchar_t *tok)
+{
+    return eq(tok, L"muted") || eq(tok, L"dead") ||
+           wcsncmp(tok, L"mute=",   5) == 0 ||
+           wcsncmp(tok, L"unmute=", 7) == 0 ||
+           wcsncmp(tok, L"die=",    4) == 0;
+}
+
+static int parse_fake_health(const wchar_t *tok, AprCliSource *s)
+{
+    if (eq(tok, L"muted")) { s->fake_start_muted = 1; return 1; }
+    if (eq(tok, L"dead"))  { s->fake_start_dead  = 1; return 1; }
+    if (wcsncmp(tok, L"mute=",   5) == 0) return fake_frame(tok + 5, &s->fake_mute_at);
+    if (wcsncmp(tok, L"unmute=", 7) == 0) return fake_frame(tok + 7, &s->fake_unmute_at);
+    if (wcsncmp(tok, L"die=",    4) == 0) return fake_frame(tok + 4, &s->fake_die_at);
+    return 0;
+}
+
+/* Reads "<hz>[,<ppm>[,<amplitude>]]" followed by any number of health fields:
+ *
+ *     muted | dead | mute=<frame> | unmute=<frame> | die=<frame>
+ *
+ * The tone is still required and still first. A health field may appear as
+ * soon as the fields before it have been given -- "440,dead" is as readable as
+ * "440,0,0.25,dead" and means the same thing -- and once one has been seen,
+ * everything after it is health too, so no health word can be mistaken for a
+ * number that was meant to be a drift.
+ *
+ * `mute=` and `unmute=` landing on the SAME frame is not resolved here: the
+ * fake source refuses it at open (capture.h), which keeps one rule in one
+ * place and reports it with the reason attached. */
 static int parse_fake(const wchar_t *spec, AprCliSource *s)
 {
-    wchar_t  copy[64];
+    wchar_t  copy[APR_CLI_SPEC_CCH];
     wchar_t *ctxp = NULL;
     wchar_t *tok;
     int64_t  v;
     int      field = 0;
+    int      health = 0;
 
     s->fake_hz  = 440;
     s->fake_ppm = 0;
     s->fake_amp = 0.25f;
 
-    copy_cch(copy, 64, spec);
+    /* A silently truncated spec would parse as a different, valid one. */
+    if (!spec || wcslen(spec) >= APR_CLI_SPEC_CCH) return 0;
+    copy_cch(copy, APR_CLI_SPEC_CCH, spec);
+
     tok = wcstok_s(copy, L",", &ctxp);
     while (tok) {
-        switch (field) {
-        case 0:
-            if (!parse_i64(tok, &v) || v < 0 || v > 192000) return 0;
-            s->fake_hz = (uint32_t)v;
-            break;
-        case 1:
-            if (!parse_i64(tok, &v) || v < -100000 || v > 100000) return 0;
-            s->fake_ppm = (int32_t)v;
-            break;
-        case 2:
-            if (!parse_fixed(tok, 6, &v) || v < 0 || v > 1000000) return 0;
-            s->fake_amp = (float)((double)v / 1000000.0);
-            break;
-        default:
-            return 0;
+        if (health || field >= 3 || is_fake_health(tok)) {
+            health = 1;
+            if (!parse_fake_health(tok, s)) return 0;
+        } else {
+            switch (field) {
+            case 0:
+                if (!parse_i64(tok, &v) || v < 0 || v > 192000) return 0;
+                s->fake_hz = (uint32_t)v;
+                break;
+            case 1:
+                if (!parse_i64(tok, &v) || v < -100000 || v > 100000) return 0;
+                s->fake_ppm = (int32_t)v;
+                break;
+            default:
+                if (!parse_fixed(tok, 6, &v) || v < 0 || v > 1000000) return 0;
+                s->fake_amp = (float)((double)v / 1000000.0);
+                break;
+            }
+            field++;
         }
-        field++;
         tok = wcstok_s(NULL, L",", &ctxp);
     }
     return field > 0;
@@ -1267,7 +1328,8 @@ static void print_usage(const Ctx *cx)
         (AprStrId)0,
         APR_S_CLI_SOURCES_HEADER,
         APR_S_CLI_OPT_BUS, APR_S_CLI_OPT_PID, APR_S_CLI_OPT_EXE,
-        APR_S_CLI_OPT_DEVICE, APR_S_CLI_OPT_FAKE, APR_S_CLI_OPT_GAIN,
+        APR_S_CLI_OPT_DEVICE, APR_S_CLI_OPT_FAKE, APR_S_CLI_OPT_FAKE_HEALTH,
+        APR_S_CLI_OPT_GAIN,
         APR_S_CLI_OPT_SYSTEM_MINUS_TREE,
         (AprStrId)0,
         APR_S_CLI_OUTPUTS_HEADER,
@@ -1610,6 +1672,11 @@ static AprCliExit build_graph(const Ctx *cx, const AprCliPlan *p, RunState *st)
                 cfg.fake.tone_hz        = s->fake_hz;
                 cfg.fake.rate_error_ppm = s->fake_ppm;
                 cfg.fake.amplitude      = s->fake_amp;
+                cfg.fake.mute_at_frame   = s->fake_mute_at;
+                cfg.fake.unmute_at_frame = s->fake_unmute_at;
+                cfg.fake.die_at_frame    = s->fake_die_at;
+                cfg.fake.start_muted     = s->fake_start_muted;
+                cfg.fake.start_dead      = s->fake_start_dead;
                 break;
             case APR_CLI_SRC_SYSTEM_MINUS_TREE:
                 cfg.kind = APR_SRC_PROCESS;
@@ -2104,6 +2171,11 @@ static void plan_from_session(AprCliPlan *p, const AprSession *s)
                 cs->fake_hz  = ss->fake_hz;
                 cs->fake_ppm = ss->fake_ppm;
                 cs->fake_amp = ss->fake_amp;
+                cs->fake_mute_at     = ss->fake_mute_at;
+                cs->fake_unmute_at   = ss->fake_unmute_at;
+                cs->fake_die_at      = ss->fake_die_at;
+                cs->fake_start_muted = ss->fake_start_muted;
+                cs->fake_start_dead  = ss->fake_start_dead;
                 _snwprintf_s(cs->spec, APR_CLI_SPEC_CCH, _TRUNCATE, L"%lu,%ld",
                              (unsigned long)ss->fake_hz, (long)ss->fake_ppm);
                 break;
@@ -2226,9 +2298,17 @@ static int same_source(const AprSessionSource *a, const AprCliSource *b)
         return b->kind == APR_CLI_SRC_DEVICE &&
                _wcsicmp(a->endpoint_id, b->endpoint_id) == 0;
     case APR_SESSION_SRC_FAKE:
+        /* Health is part of a synthetic source's identity: two fakes that
+         * differ only in when they go silent are two different sources, and
+         * interning them together would quietly drop one. */
         return b->kind == APR_CLI_SRC_FAKE &&
                a->fake_hz == b->fake_hz && a->fake_ppm == b->fake_ppm &&
-               a->fake_amp == b->fake_amp;
+               a->fake_amp == b->fake_amp &&
+               a->fake_mute_at == b->fake_mute_at &&
+               a->fake_unmute_at == b->fake_unmute_at &&
+               a->fake_die_at == b->fake_die_at &&
+               a->fake_start_muted == b->fake_start_muted &&
+               a->fake_start_dead == b->fake_start_dead;
     case APR_SESSION_SRC_SYSTEM_MINUS_TREE:
         return b->kind == APR_CLI_SRC_SYSTEM_MINUS_TREE && a->pid == b->pid;
     case APR_SESSION_SRC_PROCESS:
@@ -2262,6 +2342,11 @@ static size_t intern_source(AprSession *s, const AprCliSource *cs)
         d->fake_hz  = cs->fake_hz;
         d->fake_ppm = cs->fake_ppm;
         d->fake_amp = cs->fake_amp;
+        d->fake_mute_at     = cs->fake_mute_at;
+        d->fake_unmute_at   = cs->fake_unmute_at;
+        d->fake_die_at      = cs->fake_die_at;
+        d->fake_start_muted = cs->fake_start_muted;
+        d->fake_start_dead  = cs->fake_start_dead;
         break;
     case APR_CLI_SRC_SYSTEM_MINUS_TREE:
         d->kind = APR_SESSION_SRC_SYSTEM_MINUS_TREE;

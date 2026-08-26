@@ -635,6 +635,19 @@ static void refresh_all(CanvasState *st)
     int i;
 
     for (i = 0; i < st->count; ++i) refresh_node(st, i);
+
+    /* A pane's description has to answer "what is here?". With no nodes, the
+     * general text describes a graph that does not exist -- which lands as a
+     * non-answer to someone who has just arrived and hears about Tab when
+     * there is nothing to Tab to. Empty is a state, not an absence of one, so
+     * it gets its own sentence and names the next action.
+     *
+     * The same string is the announcement fired when a navigation key finds
+     * nothing; it reads correctly as both, and reusing it keeps one sentence
+     * to translate rather than two that could drift apart. */
+    apr_ui_set_accessible_description(
+        st->hwnd,
+        st->count > 0 ? APR_S_UI_DESC_CANVAS : APR_S_UI_ANN_CANVAS_EMPTY);
 }
 
 /* ==========================================================================
@@ -1748,7 +1761,9 @@ HWND apr_canvas_create(HWND parent, AprTheme *theme)
     /* ui_app.h: the frame does not name us, because only we know whether a
      * sub-control should carry the name instead. */
     apr_ui_set_accessible_name(h, APR_S_UI_PANE_CANVAS);
-    apr_ui_set_accessible_description(h, APR_S_UI_DESC_CANVAS);
+    /* A canvas is necessarily empty at creation, so it starts with the empty
+     * description; refresh_all() swaps it the moment there is anything here. */
+    apr_ui_set_accessible_description(h, APR_S_UI_ANN_CANVAS_EMPTY);
     /* Belt as well as braces, the same way app.c does it for its own classes:
      * with no annotation service the window text is still a name. */
     SetWindowTextW(h, apr_str(APR_S_UI_PANE_CANVAS));

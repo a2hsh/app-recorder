@@ -257,14 +257,29 @@ static void write_source(Buf *b, const AprSessionSource *s, int last)
         break;
 
     case APR_SESSION_SRC_FAKE:
-    default:
+    default: {
+        /* The five health fields are written only when the source actually
+         * has any, so a healthy synthetic source produces exactly the file it
+         * produced before they existed. All-zero IS healthy (capture.h), so
+         * one test covers all five. */
+        int health = s->fake_mute_at || s->fake_unmute_at || s->fake_die_at ||
+                     s->fake_start_muted || s->fake_start_dead;
+
         kv_str(b, 3, "name", s->name, 1);
         kv_i64(b, 3, "toneHz", (int64_t)s->fake_hz, 1);
         kv_i64(b, 3, "ratePpm", (int64_t)s->fake_ppm, 1);
         kv_fixed(b, 3, "amplitude",
                  (int64_t)((double)s->fake_amp * 1000000.0 +
-                           (s->fake_amp < 0 ? -0.5 : 0.5)), 6, 0);
+                           (s->fake_amp < 0 ? -0.5 : 0.5)), 6, health);
+        if (health) {
+            kv_i64(b, 3, "muteAtFrame",   (int64_t)s->fake_mute_at, 1);
+            kv_i64(b, 3, "unmuteAtFrame", (int64_t)s->fake_unmute_at, 1);
+            kv_i64(b, 3, "dieAtFrame",    (int64_t)s->fake_die_at, 1);
+            kv_i64(b, 3, "startMuted",    s->fake_start_muted ? 1 : 0, 1);
+            kv_i64(b, 3, "startDead",     s->fake_start_dead ? 1 : 0, 0);
+        }
         break;
+    }
     }
 
     buf_indent(b, 2); buf_puts(b, last ? "}\n" : "},\n");

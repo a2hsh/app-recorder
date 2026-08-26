@@ -228,6 +228,100 @@ TEST(fake_sources_take_a_tone_a_drift_and_an_amplitude)
     ASSERT_EQ_INT(0,    (int)p.buses[0].sources[1].fake_ppm);
 }
 
+TEST(a_fake_source_can_be_asked_to_go_silent_or_to_die)
+{
+    Cap c; static AprCliPlan p;
+    const AprCliSource *s;
+
+    ASSERT_EQ_INT(APR_CLI_OK, PARSE(&c, &p,
+        L"--fake", L"440,30,0.25,mute=4800,unmute=9600,die=14400",
+        L"--out", L"x.wav"));
+    s = &p.buses[0].sources[0];
+    /* The tone, the drift and the amplitude still read the same way. */
+    ASSERT_EQ_INT(440, (int)s->fake_hz);
+    ASSERT_EQ_INT(30,  (int)s->fake_ppm);
+    ASSERT_NEAR(0.25,  s->fake_amp, 1e-6);
+    ASSERT_EQ_INT(4800,  (int)s->fake_mute_at);
+    ASSERT_EQ_INT(9600,  (int)s->fake_unmute_at);
+    ASSERT_EQ_INT(14400, (int)s->fake_die_at);
+    ASSERT_FALSE(s->fake_start_muted);
+    ASSERT_FALSE(s->fake_start_dead);
+}
+
+TEST(the_two_start_states_are_words_because_frame_zero_is_not_a_frame)
+{
+    /* capture.h reserves a frame of 0 for "never", so frame 0 is asked for by
+     * name. The two spellings must not both be reachable. */
+    Cap c; static AprCliPlan p;
+
+    ASSERT_EQ_INT(APR_CLI_OK, PARSE(&c, &p, L"--fake", L"440,muted,dead",
+                                    L"--out", L"x.wav"));
+    ASSERT_TRUE(p.buses[0].sources[0].fake_start_muted);
+    ASSERT_TRUE(p.buses[0].sources[0].fake_start_dead);
+    ASSERT_EQ_INT(0, (int)p.buses[0].sources[0].fake_mute_at);
+    ASSERT_EQ_INT(0, (int)p.buses[0].sources[0].fake_die_at);
+
+    ASSERT_EQ_INT(APR_CLI_USAGE, PARSE(&c, &p, L"--fake", L"440,mute=0",
+                                       L"--out", L"x.wav"));
+    ASSERT_EQ_INT(APR_CLI_USAGE, PARSE(&c, &p, L"--fake", L"440,die=0",
+                                       L"--out", L"x.wav"));
+}
+
+TEST(a_health_word_may_stand_where_a_number_would_have_gone)
+{
+    /* "440,dead" is as readable as "440,0,0.25,dead" and means the same. The
+     * tone stays first and stays required. */
+    Cap c; static AprCliPlan p;
+
+    ASSERT_EQ_INT(APR_CLI_OK, PARSE(&c, &p, L"--fake", L"440,dead",
+                                    L"--out", L"x.wav"));
+    ASSERT_EQ_INT(440, (int)p.buses[0].sources[0].fake_hz);
+    ASSERT_TRUE(p.buses[0].sources[0].fake_start_dead);
+
+    /* A number after a health word is not a drift that arrived late. */
+    ASSERT_EQ_INT(APR_CLI_USAGE, PARSE(&c, &p, L"--fake", L"440,dead,30",
+                                       L"--out", L"x.wav"));
+    /* And a spec with no tone at all is still refused. */
+    ASSERT_EQ_INT(APR_CLI_USAGE, PARSE(&c, &p, L"--fake", L"dead",
+                                       L"--out", L"x.wav"));
+}
+
+TEST(an_unreadable_health_field_is_a_usage_error_and_quotes_it)
+{
+    Cap c; static AprCliPlan p;
+
+    ASSERT_EQ_INT(APR_CLI_USAGE, PARSE(&c, &p, L"--fake", L"440,sleepy",
+                                       L"--out", L"x.wav"));
+    ASSERT_TRUE(said(&c, L"440,sleepy"));
+    ASSERT_EQ_INT(APR_CLI_USAGE, PARSE(&c, &p, L"--fake", L"440,die=later",
+                                       L"--out", L"x.wav"));
+    ASSERT_EQ_INT(APR_CLI_USAGE, PARSE(&c, &p, L"--fake", L"440,die=-1",
+                                       L"--out", L"x.wav"));
+}
+
+TEST(one_frame_cannot_be_both_the_mute_and_the_unmute)
+{
+    /* The rule has ONE owner -- capture.h's fake_open refuses it -- so this
+     * arrives as a capture failure carrying the reason, not as a second copy
+     * of the rule in the parser. */
+    Cap     c;
+    wchar_t path[MAX_PATH];
+
+    tmp_path(path, MAX_PATH, L"bothat", L"wav");
+    ASSERT_EQ_INT(APR_CLI_CAPTURE, RUN(&c, L"--fake", L"440,mute=100,unmute=100",
+                                       L"--out", path, L"--duration", L"0.2"));
+    DeleteFileW(path);
+}
+
+TEST(the_help_says_how_to_ask_a_fake_source_for_a_health_failure)
+{
+    Cap c;
+    ASSERT_EQ_INT(APR_CLI_OK, RUN(&c, L"help"));
+    ASSERT_TRUE(has(c.out, L"<health>"));
+    ASSERT_TRUE(has(c.out, L"mute=<frame>"));
+    ASSERT_TRUE(has(c.out, L"die=<frame>"));
+}
+
 TEST(an_unknown_option_is_a_usage_error_and_says_which_one)
 {
     Cap c; static AprCliPlan p;
@@ -623,6 +717,160 @@ TEST(one_bus_can_be_written_to_two_formats_at_once)
     ASSERT_GT_INT(500, (int)file_size(mp3));
     DeleteFileW(wav);
     DeleteFileW(mp3);
+}
+
+/* ---------------------------------------------------------------------------
+ * The two failures that look exactly like a successful recording
+ *
+ * A muted source and a dead one both produce digital silence at exactly the
+ * right rate, for ever, with no error anywhere (capture.h, design 4.1 #5/#6).
+ * Every other indicator says the run went fine, so what the command line says
+ * about them IS the whole warning -- there is nothing else to notice.
+ *
+ * These drive the shipped record path, warning text included, through a
+ * synthetic source asked to fail on cue. No audio hardware is involved in
+ * either direction (AGENTS.md rule 1).
+ * ------------------------------------------------------------------------- */
+
+/* The expected line, built from the catalog rather than typed here, so the
+ * case pins the WARNING and not the wording of one language. */
+static void warn_line(AprStrId id, const wchar_t *name, wchar_t *out, size_t cch)
+{
+    const wchar_t *args[1];
+    args[0] = name;
+    apr_str_format(id, out, cch, args, 1);
+}
+
+static int count_of(const wchar_t *hay, const wchar_t *needle)
+{
+    size_t n = wcslen(needle);
+    int    seen = 0;
+    if (!n) return 0;
+    while ((hay = wcsstr(hay, needle)) != NULL) { seen++; hay += n; }
+    return seen;
+}
+
+/* Both streams: a warning must be counted wherever it was written. */
+static int said_times(const Cap *c, const wchar_t *needle)
+{
+    return count_of(c->out, needle) + count_of(c->err, needle);
+}
+
+TEST(a_source_that_starts_muted_is_warned_about_exactly_once)
+{
+    Cap     c;
+    wchar_t path[MAX_PATH], expect[512];
+
+    tmp_path(path, MAX_PATH, L"mute0", L"wav");
+    warn_line(APR_S_WARN_SOURCE_MUTED, L"440,0,0.25,muted", expect, 512);
+
+    /* Muted is NOT incomplete: what was asked for is what was recorded, and
+     * silence was the honest answer. Only death changes the exit code. */
+    ASSERT_EQ_INT(APR_CLI_OK, RUN(&c, L"--fake", L"440,0,0.25,muted",
+                                  L"--out", path, L"--duration", L"0.5"));
+    /* Once. Health is polled every tick and a warning per tick is a warning
+     * nobody reads. */
+    ASSERT_EQ_INT(1, said_times(&c, expect));
+    ASSERT_TRUE(wav_is_playable(path, NULL));
+    DeleteFileW(path);
+}
+
+TEST(a_source_that_goes_muted_part_way_through_is_warned_about_exactly_once)
+{
+    Cap     c;
+    wchar_t path[MAX_PATH], expect[512];
+
+    /* 4800 frames is 100 ms in at 48 kHz -- well inside the recording, and a
+     * frame index rather than a time so it lands on the same sample however
+     * the timeline is stepped. */
+    tmp_path(path, MAX_PATH, L"mutemid", L"wav");
+    warn_line(APR_S_WARN_SOURCE_MUTED, L"440,0,0.25,mute=4800", expect, 512);
+
+    ASSERT_EQ_INT(APR_CLI_OK, RUN(&c, L"--fake", L"440,0,0.25,mute=4800",
+                                  L"--out", path, L"--duration", L"0.5"));
+    ASSERT_EQ_INT(1, said_times(&c, expect));
+    ASSERT_TRUE(wav_is_playable(path, NULL));
+    DeleteFileW(path);
+}
+
+TEST(a_source_that_dies_part_way_through_ends_the_run_incomplete)
+{
+    Cap     c;
+    wchar_t path[MAX_PATH], expect[512];
+
+    tmp_path(path, MAX_PATH, L"diemid", L"wav");
+    warn_line(APR_S_WARN_SOURCE_EXITED, L"440,0,0.25,die=4800", expect, 512);
+
+    /* 6, not 0. The file is complete and playable and it is NOT what was
+     * asked for, which is exactly what exit 6 is for -- a script that only
+     * checked for a file would call this a success. */
+    ASSERT_EQ_INT(APR_CLI_INCOMPLETE, RUN(&c, L"--fake", L"440,0,0.25,die=4800",
+                                          L"--out", path, L"--duration", L"0.5"));
+    ASSERT_EQ_INT(1, said_times(&c, expect));
+    ASSERT_TRUE(wav_is_playable(path, NULL));
+    DeleteFileW(path);
+}
+
+TEST(a_dead_source_is_not_also_described_as_muted)
+{
+    /* Death wins, the same way src/ui/tree_panel.c picks one clause for the
+     * row a screen reader reads: unmuting an application that has exited
+     * fixes nothing, so the one sentence worth acting on is the only one
+     * said. */
+    Cap     c;
+    wchar_t path[MAX_PATH], muted[512], exited[512];
+
+    tmp_path(path, MAX_PATH, L"bothstates", L"wav");
+    warn_line(APR_S_WARN_SOURCE_MUTED,  L"440,0,0.25,muted,dead", muted,  512);
+    warn_line(APR_S_WARN_SOURCE_EXITED, L"440,0,0.25,muted,dead", exited, 512);
+
+    ASSERT_EQ_INT(APR_CLI_INCOMPLETE, RUN(&c, L"--fake", L"440,0,0.25,muted,dead",
+                                          L"--out", path, L"--duration", L"0.4"));
+    ASSERT_EQ_INT(1, said_times(&c, exited));
+    ASSERT_EQ_INT(0, said_times(&c, muted));
+    ASSERT_TRUE(wav_is_playable(path, NULL));
+    DeleteFileW(path);
+}
+
+TEST(a_source_that_goes_silent_and_later_dies_says_both_things)
+{
+    /* Only SIMULTANEOUS states collapse. Two things that happened at two
+     * different moments are two things that happened. */
+    Cap     c;
+    wchar_t path[MAX_PATH], muted[512], exited[512];
+
+    /* 50 ms apart would be enough for a 10 ms health poll; they are 450 ms
+     * apart so that a scheduler hiccup on a loaded machine cannot collapse
+     * them into one moment and make this case flap. */
+    tmp_path(path, MAX_PATH, L"thenboth", L"wav");
+    warn_line(APR_S_WARN_SOURCE_MUTED,  L"440,0,0.25,mute=2400,die=24000", muted,  512);
+    warn_line(APR_S_WARN_SOURCE_EXITED, L"440,0,0.25,mute=2400,die=24000", exited, 512);
+
+    ASSERT_EQ_INT(APR_CLI_INCOMPLETE,
+                  RUN(&c, L"--fake", L"440,0,0.25,mute=2400,die=24000",
+                      L"--out", path, L"--duration", L"0.8"));
+    ASSERT_EQ_INT(1, said_times(&c, muted));
+    ASSERT_EQ_INT(1, said_times(&c, exited));
+    DeleteFileW(path);
+}
+
+TEST(one_source_failing_does_not_take_the_other_down)
+{
+    /* Design section 10. The healthy bus must still get its whole file. */
+    Cap     c;
+    wchar_t good[MAX_PATH], bad[MAX_PATH];
+
+    tmp_path(good, MAX_PATH, L"survivor", L"wav");
+    tmp_path(bad,  MAX_PATH, L"casualty", L"wav");
+
+    ASSERT_EQ_INT(APR_CLI_INCOMPLETE, RUN(&c,
+        L"--bus", L"Good", L"--fake", L"440,0,0.25",      L"--out", good,
+        L"--bus", L"Bad",  L"--fake", L"220,0,0.25,dead", L"--out", bad,
+        L"--duration", L"0.4"));
+    ASSERT_TRUE(wav_is_playable(good, NULL));
+    ASSERT_TRUE(wav_is_playable(bad, NULL));
+    DeleteFileW(good);
+    DeleteFileW(bad);
 }
 
 /* ---------------------------------------------------------------------------

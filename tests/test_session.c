@@ -388,6 +388,84 @@ TEST(paths_with_backslashes_and_non_ascii_survive_the_json_escaping)
     ASSERT_WSTR_EQ(L"D:\\rec\\a\\b\\out.wav", g_b.buses[0].actions[0].path);
 }
 
+/* ---------------------------------------------------------------------------
+ * A synthetic source's health
+ *
+ * A fake that goes silent or dies part way through has to describe the SAME
+ * recording after a reload as it did before one, or a session that reproduces
+ * a failure stops reproducing it the moment it is written down.
+ * ------------------------------------------------------------------------- */
+
+static void build_fake(AprSession *s)
+{
+    apr_session_init(s);
+    s->source_count = 1;
+    strcpy_s(s->sources[0].key, APR_SESSION_KEY_CCH, "a");
+    s->sources[0].kind = APR_SESSION_SRC_FAKE;
+    wcscpy_s(s->sources[0].name, APR_NAME_CCH, L"test tone");
+    s->sources[0].fake_hz  = 440;
+    s->sources[0].fake_amp = 0.25f;
+    s->bus_count = 1;
+    wcscpy_s(s->buses[0].name, APR_NAME_CCH, L"Bus");
+    s->buses[0].edge_count = 1;
+    strcpy_s(s->buses[0].edges[0].key, APR_SESSION_KEY_CCH, "a");
+    s->buses[0].action_count = 1;
+    strcpy_s(s->buses[0].actions[0].id, 16, "wav");
+    wcscpy_s(s->buses[0].actions[0].path, APR_DISC_PATH_CCH, L"out.wav");
+}
+
+TEST(a_fake_sources_health_survives_a_save_and_a_load)
+{
+    size_t len = 0;
+    AprErr e;
+
+    build_fake(&g_a);
+    g_a.sources[0].fake_mute_at     = 4800;
+    g_a.sources[0].fake_unmute_at   = 9600;
+    g_a.sources[0].fake_die_at      = 14400;
+    g_a.sources[0].fake_start_muted = 1;
+    g_a.sources[0].fake_start_dead  = 1;
+
+    e = apr_session_write_utf8(&g_a, g_json, JSON_CAP, &len);
+    ASSERT_FALSE(apr_failed(&e));
+    e = apr_session_load_utf8(g_json, len, &g_b, &g_lrep);
+    ASSERT_FALSE(apr_failed(&e));
+    ASSERT_EQ_INT(APR_SESSION_FAULT_NONE, (int)g_lrep.fault);
+
+    ASSERT_EQ_INT(4800,  (int)g_b.sources[0].fake_mute_at);
+    ASSERT_EQ_INT(9600,  (int)g_b.sources[0].fake_unmute_at);
+    ASSERT_EQ_INT(14400, (int)g_b.sources[0].fake_die_at);
+    ASSERT_EQ_INT(1, g_b.sources[0].fake_start_muted);
+    ASSERT_EQ_INT(1, g_b.sources[0].fake_start_dead);
+    /* And the fields that were already there are untouched by the new ones. */
+    ASSERT_EQ_INT(440, (int)g_b.sources[0].fake_hz);
+    ASSERT_NEAR(0.25,  g_b.sources[0].fake_amp, 1e-6);
+}
+
+TEST(a_healthy_fake_writes_no_health_keys_at_all)
+{
+    /* All zero IS healthy (capture.h), so a source with nothing wrong with it
+     * produces exactly the file it produced before health existed -- and a
+     * session written by that older build still loads as a healthy one. */
+    size_t len = 0;
+    AprErr e;
+
+    build_fake(&g_a);
+    e = apr_session_write_utf8(&g_a, g_json, JSON_CAP, &len);
+    ASSERT_FALSE(apr_failed(&e));
+    ASSERT_TRUE(strstr(g_json, "\"toneHz\"") != NULL);
+    ASSERT_TRUE(strstr(g_json, "AtFrame") == NULL);
+    ASSERT_TRUE(strstr(g_json, "startMuted") == NULL);
+    ASSERT_TRUE(strstr(g_json, "startDead") == NULL);
+
+    e = apr_session_load_utf8(g_json, len, &g_b, &g_lrep);
+    ASSERT_FALSE(apr_failed(&e));
+    ASSERT_EQ_INT(0, (int)g_b.sources[0].fake_mute_at);
+    ASSERT_EQ_INT(0, (int)g_b.sources[0].fake_die_at);
+    ASSERT_EQ_INT(0, g_b.sources[0].fake_start_muted);
+    ASSERT_EQ_INT(0, g_b.sources[0].fake_start_dead);
+}
+
 /* ===========================================================================
  * Files that are not sessions
  * ========================================================================= */
@@ -493,6 +571,28 @@ TEST(a_value_that_is_impossible_is_refused_with_where_it_was)
         "{\"apprecorder\":{\"version\":1},"
         " \"sources\":[{\"key\":\"a\",\"kind\":\"telepathy\"}]}"));
     ASSERT_TRUE(wcsstr(g_lrep.where, L"kind") != NULL);
+}
+
+TEST(a_health_value_the_fake_source_could_not_use_is_refused_by_name)
+{
+    /* There are no booleans in this format, so startMuted is 0 or 1 and
+     * anything else is a file someone got wrong rather than a value to
+     * coerce. A negative frame is not a frame. */
+    ASSERT_EQ_INT(APR_SESSION_FAULT_BAD_VALUE, (int)fault_of(
+        "{\"apprecorder\":{\"version\":1},"
+        " \"sources\":[{\"key\":\"a\",\"kind\":\"fake\",\"startMuted\":2}]}"));
+    ASSERT_TRUE(wcsstr(g_lrep.where, L"startMuted") != NULL);
+
+    ASSERT_EQ_INT(APR_SESSION_FAULT_BAD_VALUE, (int)fault_of(
+        "{\"apprecorder\":{\"version\":1},"
+        " \"sources\":[{\"key\":\"a\",\"kind\":\"fake\",\"dieAtFrame\":-1}]}"));
+    ASSERT_TRUE(wcsstr(g_lrep.where, L"dieAtFrame") != NULL);
+
+    ASSERT_EQ_INT(APR_SESSION_FAULT_BAD_TYPE, (int)fault_of(
+        "{\"apprecorder\":{\"version\":1},"
+        " \"sources\":[{\"key\":\"a\",\"kind\":\"fake\","
+        "               \"muteAtFrame\":\"soon\"}]}"));
+    ASSERT_TRUE(wcsstr(g_lrep.where, L"muteAtFrame") != NULL);
 }
 
 TEST(unknown_keys_are_ignored_counted_and_named)
@@ -1103,6 +1203,37 @@ TEST(save_session_writes_a_file_that_loads_back_as_the_same_graph)
     /* Nothing was recorded: save-session describes a recording, it does not
      * make one. */
     ASSERT_FALSE(file_exists(L"mix.wav"));
+    DeleteFileW(sfile);
+}
+
+TEST(a_fake_asked_to_fail_still_fails_after_a_save_and_a_reload)
+{
+    /* The point of writing health down: a session that reproduces a silent
+     * recording has to keep reproducing it. And two fakes that differ ONLY in
+     * their health are two sources, not one -- interning them together would
+     * quietly drop a bus's source. */
+    Cap     c;
+    wchar_t sfile[MAX_PATH], wav[MAX_PATH];
+
+    tmp_path(sfile, MAX_PATH, L"health", L"json");
+    tmp_path(wav,   MAX_PATH, L"health", L"wav");
+
+    ASSERT_EQ_INT(APR_CLI_OK, RUN(&c, L"save-session", L"--session", sfile,
+        L"--fake", L"440,0,0.25,die=4800",
+        L"--fake", L"440,0,0.25",
+        L"--out", wav, L"--quiet"));
+
+    ASSERT_FALSE(failed(apr_session_load(sfile, &g_b, &g_lrep)));
+    ASSERT_EQ_INT(2, (int)g_b.source_count);
+    ASSERT_EQ_INT(4800, (int)g_b.sources[0].fake_die_at);
+    ASSERT_EQ_INT(0,    (int)g_b.sources[1].fake_die_at);
+
+    /* Replayed, the recording is playable and INCOMPLETE, exactly as it was
+     * when it was typed. */
+    ASSERT_EQ_INT(APR_CLI_INCOMPLETE, RUN(&c, L"record", L"--session", sfile,
+                                          L"--duration", L"0.5", L"--quiet"));
+    ASSERT_TRUE(file_exists(wav));
+    DeleteFileW(wav);
     DeleteFileW(sfile);
 }
 

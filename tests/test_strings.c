@@ -581,11 +581,18 @@ TEST(an_out_of_range_id_is_safe)
     s = apr_str((AprStrId)(-12345));
     ASSERT_WSTR_EQ(L"!!apr_str: id out of range!!", s);
 
-    /* In range but never declared: loud, not blank. */
-    s = apr_str((AprStrId)1099);
+    /* In range but never declared: loud, not blank.
+     *
+     * The canary sits at the TOP of the range on purpose. It used to be the
+     * first free id after the command line's help block, which is exactly
+     * where the next help string gets added -- and adding one then failed
+     * this case instead of failing something real. APR_STR_LIST grows upward
+     * from 1000, so the last id below APR_STR_ID_MAX is the one that stays
+     * undeclared longest. */
+    s = apr_str((AprStrId)(APR_STR_ID_MAX - 1));
     ASSERT_NOT_NULL(s);
     ASSERT_GT_INT(0, (int)wcslen(s));
-    ASSERT_WSTR_EQ(L"!!apr_str 1099 missing!!", s);
+    ASSERT_WSTR_EQ(L"!!apr_str 1799 missing!!", s);
 
     /* And the same through the formatting and probing entry points. */
     ASSERT_EQ_INT(-1, apr_str_probe(EN, (AprStrId)0x7fffffff, buf, BUF));

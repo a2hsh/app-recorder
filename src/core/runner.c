@@ -149,7 +149,16 @@ static void poll_sources(AprRunner *r)
             notice(r, APR_RUN_EV_SOURCE_DIED, i, SIZE_MAX, SIZE_MAX,
                    r->source[i].name, NULL);
         }
-        if (muted && !r->source[i].reported_muted) {
+        /* DEATH WINS. A source that has exited is not usefully described as
+         * muted -- unmuting it in Windows would fix nothing -- and the two
+         * are indistinguishable in the audio anyway, both being digital
+         * silence at the right rate. Whoever is listening gets the one
+         * sentence that is worth acting on, which is the same choice
+         * src/ui/tree_panel.c makes for the row a screen reader reads.
+         *
+         * Only simultaneous states are affected: a source that goes silent at
+         * one second and dies at three still says both things, in order. */
+        if (muted && alive && !r->source[i].reported_muted) {
             r->source[i].reported_muted = 1;
             notice(r, APR_RUN_EV_SOURCE_MUTED, i, SIZE_MAX, SIZE_MAX,
                    r->source[i].name, NULL);

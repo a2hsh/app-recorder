@@ -55,6 +55,19 @@
 #define APR_DISC_PATH_CCH     260
 #define APR_DISC_ENDPOINT_CCH 256
 
+/* A window class name. RegisterClassW caps a class name at 256 characters, so
+ * this is deliberately SHORTER than the longest one Windows will accept: the
+ * class name is only ever a tiebreaker between two instances of the same
+ * application, and GetClassNameW truncates rather than failing, so a longer
+ * name simply gets compared on its first 63 characters -- which still tells
+ * two instances apart exactly as well.
+ *
+ * session.h's APR_SESSION_CLASS_CCH IS this constant, not a second one that
+ * happens to match. A class name that came back longer than the field it is
+ * copied into would reach wcscpy_s over-length, which is the CRT's invalid
+ * parameter handler -- a modal dialog, i.e. a hang -- and not a truncation. */
+#define APR_DISC_CLASS_CCH    64
+
 typedef struct AprAudioApp {
     uint32_t pid;
     wchar_t  exe[APR_DISC_NAME_CCH];      /* "chrome.exe", the leaf of `path` */
@@ -98,5 +111,30 @@ int apr_process_exists(uint32_t pid);
  * to an empty string when the process cannot be opened, which is normal for
  * anything running at a higher integrity level. Returns characters written. */
 size_t apr_process_image_name(uint32_t pid, wchar_t *buf, size_t cch);
+
+/* The class name of the process's first TOP-LEVEL, VISIBLE, UNOWNED window
+ * ("Chrome_WidgetWin_1") into `buf`. Returns characters written.
+ *
+ * WHAT IT IS FOR. Two copies of the same application have the same image path
+ * and the same name and are told apart by nothing else a listing can see, so
+ * this is the tiebreaker a session load uses to reopen the RIGHT one (design
+ * section 9) and the same thing a picker needs to offer two rows a person can
+ * choose between.
+ *
+ * EMPTY IS A NORMAL ANSWER, not a failure: a console application has no
+ * window, a tray-only one has no visible window, and an application still
+ * starting up has not created one yet. A source with a single instance never
+ * needs a tiebreaker, so the caller treats empty as "no help available" and
+ * carries on.
+ *
+ * WHY THOSE THREE FILTERS. Hidden message-only windows carry class names that
+ * mean nothing to anyone, and owned windows are dialogs and tooltips whose
+ * classes belong to the framework rather than to the application -- either
+ * would make the answer depend on enumeration order, which is not a property
+ * anything may be matched on.
+ *
+ * Enumeration only, like everything else here: no COM, no audio client, and
+ * nothing is opened, so it is safe on a --dry-run path. */
+size_t apr_process_window_class(uint32_t pid, wchar_t *buf, size_t cch);
 
 #endif /* APPRECORDER_DISCOVER_H */

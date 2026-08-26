@@ -131,7 +131,7 @@
 #define APR_EN_CLI_SOURCES_HEADER               "Sources. Each one joins the bus opened most recently."
 #define APR_EN_CLI_OPT_BUS                      "--bus <name>           Open a bus. The sources and outputs that follow belong to it."
 #define APR_EN_CLI_OPT_EXE                      "--exe <name>           Capture the application whose program file is <name>, for example chrome.exe."
-#define APR_EN_CLI_OPT_FAKE                     "--fake <hz>[,<ppm>[,<amp>]]   Add a source apprecorder generates itself. Reads no audio hardware and plays nothing."
+#define APR_EN_CLI_OPT_FAKE                     "--fake <hz>[,<ppm>[,<amp>]][,<health>...]   Add a source apprecorder generates itself. Reads no audio hardware and plays nothing."
 #define APR_EN_CLI_OPT_GAIN                     "--gain <dB>            Gain for the source named just before it. 0 dB leaves it alone."
 #define APR_EN_CLI_OPT_SYSTEM_MINUS_TREE        "--system-minus-tree <id>   Record all system audio and hold back one process tree, named by its process id. Read what it prints before you use it."
 #define APR_EN_CLI_OUTPUTS_HEADER               "Outputs. Each one joins the bus opened most recently."
@@ -161,6 +161,7 @@
 #define APR_EN_CLI_EXAMPLE_TWO                  "apprecorder --bus Mix --exe teams.exe --device Chat --out mix.wav --bus Voice --device Chat --out voice.wav"
 #define APR_EN_CLI_STOP_HINT                    "Press Ctrl+C to stop. Every file is closed and made playable before apprecorder exits."
 #define APR_EN_CLI_VERSION_LINE                 "apprecorder %1!s!"
+#define APR_EN_CLI_OPT_FAKE_HEALTH              "<health> is muted, dead, mute=<frame>, unmute=<frame> or die=<frame>. It makes a synthetic source go silent, or stop, at a frame you choose, so that the two failures which look exactly like a good recording can be rehearsed without any audio hardware."
 #define APR_EN_ERR_UNKNOWN_COMMAND              "%1!s! is not a command apprecorder has. Run apprecorder help to see the ones it does."
 #define APR_EN_ERR_UNKNOWN_OPTION               "%1!s! is not an option apprecorder has. Run apprecorder help to see the ones it does."
 #define APR_EN_ERR_OPTION_NEEDS_VALUE           "%1!s! needs a value written after it."
@@ -793,6 +794,7 @@ END
 #define APR_AR_CLI_EXAMPLE_TWO(id)              /* not translated yet */
 #define APR_AR_CLI_STOP_HINT(id)                /* not translated yet */
 #define APR_AR_CLI_VERSION_LINE(id)             /* not translated yet */
+#define APR_AR_CLI_OPT_FAKE_HEALTH(id)          /* not translated yet */
 #define APR_AR_ERR_UNKNOWN_COMMAND(id)          /* not translated yet */
 #define APR_AR_ERR_UNKNOWN_OPTION(id)           /* not translated yet */
 #define APR_AR_ERR_OPTION_NEEDS_VALUE(id)       /* not translated yet */

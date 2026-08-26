@@ -48,14 +48,14 @@
  *                    source IS means not knowing what to capture.
  *
  * ===========================================================================
- * A NOTE ON WHERE THE WINDOW-CLASS LOOKUP LIVES
+ * WHERE THE WINDOW-CLASS LOOKUP LIVES
  *
- *   "the window class of a pid" has no owner in the tree today, and discover.h
- *   is about what can be RECORDED rather than about window management. It is
- *   a private static here, following the project's own standing rule for
- *   platform/str.c and fs.c: add the shared module when a second caller
- *   exists, not before. The moment the UI needs it, it should move to
- *   discover.c and this copy should go.
+ *   In discover.c, as apr_process_window_class(). It used to be a private
+ *   static here on the project's standing rule of adding the shared module
+ *   when a second caller exists and not before; the second caller arrived, so
+ *   it moved to the owner of "what is running and what is it" (design 7).
+ *   What is left in this file is the adapter that gives the
+ *   AprSessionMachine callback the borrowed-pointer shape it wants.
  */
 #include <windows.h>
 #include <stdarg.h>
@@ -66,12 +66,6 @@
 
 #include "discover.h"
 #include "session.h"
-
-/* EnumWindows / GetClassNameW. A pragma rather than a CMakeLists edit: this
- * translation unit is the only thing in the product that needs user32, several
- * agents are in CMakeLists.txt, and the dependency has no business being
- * global. */
-#pragma comment(lib, "user32.lib")
 
 /* One translation unit, so nothing of jsmn's reaches the link, and strict
  * mode so that a character which cannot begin a value is an error rather than
@@ -506,6 +500,36 @@ static int read_source(P *p, int obj, size_t index)
             WANT(v >= 0 && v <= 1000000, APR_SESSION_FAULT_BAD_VALUE,
                  wat(w, L"sources[%d].amplitude", (int)index));
             s->fake_amp = (float)((double)v / 1000000.0);
+        } else if (key_is(p, key, "muteAtFrame")) {
+            WANT(tok_i64(p, val, &v) == 0, APR_SESSION_FAULT_BAD_TYPE,
+                 wat(w, L"sources[%d].muteAtFrame", (int)index));
+            WANT(v >= 0 && v <= APR_SESSION_MAX_FRAME, APR_SESSION_FAULT_BAD_VALUE,
+                 wat(w, L"sources[%d].muteAtFrame", (int)index));
+            s->fake_mute_at = (uint64_t)v;
+        } else if (key_is(p, key, "unmuteAtFrame")) {
+            WANT(tok_i64(p, val, &v) == 0, APR_SESSION_FAULT_BAD_TYPE,
+                 wat(w, L"sources[%d].unmuteAtFrame", (int)index));
+            WANT(v >= 0 && v <= APR_SESSION_MAX_FRAME, APR_SESSION_FAULT_BAD_VALUE,
+                 wat(w, L"sources[%d].unmuteAtFrame", (int)index));
+            s->fake_unmute_at = (uint64_t)v;
+        } else if (key_is(p, key, "dieAtFrame")) {
+            WANT(tok_i64(p, val, &v) == 0, APR_SESSION_FAULT_BAD_TYPE,
+                 wat(w, L"sources[%d].dieAtFrame", (int)index));
+            WANT(v >= 0 && v <= APR_SESSION_MAX_FRAME, APR_SESSION_FAULT_BAD_VALUE,
+                 wat(w, L"sources[%d].dieAtFrame", (int)index));
+            s->fake_die_at = (uint64_t)v;
+        } else if (key_is(p, key, "startMuted")) {
+            WANT(tok_i64(p, val, &v) == 0, APR_SESSION_FAULT_BAD_TYPE,
+                 wat(w, L"sources[%d].startMuted", (int)index));
+            WANT(v == 0 || v == 1, APR_SESSION_FAULT_BAD_VALUE,
+                 wat(w, L"sources[%d].startMuted", (int)index));
+            s->fake_start_muted = (int)v;
+        } else if (key_is(p, key, "startDead")) {
+            WANT(tok_i64(p, val, &v) == 0, APR_SESSION_FAULT_BAD_TYPE,
+                 wat(w, L"sources[%d].startDead", (int)index));
+            WANT(v == 0 || v == 1, APR_SESSION_FAULT_BAD_VALUE,
+                 wat(w, L"sources[%d].startDead", (int)index));
+            s->fake_start_dead = (int)v;
         } else {
             wchar_t kw[64];
             (void)tok_wstr(p, key, kw, 64);
@@ -1351,45 +1375,22 @@ AprErr apr_session_resolve_against(AprSession *s,
 #define LIVE_APPS 128
 #define LIVE_EPS  64
 
-typedef struct WcCtx {
-    uint32_t pid;
-    wchar_t  cls[APR_SESSION_CLASS_CCH];
-    int      found;
-} WcCtx;
-
-static BOOL CALLBACK wc_enum(HWND h, LPARAM lp)
-{
-    WcCtx *c = (WcCtx *)lp;
-    DWORD  pid = 0;
-
-    GetWindowThreadProcessId(h, &pid);
-    if ((uint32_t)pid != c->pid) return TRUE;
-    /* Top-level and visible only. An application's hidden message-only
-     * windows carry class names that mean nothing to anyone and would make
-     * the tiebreaker depend on enumeration order. */
-    if (!IsWindowVisible(h)) return TRUE;
-    if (GetWindow(h, GW_OWNER) != NULL) return TRUE;
-    if (GetClassNameW(h, c->cls, APR_SESSION_CLASS_CCH) > 0) {
-        c->found = 1;
-        return FALSE;
-    }
-    return TRUE;
-}
-
-/* Single-threaded by contract (session.h), so one buffer is enough and the
- * caller gets a pointer valid until the next call -- which is exactly how the
- * AprSessionMachine callback is used. */
+/* The lookup itself is discover.c's (it has a second caller now, and design 7
+ * gives "what is running and what is it" one owner). What stays here is the
+ * SHAPE the AprSessionMachine callback wants: a borrowed pointer, or NULL for
+ * "no window", rather than a caller's buffer.
+ *
+ * One static buffer is enough because session.h makes a resolution
+ * single-threaded by contract, and the returned pointer is documented as
+ * valid only until the next call -- which is exactly how the callback is
+ * used: read, compared, and copied before the next candidate is asked. */
 static const wchar_t *live_window_class(void *user, uint32_t pid)
 {
     static wchar_t out[APR_SESSION_CLASS_CCH];
-    WcCtx c;
 
     (void)user;
-    memset(&c, 0, sizeof c);
-    c.pid = pid;
-    EnumWindows(wc_enum, (LPARAM)&c);
-    if (!c.found) return NULL;
-    wcscpy_s(out, APR_SESSION_CLASS_CCH, c.cls);
+    if (apr_process_window_class(pid, out, APR_SESSION_CLASS_CCH) == 0)
+        return NULL;
     return out;
 }
 

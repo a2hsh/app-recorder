@@ -112,6 +112,20 @@ typedef struct AprCliSource {
     int32_t  fake_ppm;
     float    fake_amp;
 
+    /* Synthetic HEALTH, straight through to AprCaptureConfig.fake's five
+     * health fields with nothing in between. capture.h owns the meaning:
+     * frame indices rather than ticks, 0 means never, and frame 0 is spelled
+     * as start_muted / start_dead rather than as a frame of 0.
+     *
+     * It is on the --fake spec and not on a flag of its own because the
+     * health of a synthetic source is part of describing that source -- the
+     * same reason its tone and its drift are there. */
+    uint64_t fake_mute_at;
+    uint64_t fake_unmute_at;
+    uint64_t fake_die_at;
+    int      fake_start_muted;
+    int      fake_start_dead;
+
     /* Filled in by apr_cli_resolve. */
     uint32_t pid;
     wchar_t  endpoint_id[APR_DISC_ENDPOINT_CCH];

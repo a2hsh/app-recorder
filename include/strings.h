@@ -216,7 +216,8 @@
     X(CLI_EXAMPLE_ONE,             1095)                                      \
     X(CLI_EXAMPLE_TWO,             1096)                                      \
     X(CLI_STOP_HINT,               1097)                                      \
-    X(CLI_VERSION_LINE,            1098)
+    X(CLI_VERSION_LINE,            1098)                                      \
+    X(CLI_OPT_FAKE_HEALTH,         1099)
 
 /* ---- the command line: what it says when it refuses. ---- */
 #define APR_STR_LIST_CLI_ERR(X)                                                \

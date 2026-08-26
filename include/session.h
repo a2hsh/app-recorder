@@ -145,8 +145,12 @@ extern "C" {
  * into something meaningful. */
 #define APR_SESSION_KEY_CCH 32
 
-/* Win32 window class names are capped at 256 characters by RegisterClassW. */
-#define APR_SESSION_CLASS_CCH 64
+/* THE SAME constant as discover.h's, not a second one that happens to agree.
+ * discover.c is what produces a class name and this is the field it is copied
+ * into; if the two ever drifted apart the copy would reach wcscpy_s
+ * over-length, which is the CRT's invalid parameter handler rather than a
+ * truncation. See APR_DISC_CLASS_CCH for why the value is what it is. */
+#define APR_SESSION_CLASS_CCH APR_DISC_CLASS_CCH
 
 /* How many rival processes one resolution reports by name. Past this the
  * count is still exact; only the list is cut. */
@@ -160,6 +164,16 @@ extern "C" {
  * pointing --session at a 4 GB WAV fails in a sentence rather than in the
  * allocator. */
 #define APR_SESSION_MAX_BYTES (1u << 20)
+
+/* Largest frame index a synthetic source's health transition may name. At
+ * 48 kHz it is a little over twelve hours, which is longer than any recording
+ * this program is for, and it keeps the value inside the range every integer
+ * on the way in and out of the file can hold.
+ *
+ * THE COMMAND LINE USES THIS SAME CEILING for the health fields of a --fake
+ * spec, deliberately: a spec that can be typed must be a spec that can be
+ * written down and read back, and two ceilings would eventually disagree. */
+#define APR_SESSION_MAX_FRAME 0x7fffffffLL
 
 /* ---------------------------------------------------------------------------
  * The model
@@ -202,6 +216,17 @@ typedef struct AprSessionSource {
     uint32_t fake_hz;
     int32_t  fake_ppm;
     float    fake_amp;
+
+    /* Synthetic HEALTH: capture.h's five fields, written down so that a fake
+     * which goes silent or dies part way through describes the same recording
+     * after a reload as it did before one. All zero is a healthy source, which
+     * is what keeps a session written before these existed loading unchanged.
+     * Written to the file only when one of them is set. */
+    uint64_t fake_mute_at;
+    uint64_t fake_unmute_at;
+    uint64_t fake_die_at;
+    int      fake_start_muted;
+    int      fake_start_dead;
 
     /* --- filled in by apr_session_resolve -------------------------------- */
     int      resolved;      /* nonzero once this source can actually be opened */
@@ -518,7 +543,9 @@ const char *apr_session_kind_wire(AprSessionSrcKind k);
  *       "endpointId": "{0.0.1.00000000}.{7b1c...}",
  *       "endpointName": "Chat Mic (TC-Helicon GoXLR)" },
  *     { "key": "s2", "kind": "fake", "name": "test tone",
- *       "toneHz": 440, "ratePpm": 30, "amplitude": 0.25 }
+ *       "toneHz": 440, "ratePpm": 30, "amplitude": 0.25,
+ *       "muteAtFrame": 4800, "unmuteAtFrame": 0, "dieAtFrame": 0,
+ *       "startMuted": 0, "startDead": 0 }
  *   ],
  *   "buses": [
  *     { "name": "Mix",
@@ -546,6 +573,12 @@ const char *apr_session_kind_wire(AprSessionSrcKind k);
  *   - Field names are ASCII and are NOT localized, for the same reason the
  *     --json output is not: a file a script writes must not change shape
  *     because the interface language did.
+ *   - The five fake HEALTH keys are written only when one of them is set, so
+ *     an ordinary synthetic source looks exactly as it always did and a file
+ *     written before they existed still loads as a healthy one. There are no
+ *     booleans anywhere in this format, so `startMuted` and `startDead` are 0
+ *     or 1. A frame of 0 means "never", which is why frame 0 is asked for
+ *     with `startMuted` / `startDead` instead (capture.h).
  * ========================================================================= */
 
 #ifdef __cplusplus

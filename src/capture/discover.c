@@ -26,6 +26,12 @@
 #include "discover.h"
 #include "wasapi_common.h"
 
+/* EnumWindows / GetClassNameW, for apr_process_window_class below. A pragma
+ * rather than a CMakeLists edit: this is the only translation unit in the
+ * product that needs user32, and the dependency has no business being global.
+ * It travelled here from session_load.c along with the function. */
+#pragma comment(lib, "user32.lib")
+
 /* ---------------------------------------------------------------------------
  * COM scope. Nested CoInitializeEx on a thread already in the MTA returns
  * S_FALSE and still needs its CoUninitialize, so the flag records whether this
@@ -114,6 +120,66 @@ size_t apr_process_image_name(uint32_t pid, wchar_t *buf, size_t cch)
     if (image_path(pid, full, sizeof full / sizeof full[0]) == 0) return 0;
     leaf = leaf_of(full);
     copy_cch(buf, cch, leaf);
+    return wcslen(buf);
+}
+
+/* ---------------------------------------------------------------------------
+ * Which window belongs to which process
+ *
+ * This used to be a private static in src/session/session_load.c, where it had
+ * exactly one caller. It moved here when the second one appeared, which is the
+ * project's standing rule for a shared helper: add the module when there are
+ * two callers, not in anticipation of one.
+ *
+ * No COM. Every other query in this file wraps itself in com_enter/com_leave
+ * because it walks the audio engine; window enumeration does not, and adding a
+ * COM scope it does not need would make a cheap query expensive and would put
+ * an apartment requirement on a caller that has none.
+ * ------------------------------------------------------------------------- */
+
+typedef struct WcCtx {
+    uint32_t pid;
+    wchar_t  cls[APR_DISC_CLASS_CCH];
+    int      found;
+} WcCtx;
+
+static BOOL CALLBACK wc_enum(HWND h, LPARAM lp)
+{
+    WcCtx *c = (WcCtx *)lp;
+    DWORD  pid = 0;
+
+    GetWindowThreadProcessId(h, &pid);
+    if ((uint32_t)pid != c->pid) return TRUE;
+    /* Top-level and visible only. An application's hidden message-only
+     * windows carry class names that mean nothing to anyone and would make
+     * the tiebreaker depend on enumeration order. */
+    if (!IsWindowVisible(h)) return TRUE;
+    if (GetWindow(h, GW_OWNER) != NULL) return TRUE;
+    /* GetClassNameW truncates to the buffer rather than failing, which is
+     * what keeps a long class name from being no answer at all. */
+    if (GetClassNameW(h, c->cls, APR_DISC_CLASS_CCH) > 0) {
+        c->found = 1;
+        return FALSE;   /* stop enumerating: the first one is the answer */
+    }
+    return TRUE;
+}
+
+size_t apr_process_window_class(uint32_t pid, wchar_t *buf, size_t cch)
+{
+    WcCtx c;
+
+    if (!buf || cch == 0) return 0;
+    buf[0] = L'\0';
+    if (pid == 0) return 0;
+
+    memset(&c, 0, sizeof c);
+    c.pid = pid;
+    /* EnumWindows returns FALSE when the callback stops it, which is the
+     * SUCCESS case here; `found` is the result, not the return value. */
+    EnumWindows(wc_enum, (LPARAM)&c);
+    if (!c.found) return 0;
+
+    copy_cch(buf, cch, c.cls);
     return wcslen(buf);
 }
 

@@ -3458,13 +3458,13 @@ went green once they settled.
 
 ---
 
-# ★ START HERE — state as of 2026-08-26, ~06:00
+# ★ START HERE — state as of 2026-08-26, ~09:30
 
 ## It works. Try this first
 
 ```
 cd d:\data\projects\apprecorder
-build.cmd Release test          → 23/23 suites, 0 failures
+build.cmd Release test          → 26/26 suites, 519 cases, 0 failures
 build\Release\apprecorder.exe list-apps
 build\Release\apprecorder.exe list-devices
 ```
@@ -3539,13 +3539,14 @@ outstanding count every run.
    `apr_str()` at the point of display (CLI, canvas, tree panel). The names live
    in `APR_STR_LIST_CORE` as `ACTION_NAME_WAV/MP3/OGG/NONE` (ids 1055-1058).
    Arabic placeholders added; **four more strings pending translation.**
-2. ~~**`capture_fake` has no health knob**~~ **FIXED 2026-08-26** — see the
-   entry at the bottom. `AprCaptureConfig.fake` now carries `mute_at_frame`,
-   `unmute_at_frame`, `die_at_frame`, `start_muted`, `start_dead`. The tree's
-   two state clauses are now driven through a real graph. **The CLI's
-   `WARN_SOURCE_MUTED` path is still uncovered** — reaching it needs a `--fake`
-   spec field, which is a cli.c edit and was left alone while an agent was
-   live there.
+2. ~~**`capture_fake` has no health knob**~~ — **fully closed 2026-08-26.**
+   `AprCaptureConfig.fake` carries `mute_at_frame`, `unmute_at_frame`,
+   `die_at_frame`, `start_muted`, `start_dead`, and the residual gap — the
+   CLI's `WARN_SOURCE_MUTED` path — is now covered too: `--fake` takes
+   `muted`, `dead`, `mute=<frame>`, `unmute=<frame>`, `die=<frame>` and the
+   warnings, the once-only rule and exit **6** are all driven through
+   `apr_cli_run`. Death now wins over muted in `core/runner.c`, matching the
+   tree panel. See the entry at the bottom.
 3. ~~**`action_m4a.c` still scrubs non-finite values**~~ — moot: the file is
    gone.
 4. ~~**`--out x.ogg` needs an explicit `--format ogg`**~~ — **fixed
@@ -3553,8 +3554,12 @@ outstanding count every run.
    `extension` field first (authoritative — `.opus` must reach ogg), then the
    registry `id`. An action with an empty extension (`none`) is reachable by
    neither, so `x.none` is still refused.
-5. **Window-class lookup is a private static in `session_load.c`.** Move to
-   `discover.c` when the UI needs it.
+5. ~~**Window-class lookup is a private static in `session_load.c`.**~~ —
+   **fixed 2026-08-26.** It is `apr_process_window_class()` in
+   `capture/discover.c` now, with a caller's buffer instead of a static one,
+   and `APR_SESSION_CLASS_CCH` is *defined as* `APR_DISC_CLASS_CCH` so the two
+   can never disagree. `tests/test_discover.c` is new — that file had no
+   direct coverage at all before.
 6. ~~**`CMakeLists.txt`'s `foreach(_uitest …)` list**~~ — **fixed 2026-08-26.**
    It now walks `TEST_SRC` and matches `^test_ui_`, so a new `tests/test_ui_*.c`
    links `apprecorder_ui` with no build-system edit.
@@ -4057,3 +4062,228 @@ holds under a real kill, not just a simulated one.
 - **Never says who owns the model or the run loop.** §7's module layout lists
   neither `core/runner.c` nor `ui/controller.c`. §6.3's selection identity says
   "a controller wires the two directions" without naming it: `ui/controller.c`.
+
+---
+
+## 2026-08-26 -- CLI `WARN_SOURCE_MUTED` covered (defect 2 residual) + defect 5 closed
+
+`build.cmd Debug test`: **26 suites, 519 cases, 0 failures**, `/W4 /WX` clean.
+Release: the same 26 suites and 519 cases pass, run from `build\Release\`;
+`build.cmd Release test` could not reach ctest because `apprecorder_ui_app.exe`
+was **locked by the author's own running copy** (PID 17488) -- a link failure,
+not a code one, and nothing else in the tree was left unbuilt. Nothing
+committed. **No audio was rendered at any point** (AGENTS.md rule 1).
+
+Case counts: `test_cli` **45 -> 57**, `test_session` **47 -> 51**,
+`tests/test_discover.c` is **new, 10 cases**.
+
+### 1. `--fake` grew a health half, and that is what reaches `poll_sources()`
+
+    --fake <hz>[,<ppm>[,<amp>]][,<health>...]
+
+    <health> = muted | dead | mute=<frame> | unmute=<frame> | die=<frame>
+
+Five words, mapping ONE-TO-ONE onto `AprCaptureConfig.fake`'s five health
+fields with nothing in between. On the source's own spec rather than on a flag
+of its own, because the health of a synthetic source is part of describing it,
+exactly like its tone and its drift.
+
+Two grammar decisions worth not re-deriving:
+
+- **A frame is never 0.** capture.h reserves 0 for "never", so `mute=0` and
+  `die=0` are REFUSED and frame 0 is spelled `muted` / `dead`. Two spellings
+  for one state is how a "0 = never" convention rots.
+- **A health word may stand where a number would have gone.** `440,dead` reads
+  as well as `440,0,0.25,dead` and means the same; once a health word appears,
+  everything after it is health too, so a word can never be mistaken for a
+  drift that arrived late. The tone is still first and still required, so
+  `--fake dead` is a usage error.
+
+`mute=` and `unmute=` on the SAME frame is not checked in the parser --
+`fake_open` already refuses it, and the CLI reports that as exit 5 with the
+reason attached. One rule, one owner.
+
+### 2. What is now proved through the real CLI path
+
+`poll_sources()` is still a static with no seam, and it no longer needs one:
+every case below drives `apr_cli_run` and reads what it printed.
+
+| Case | Says |
+|---|---|
+| starts muted | warning fires, **once**, exit **0** |
+| goes muted mid-recording | warning fires, **once**, exit **0** |
+| dies mid-recording | warning fires, exit **6**, file playable |
+| muted AND dead at once | **only** the death warning, exit **6** |
+| muted at 50 ms, dead at 500 ms | **both**, in order |
+| one fake dead, one healthy, two buses | exit 6, **both** files playable |
+
+The expected line is built with `apr_str_format` from the catalog rather than
+typed into the test, so the cases pin the WARNING and not the wording of one
+language -- which matters the day the Arabic lands.
+
+**DEATH NOW WINS OVER MUTED**, and that is a real behaviour change in
+`core/runner.c`: the mute clause gained an `alive &&`. Unmuting an application
+that has exited fixes nothing, and the two are indistinguishable in the audio
+anyway, so the listener gets the one sentence worth acting on -- the same
+choice `ui/tree_panel.c` makes for the row a screen reader reads. Only
+SIMULTANEOUS states collapse; two things that happened at two different
+moments are still two things. The snapshot still exposes `alive` and `muted`
+separately, so the UI is unaffected.
+
+**Mutation-tested, both directions.** Removing the `alive &&` fails the
+both-at-once case; dropping the five lines that copy health into `cfg.fake`
+fails 7 cases across parse, record and session.
+
+### 3. Session round-trip
+
+`muteAtFrame`, `unmuteAtFrame`, `dieAtFrame`, `startMuted`, `startDead`,
+**written only when one of them is set** -- so a healthy fake produces exactly
+the file it produced before health existed, and a file written by an older
+build still loads as a healthy source. There are no booleans anywhere in this
+format, so the two start flags are 0 or 1 and anything else is `BAD_VALUE`.
+
+`same_source` compares health too. Two fakes differing ONLY in when they go
+silent are two sources; interning them together would have quietly dropped a
+bus's source, which is a silent wrong recording rather than an error.
+
+`APR_SESSION_MAX_FRAME` is the ceiling for both the file and the command line,
+deliberately one constant: what can be typed has to be what can be written
+down and read back.
+
+### 4. One test moved that was not about the feature
+
+`test_strings.c`'s "in range but never declared" canary was id **1099** --
+which is the first free id after the CLI help block, i.e. exactly where the
+next help string gets added. Adding one failed that case instead of failing
+anything real. It is now `APR_STR_ID_MAX - 1` (1799): the list grows upward
+from 1000, so the top of the range stays undeclared longest.
+
+### 5. KNOWN DEFECT 5 closed -- the window-class lookup moved
+
+`session_load.c`'s private static is now
+`apr_process_window_class(pid, buf, cch)` in `capture/discover.c`, the owner of
+"what is running and what is it". **It was not a clean lift**; three things
+differed and each is now decided rather than inherited:
+
+- **The static return buffer did not survive the move.** discover.h promises
+  every function there allocates nothing beyond the caller's array, and a
+  function-static buffer is a threading hazard the UI would inherit. The public
+  shape is a caller's buffer returning characters written, matching
+  `apr_process_image_name`. The borrowed-pointer shape the `AprSessionMachine`
+  callback wants is now a four-line adapter in `session_load.c`, where the
+  single-threaded contract that justifies it actually lives.
+- **The size constant was the real hazard.** `APR_SESSION_CLASS_CCH` is now
+  *defined as* `APR_DISC_CLASS_CCH` rather than a second 64 that happens to
+  agree. Had discover used the 256 that `RegisterClassW` actually allows, the
+  copy into the 64-character session field would have reached `wcscpy_s`
+  over-length -- the CRT's invalid parameter handler, a modal dialog and
+  therefore a hang in Debug, NOT a truncation. `test_discover.c` asserts the
+  two are equal so they cannot drift apart again.
+- **`pid == 0` now short-circuits** instead of costing a whole `EnumWindows`
+  sweep to discover that no window belongs to the System Idle Process. Same
+  answer, and consistent with `apr_process_exists`.
+
+The `#pragma comment(lib, "user32.lib")` travelled with the function. Both
+files are in the same static library, so nothing about linking changed and
+CMakeLists.txt needed no edit.
+
+`tests/test_discover.c` is new because **discover.c had no direct coverage at
+all** -- it was only ever exercised through `list-apps` and a session resolve.
+The truncation case is the one that earned its place: it proves `GetClassNameW`
+truncates rather than failing, which is the assumption the shortened constant
+rests on.
+
+### Left alone on purpose
+
+- `src/ui/canvas.c` carries an **uncommitted change that is not mine** (an
+  empty-canvas accessible description). It was already in the working tree.
+- **`build/Release/apprecorder_ui_app.exe` is a PRE-CHANGE build.** It was
+  locked by the author's running copy for the whole of this task, so it is
+  the only artifact in the tree that did not relink. Everything it links
+  against (`apprecorder_ui.lib`, `apprecorder_core.lib`) DID rebuild and
+  every `test_ui_*` binary relinked against them and passes. Closing the
+  app and re-running `build.cmd Release` is all it needs.
+- `build/{Debug,Release}/test_action_m4a.exe` are **stale binaries** from
+  before M4A was deleted. ctest does not list them -- it reports 26 -- but a
+  script that globs `test_*.exe` will find 27 and count 15 phantom cases.
+  A clean build directory removes them.
+
+---
+
+## 2026-08-26 (morning) — small items closed; author testing
+
+**26 suites, 519 cases, 0 failures.** Defects 2 (residual), 5 and the canvas
+empty-state all closed.
+
+### Canvas empty-state (found by the author on first use)
+
+He landed on the canvas and heard *"The recording graph, drawn as nodes. Press
+Tab to move between nodes…"* — on an **empty** session, so there was nothing to
+Tab to. His reply was "What's that?", which is the correct reaction to a
+description of something that is not there.
+
+The empty sentence already existed (`UI_ANN_CANVAS_EMPTY`) but only fired as an
+*announcement* when a navigation key found nothing; the pane's **description was
+static**, set once at creation. Now switched in `refresh_all()` — which runs
+after every model change, so it stays honest as things are added and removed —
+and the creation site starts with the empty text, since a canvas is necessarily
+empty then. **The same string serves both, deliberately: one sentence to
+translate rather than two that can drift apart.**
+
+**Worth noting how this escaped:** `test_ui_a11y.c` asserts every description is
+**non-empty**, and it was. It just was not **true**. An assertion about presence
+cannot catch a statement about content — only listening did.
+
+### CLI `--fake` health (defect 2 residual)
+
+```
+--fake <hz>[,<ppm>[,<amp>]][,<health>...]
+<health> = muted | dead | mute=<frame> | unmute=<frame> | die=<frame>
+```
+
+Five words mapping 1:1 onto the five `AprCaptureConfig.fake` health fields.
+**A frame is never 0** — `capture.h` reserves 0 for "never", so frame 0 is
+spelled `muted`/`dead`: one state, one spelling. A health word may stand where a
+number would have gone (`440,dead` == `440,0,0.25,dead`), and once one appears
+everything after it is health, so a word can never be mistaken for a late drift
+value.
+
+**One real behaviour change: `core/runner.c`'s mute clause gained `alive &&` —
+death wins over muted**, matching `tree_panel.c`. Unmuting an exited app fixes
+nothing, and the two are indistinguishable in the audio. Only *simultaneous*
+states collapse; the snapshot still exposes `alive` and `muted` separately so the
+UI is untouched. Mutation-tested: removing `alive &&` fails the both-at-once
+case.
+
+Session round-trip writes health **only when set**, so a healthy fake is
+byte-identical to before and older files still load. `same_source` compares
+health — two fakes differing only in when they fail are two sources, and
+interning them would have silently dropped a bus's source.
+
+### `apr_process_window_class` moved to `discover.c` (defect 5)
+
+**Not a clean lift — three differences, each decided:**
+
+1. **The static return buffer did not survive.** `discover.h` promises callers'
+   arrays only; a function-static is a hazard the UI would have inherited. The
+   borrowed-pointer shape the `AprSessionMachine` callback wants is a 4-line
+   adapter left in `session_load.c`, where the single-threaded contract that
+   justifies it actually lives.
+2. **The size constant was the real trap.** `APR_SESSION_CLASS_CCH` is now
+   *defined as* `APR_DISC_CLASS_CCH` rather than a second 64 that happens to
+   agree. Had discover used the 256 `RegisterClassW` allows, the copy into the
+   64-char session field would have hit `wcscpy_s` over-length — the CRT
+   invalid-parameter handler, i.e. a **modal dialog and a hang in Debug**, not a
+   truncation.
+3. `pid == 0` short-circuits instead of costing a full `EnumWindows` sweep.
+
+**`tests/test_discover.c` is new — `discover.c` had no direct coverage at all.**
+
+### Operational notes
+
+- **`build.cmd Release test` cannot reach ctest while the UI app is running** —
+  `apprecorder_ui_app.exe` is locked, so that one artifact does not relink.
+  Everything else builds and every `test_ui_*` binary relinks and passes. Close
+  the app to get a true Release run.
+- Stale `build/*/test_action_m4a.exe` leftovers removed. ctest correctly reported
+  26, but a glob of `test_*.exe` would find 27 and count 15 phantom cases.
