@@ -25,6 +25,7 @@
  */
 #include <windows.h>
 #include <objbase.h>
+#include <string.h>
 
 #include "log.h"
 #include "strings.h"
@@ -43,6 +44,31 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show)
     (void)cmd;
 
     hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+
+    /* A windowed process has nowhere to print. Without this, every APR_WARN in
+     * the application goes to OutputDebugString and is invisible unless someone
+     * is already attached with a debugger -- which is exactly the position we
+     * were in when a dialog silently refused to open and the only evidence
+     * available was the user saying "it's all silence".
+     *
+     * Opt-in by environment variable so the shipping default writes nothing:
+     *     set APPRECORDER_LOG=%TEMP%\apprecorder.log
+     */
+    {
+        wchar_t path[1024];
+        DWORD n = GetEnvironmentVariableW(L"APPRECORDER_LOG", path,
+                                          (DWORD)(sizeof path / sizeof path[0]));
+        if (n > 0 && n < sizeof path / sizeof path[0]) {
+            AprLogConfig lc;
+            memset(&lc, 0, sizeof lc);
+            lc.path             = path;
+            lc.level            = APR_LOG_DEBUG;
+            lc.to_debugger      = 1;
+            lc.background_drain = 1;   /* or nothing reaches the file */
+            (void)apr_log_init(&lc);
+            apr_log_set_level(APR_LOG_DEBUG);
+        }
+    }
 
     (void)apr_str_init();
 

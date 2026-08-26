@@ -280,7 +280,13 @@ static int do_add_source(AprController *c)
     AprErr e;
 
     if (busy(c)) return 1;
-    if (!apr_dlg_add_source(c->frame, &pick)) return 1;
+    if (!apr_dlg_add_source(c->frame, &pick)) {
+        APR_INFO(L"add source: dialog returned nothing (cancelled, or it could "
+                 L"not be created)");
+        return 1;
+    }
+    APR_INFO(L"add source: kind=%d pid=%u name='%s'",
+             (int)pick.kind, (unsigned)pick.pid, pick.name);
 
     memset(&cfg, 0, sizeof cfg);
     switch (pick.kind) {
@@ -302,9 +308,12 @@ static int do_add_source(AprController *c)
 
     e = apr_graph_add_source(c->graph, pick.name, &cfg, &id);
     if (apr_failed(&e)) {
+        APR_LOG_ERR(APR_LOG_ERROR, &e);
         report_failure(c, APR_S_UI_DLG_ADD_FAILED, &e);
         return 1;
     }
+    APR_INFO(L"add source: added id=%u; graph now holds %u sources",
+             (unsigned)id, (unsigned)apr_graph_source_count(c->graph));
 
     refresh_views(c);
     update_commands(c);
