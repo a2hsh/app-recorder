@@ -214,6 +214,19 @@ void apr_ui_set_accessible_role(HWND hwnd, long msaa_role);
 #define APR_CMD_RECORD_START    0x0301
 #define APR_CMD_RECORD_STOP     0x0302
 
+/* PAUSE AND RESUME ARE TWO COMMANDS, NOT ONE TOGGLE, and that follows the pair
+ * above rather than the media-player convention. Start and Stop are two menu
+ * items with two keys, each greyed when it is not the thing to do; a screen
+ * reader reads "Pause Recording, unavailable" and the state is answered before
+ * the key is pressed. A single item whose LABEL flips has no such reading --
+ * the only way to learn the state is to press it and hear what happened, which
+ * is exactly the trap a pause must not be (runner.h).
+ *
+ * The keys mirror the same way Ctrl+Shift+3 mirrors Ctrl+3 (see k_bindings in
+ * app.c): Ctrl+Shift+P undoes Ctrl+P. */
+#define APR_CMD_RECORD_PAUSE    0x0303
+#define APR_CMD_RECORD_RESUME   0x0304
+
 #define APR_CMD_VIEW_TREE       0x0401
 #define APR_CMD_VIEW_DARK       0x0402
 #define APR_CMD_NEXT_PANE       0x0403
@@ -227,6 +240,53 @@ void apr_ui_set_accessible_role(HWND hwnd, long msaa_role);
 
 #define APR_CMD_HELP_KEYS       0x0501
 #define APR_CMD_HELP_ABOUT      0x0502
+
+/* ---------------------------------------------------------------------------
+ * THE FRAME'S KEYBOARD MODEL IS DATA, FOR THE SAME REASON THE CANVAS'S IS
+ *
+ * ui_canvas.h says it first: one table dispatches a key AND renders Help, so a
+ * shortcut cannot be documented as one key and implemented as another. The
+ * frame had no such table. It had an ACCEL array, a menu built from separate
+ * catalog strings that spell the key out in their own text, and a Help screen
+ * that listed the canvas's bindings and none of the frame's -- so Ctrl+R and
+ * Ctrl+. were bound, were named in the menu, and were absent from the one
+ * screen a keyboard user opens to find out what the keys are. For someone who
+ * navigates by listening, a shortcut missing from that list does not exist.
+ *
+ * So the frame has a table too. It is the source of the accelerator table, of
+ * apr_ui_app_accel_command(), of the menu, and of the frame's half of Help.
+ * tests/test_ui_pause.c holds it to that, including the one thing a table
+ * cannot enforce on its own: that the key spelt out in each menu label is the
+ * key the row actually binds.
+ *
+ * `mods` are the APR_KMOD_* bits below -- not the ACCEL fVirt flags -- so this
+ * table and the canvas's speak the same language and one key-name formatter
+ * (apr_dlg_key_name) serves both.
+ * ------------------------------------------------------------------------- */
+
+/* Modifier bits. Here rather than in ui_canvas.h -- which is where they used
+ * to live -- because both binding tables and the key-name formatter need them,
+ * and ui_canvas.h includes THIS file, so the dependency only runs one way. */
+#define APR_KMOD_CTRL  0x0001u
+#define APR_KMOD_SHIFT 0x0002u
+#define APR_KMOD_ALT   0x0004u
+
+typedef struct AprUiBinding {
+    int      cmd;          /* APR_CMD_* -- menu item, accelerator, WM_COMMAND */
+    UINT     vk;
+    UINT     mods;         /* APR_KMOD_* */
+
+    /* What the operation IS, for Help. A short phrase, not the menu label:
+     * a menu label carries a mnemonic ampersand and its own accelerator text,
+     * neither of which belongs in a list that renders the key beside it. */
+    AprStrId key_label;
+
+    /* The menu item's text, or 0 for a binding that is not on a menu. */
+    AprStrId menu_label;
+} AprUiBinding;
+
+size_t                apr_ui_binding_count(void);
+const AprUiBinding   *apr_ui_binding_at(size_t index);
 
 /* ---------------------------------------------------------------------------
  * Panes

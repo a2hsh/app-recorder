@@ -109,8 +109,17 @@ size_t apr_dlg_key_name(UINT vk, UINT mods, wchar_t *buf, size_t cch);
 #define APR_DLG_BUTTON_MIN_DU 50
 short apr_dlg_button_width(const wchar_t *label);
 
-/* "Connect: Ctrl+E" -- one row of Help > Keyboard Shortcuts, from the canvas's
- * single binding table. */
+/* "Connect: Ctrl+E" -- one row of Help > Keyboard Shortcuts, built from a
+ * catalog label and the key a binding table really binds.
+ *
+ * There are TWO such tables, because there are two dispatchers: the frame's
+ * accelerators (ui_app.h) and the canvas's own keystrokes (ui_canvas.h). Help
+ * renders both through this one function, so neither can grow a second way of
+ * spelling a shortcut. */
+size_t apr_dlg_key_row(AprStrId label, UINT vk, UINT mods,
+                       wchar_t *buf, size_t cch);
+
+/* The canvas form: the same row, from an AprCanvasBinding. */
 size_t apr_dlg_binding_row(const AprCanvasBinding *b, wchar_t *buf, size_t cch);
 
 /* ---------------------------------------------------------------------------

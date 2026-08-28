@@ -142,6 +142,21 @@ typedef enum AprRunEvent {
      * user is told, at the moment it happens. Reported once per output. */
     APR_RUN_EV_OUTPUT_RENAMED,
 
+    /* THE RECORDING IS PAUSED. Nothing is being written, the files are still
+     * open, and the take is still one take.
+     *
+     * ANNOUNCED, NOT INFERRED, and both halves of the pair are. A state the
+     * author cannot hear is a trap: a pause he does not know he is in is an
+     * hour of a meeting that was never recorded, and it looks exactly like a
+     * recording that is going fine. Fired once per transition, on the loop
+     * thread, like every other notice. */
+    APR_RUN_EV_PAUSED,
+
+    /* And the other half. Output has resumed at the frame the pause stopped
+     * at; the paused span is absent from every file, and every bus resumed at
+     * the same new origin so they still line up with each other (graph.h). */
+    APR_RUN_EV_RESUMED,
+
     /* The last block has been rendered; the files are about to be closed.
      * Fired before apr_graph_stop, so a front end can say "finishing" before
      * an encoder blocks on its disk. */
@@ -263,6 +278,40 @@ HANDLE apr_runner_finished_event(const AprRunner *r);
  * started and after it has ended. Idempotent. */
 void apr_runner_request_stop(AprRunner *r);
 
+/* ---------------------------------------------------------------------------
+ * PAUSE
+ *
+ * Both are REQUESTS, exactly like request_stop, and for the same reason: the
+ * loop thread is the graph's only toucher between run() and its return
+ * (runner.c), so a pause applied from a UI thread would be a shape change
+ * racing a tick. These set a flag; the loop reconciles it at its next wake --
+ * within one tick, i.e. APR_RUNNER_TICK_MS -- and fires APR_RUN_EV_PAUSED or
+ * APR_RUN_EV_RESUMED when it has.
+ *
+ * Safe from any thread, at any time, including before the run has started and
+ * after it has ended. Idempotent: pausing a paused recording changes nothing
+ * and announces nothing, so a key pressed twice cannot produce two sentences
+ * for one state.
+ *
+ * WHAT A PAUSE DOES NOT DO: it does not finalize anything, so the take is one
+ * file (bus.h); it does not stop the sources, so a source that dies or rejoins
+ * while paused is handled by the ordinary reconnect path (graph.h); and it does
+ * not unfreeze the graph -- apr_graph_running() stays nonzero, so editing is
+ * still refused with APR_E_BUSY. A paused recording is a recording.
+ * ------------------------------------------------------------------------- */
+void apr_runner_request_pause(AprRunner *r);
+void apr_runner_request_resume(AprRunner *r);
+
+/* Nonzero once the loop has actually paused -- not merely once one was asked
+ * for. A front end that reported the request would say "paused" while frames
+ * were still being written. */
+int apr_runner_paused(const AprRunner *r);
+
+/* Milliseconds this run has spent paused, still climbing while it is paused
+ * and frozen at its final value afterwards. Wall time minus this is
+ * apr_runner_elapsed_ms(). */
+int64_t apr_runner_paused_ms(const AprRunner *r);
+
 int apr_runner_running(const AprRunner *r);
 
 /* Nonzero when the recording happened but is not what was asked for: a source
@@ -275,8 +324,18 @@ int apr_runner_running(const AprRunner *r);
  * one that was asked for. */
 int apr_runner_incomplete(const AprRunner *r);
 
-/* Wall-clock milliseconds since the buses were anchored. 0 before the run
- * starts; frozen at its final value afterwards. */
+/* RECORDED milliseconds -- the length of the files, not the length of the
+ * afternoon. Wall clock since the buses were anchored, MINUS every millisecond
+ * spent paused. 0 before the run starts; frozen at its final value afterwards,
+ * and frozen while paused.
+ *
+ * It used to be plain wall clock, and after pause existed that would have been
+ * a lie in the one place it matters: this number is the recording clock in the
+ * status bar and in the tray tooltip a screen reader reads with Windows+B, and
+ * a clock that counted a twenty-minute pause would be describing a file twenty
+ * minutes longer than the one on disk. It is also what a duration limit is
+ * measured against, so `--duration 600` records ten minutes of audio however
+ * long the session was paused for. */
 int64_t apr_runner_elapsed_ms(const AprRunner *r);
 
 /* ---------------------------------------------------------------------------

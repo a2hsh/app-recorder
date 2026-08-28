@@ -163,4 +163,25 @@ size_t rb_read(RingReader *rd, void *dst, size_t max_frames, uint64_t *out_lost)
  * already overwritten. */
 size_t rb_skip(RingReader *rd, size_t max_frames, uint64_t *out_lost);
 
+/* PLACE the cursor at absolute frame index `pos`, clamped into what the ring
+ * can still serve: no earlier than the oldest frame it still holds, no later
+ * than the write cursor. Returns the index actually reached.
+ *
+ * NOTHING IS COUNTED AS LOSS, and that is the entire difference between this
+ * and rb_skip. Loss means "frames that belonged to this reader's timeline went
+ * past it"; a seek means "this reader's timeline moved", which is a statement
+ * about the consumer and not about the data. A pause is exactly that: the
+ * frames captured while the recording was paused are DELIBERATELY not wanted,
+ * and reporting them as loss would make the drift corrector synthesise the
+ * paused duration back into the file as silence -- which is the one outcome
+ * pause exists to avoid (bus.h).
+ *
+ * rb_skip cannot do this job. It reaps an overrun BEFORE it applies the caller's
+ * frame count, so a request computed from a lapped cursor overshoots the target
+ * and the reader lands past where it asked for -- which the next read then reads
+ * back as a hole. Seeking states the destination instead of the distance.
+ *
+ * Consumer side only, like everything else in this section. */
+uint64_t rb_reader_seek(RingReader *rd, uint64_t pos);
+
 #endif /* APPRECORDER_RINGBUF_H */

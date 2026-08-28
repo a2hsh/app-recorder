@@ -101,6 +101,13 @@ typedef struct FakeImpl {
      * one that died on a source that has been recording for a while. */
     AprCapResume resume;
 
+    /* THE ABSOLUTE RING INDEX OF THIS CAPTURE'S OWN FRAME 0, read off the ring
+     * once the rejoin pad has been written. Zero for a capture that is not
+     * replacing anything, which is what a fresh ring's write cursor says
+     * anyway -- so there is one expression rather than a special case. See
+     * fill_chunk's caller. */
+    uint64_t base;
+
     int      anchored;
     uint64_t anchor_ticks;
     uint64_t last_ticks;
@@ -253,15 +260,26 @@ static void generate_to(FakeImpl *f, uint64_t target_frames)
          * not assumed -- see the header comment. */
         if (f->period && !f->muted && !f->dead) {
             /* THE TONE IS A PURE FUNCTION OF THE RING'S ABSOLUTE INDEX, not of
-             * this instance's own frame counter, and the `+ resume.padded` is
-             * what keeps that true across a reconnection. A capture that
-             * replaced a dead one starts its own counter at zero, so indexing
-             * the tone by that would restart the waveform at phase 0 in the
-             * middle of the file -- and a test comparing a recovered source
-             * against one that never died could then no longer tell a correct
-             * recovery from one landing at the wrong frame, which is the whole
-             * property being checked. */
-            fill_chunk(f, f->resume.padded + f->frames, n);
+             * this instance's own frame counter, and `f->base` is what keeps
+             * that true across a reconnection. A capture that replaced a dead
+             * one starts its own counter at zero, so indexing the tone by that
+             * would restart the waveform at phase 0 in the middle of the file
+             * -- and a test comparing a recovered source against one that never
+             * died could then no longer tell a correct recovery from one
+             * landing at the wrong frame, which is the whole property being
+             * checked.
+             *
+             * THIS USED TO BE `resume.padded + frames`, WHICH IS THE PAD THIS
+             * CAPTURE WROTE AND NOT THE INDEX IT WROTE IT AT. The two agree
+             * only when the ring was empty before the rejoin -- and on a real
+             * reconnection it never is, because the source's ring has been held
+             * at the frame index that is due the whole time it was detached
+             * (source.h, apr_source_pad_to). The replacement's tone was
+             * therefore offset by however far the ring had already got, which
+             * at 480 Hz is invisible (that tone's sample sequence repeats every
+             * 100 frames) and at 997 Hz is not. tests/test_pause.c is what
+             * caught it. */
+            fill_chunk(f, f->base + f->frames, n);
             rb_write(f->rb, f->chunk, n);
         } else {
             rb_write_silence(f->rb, n);
@@ -299,6 +317,10 @@ static void advance_locked(FakeImpl *f, uint64_t now_ticks)
          * frame has been written. Nothing at all happens for a source that
          * is not rejoining anything. */
         (void)apr_capresume_fill(&f->resume, f->rb, now_ticks);
+        /* AFTER the pad, so this is the index this capture's frame 0 really
+         * lands on -- which for a fresh source is 0 and for a replacement is
+         * wherever the timeline had got to. */
+        f->base = rb_write_pos(f->rb);
         f->st.frames_written = (LONG64)f->resume.padded;
         return;
     }

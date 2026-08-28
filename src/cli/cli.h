@@ -243,6 +243,45 @@ int apr_cli_main(int argc, wchar_t **argv);
  * Safe from any thread, and safe before a recording has started. */
 void apr_cli_request_stop(void);
 
+/* ---------------------------------------------------------------------------
+ * PAUSE
+ *
+ * Same shape as the stop above, and for the same reason: one entry point that
+ * both the console and a test reach, so the suite exercises the shipped path
+ * rather than an imitation of it.
+ *
+ * A PAUSE TAKES ITS TIME OUT OF THE FILE (bus.h): the take carries on as one
+ * file, at one clock, with the paused span simply absent. It is not a mute --
+ * nothing is written while it lasts -- and it is not a stop: nothing is
+ * finalized, so `record` still produces exactly one file per output.
+ *
+ * WHY THE CONSOLE HAS NO CONTROL EVENT FOR IT. Windows offers a handler for
+ * Ctrl+C and for the close button and nothing else, so unlike stopping there is
+ * no signal to hang a pause on. The console therefore reads the keyboard
+ * directly, and only when there IS a keyboard: see apr_cli_key_intent.
+ *
+ * Safe from any thread, safe before a recording has started, and idempotent --
+ * pausing a paused recording changes nothing and says nothing. */
+void apr_cli_request_pause(void);
+void apr_cli_request_resume(void);
+
+/* What a key pressed at the console during a recording means. PURE, and public
+ * for exactly that reason: "P pauses" is otherwise a claim only a human at a
+ * console can check, and a console is the one thing a test suite does not
+ * have. */
+typedef enum AprCliKey {
+    APR_CLI_KEY_NONE = 0,
+    APR_CLI_KEY_PAUSE_TOGGLE
+} AprCliKey;
+
+AprCliKey apr_cli_key_intent(wchar_t ch);
+
+/* Test seam: nonzero while the console-key reader is running for the recording
+ * in flight. It is started only when standard input really is a console, so a
+ * `record` whose input is a pipe or a file -- which is what a script does, and
+ * what the suite does -- never grows a reader thread at all. */
+int apr_cli_test_console_keys(void);
+
 /* Test seam: nonzero while the console control handler is installed. It exists
  * so that "Ctrl+C is handled" is pinned by the suite rather than by reading
  * the source. */

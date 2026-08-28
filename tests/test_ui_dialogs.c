@@ -887,6 +887,8 @@ TEST(every_tray_menu_command_is_one_the_frame_already_answers)
         if (mii.fType & MFT_SEPARATOR) continue;
         ASSERT_TRUE(mii.wID == APR_CMD_SHOW_WINDOW ||
                     mii.wID == APR_CMD_RECORD_START ||
+                    mii.wID == APR_CMD_RECORD_PAUSE ||
+                    mii.wID == APR_CMD_RECORD_RESUME ||
                     mii.wID == APR_CMD_RECORD_STOP ||
                     mii.wID == APR_CMD_FILE_OPEN ||
                     mii.wID == APR_CMD_FILE_EXIT);

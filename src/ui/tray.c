@@ -58,6 +58,8 @@ struct AprTray {
     int          added;
     int          can_start;
     int          can_stop;
+    int          can_pause;
+    int          can_resume;
     UINT         msg_taskbar_created;
     wchar_t      tip[APR_TRAY_TIP_CCH];
 };
@@ -197,6 +199,14 @@ void apr_tray_set_status(AprTray *t, AprTrayState state, const wchar_t *elapsed)
         apr_str_format(APR_S_UI_TRAY_TIP_RECORDING, tip, APR_TRAY_TIP_CCH,
                        args, 1);
         break;
+    case APR_TRAY_PAUSED:
+        /* The elapsed figure is RECORDED time, so this reads "paused, 12:04
+         * recorded" -- the length of the file, which is the number somebody
+         * checking on a session actually wants. */
+        args[0] = elapsed ? elapsed : L"";
+        apr_str_format(APR_S_UI_TRAY_TIP_PAUSED, tip, APR_TRAY_TIP_CCH,
+                       args, 1);
+        break;
     case APR_TRAY_FINISHING:
         lstrcpynW(tip, apr_str(APR_S_UI_TRAY_TIP_FINISHING), APR_TRAY_TIP_CCH);
         break;
@@ -253,6 +263,13 @@ void apr_tray_set_can_record(AprTray *t, int can_start, int can_stop)
     t->can_stop  = can_stop;
 }
 
+void apr_tray_set_can_pause(AprTray *t, int can_pause, int can_resume)
+{
+    if (!t) return;
+    t->can_pause  = can_pause;
+    t->can_resume = can_resume;
+}
+
 /* --------------------------------------------------------------------------
  * The menu
  * ----------------------------------------------------------------------- */
@@ -275,6 +292,12 @@ HMENU apr_tray_build_menu(const AprTray *t)
      * nothing at all. Same rule the menu bar follows (ui_app.h). */
     AppendMenuW(m, MF_STRING | (t && t->can_start ? MF_ENABLED : MF_GRAYED),
                 APR_CMD_RECORD_START, apr_str(APR_S_UI_TRAY_MENU_START));
+    /* Between Start and Stop, in the order they happen -- the same order as the
+     * frame's Recording menu, because the same person walks both. */
+    AppendMenuW(m, MF_STRING | (t && t->can_pause ? MF_ENABLED : MF_GRAYED),
+                APR_CMD_RECORD_PAUSE, apr_str(APR_S_UI_TRAY_MENU_PAUSE));
+    AppendMenuW(m, MF_STRING | (t && t->can_resume ? MF_ENABLED : MF_GRAYED),
+                APR_CMD_RECORD_RESUME, apr_str(APR_S_UI_TRAY_MENU_RESUME));
     AppendMenuW(m, MF_STRING | (t && t->can_stop ? MF_ENABLED : MF_GRAYED),
                 APR_CMD_RECORD_STOP, apr_str(APR_S_UI_TRAY_MENU_STOP));
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);

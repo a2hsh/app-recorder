@@ -1169,6 +1169,8 @@ typedef struct RecThread {
     AprCliIo    io;
     AprCliExit  rc;
     HANDLE      started;
+    /* Drop --quiet, for the one case whose assertion IS the transcript. */
+    int         loud;
 } RecThread;
 
 static DWORD WINAPI record_until_stopped(void *user)
@@ -1177,9 +1179,32 @@ static DWORD WINAPI record_until_stopped(void *user)
     const wchar_t *const argv[] = {
         L"apprecorder", L"--fake", L"440,0,0.25", L"--out", r->path, L"--quiet"
     };
+    const wchar_t *const loud[] = {
+        L"apprecorder", L"--fake", L"440,0,0.25", L"--out", r->path
+    };
     SetEvent(r->started);
-    r->rc = apr_cli_run((int)(sizeof argv / sizeof argv[0]), argv, &r->io);
+    if (r->loud) {
+        r->rc = apr_cli_run((int)(sizeof loud / sizeof loud[0]), loud, &r->io);
+    } else {
+        r->rc = apr_cli_run((int)(sizeof argv / sizeof argv[0]), argv, &r->io);
+    }
     return 0;
+}
+
+/* "mix-2.wav" next to "mix.wav" -- what a second recording under the same name
+ * would have produced (outpath.h). A pause must never produce one. */
+static int file_exists_with_suffix(const wchar_t *path, const wchar_t *suffix)
+{
+    wchar_t alt[MAX_PATH];
+    const wchar_t *dot = wcsrchr(path, L'.');
+    size_t stem = dot ? (size_t)(dot - path) : wcslen(path);
+
+    if (stem + wcslen(suffix) + 8 >= MAX_PATH) return 0;
+    memcpy(alt, path, stem * sizeof(wchar_t));
+    alt[stem] = 0;
+    wcscat_s(alt, MAX_PATH, suffix);
+    if (dot) wcscat_s(alt, MAX_PATH, dot);
+    return file_exists(alt);
 }
 
 TEST(a_stop_request_finalizes_every_file_rather_than_abandoning_it)
@@ -1223,6 +1248,177 @@ TEST(a_stop_request_finalizes_every_file_rather_than_abandoning_it)
     /* And the handler is gone again, so a later Ctrl+C is the console's. */
     ASSERT_FALSE(apr_cli_test_ctrl_handler_installed());
     DeleteFileW(r.path);
+}
+
+/* ---------------------------------------------------------------------------
+ * PAUSING. Same entry point the console-key reader uses, so this drives the
+ * shipped path rather than an imitation of it.
+ *
+ * The property is the one the whole feature exists for: a recording paused for
+ * N seconds is SHORTER than one that ran the same wall clock, because the
+ * paused span is left out of the file rather than filled with silence. Proved
+ * against a control take of the same wall-clock length.
+ * ------------------------------------------------------------------------- */
+
+TEST(the_pause_key_is_p_and_nothing_else_is)
+{
+    /* Pure, and public for exactly this: "P pauses" is otherwise a claim only
+     * a human at a console can check. */
+    ASSERT_EQ_INT(APR_CLI_KEY_PAUSE_TOGGLE, (int)apr_cli_key_intent(L'p'));
+    ASSERT_EQ_INT(APR_CLI_KEY_PAUSE_TOGGLE, (int)apr_cli_key_intent(L'P'));
+    ASSERT_EQ_INT(APR_CLI_KEY_NONE, (int)apr_cli_key_intent(L'q'));
+    ASSERT_EQ_INT(APR_CLI_KEY_NONE, (int)apr_cli_key_intent(L' '));
+    ASSERT_EQ_INT(APR_CLI_KEY_NONE, (int)apr_cli_key_intent(L'\0'));
+    ASSERT_EQ_INT(APR_CLI_KEY_NONE, (int)apr_cli_key_intent(L'\r'));
+}
+
+TEST(a_pause_request_before_anything_starts_is_harmless)
+{
+    Cap     c;
+    wchar_t path[MAX_PATH];
+
+    /* Nothing is running: unlike a stop, which has to be REMEMBERED because
+     * the console control handler is installed before any runner exists, a
+     * pause with nothing to pause has nothing to remember. What it must not do
+     * is leak into the next recording. */
+    apr_cli_request_pause();
+    apr_cli_request_resume();
+    apr_cli_request_pause();
+
+    tmp_path(path, MAX_PATH, L"prepause", L"wav");
+    ASSERT_EQ_INT(APR_CLI_OK, RUN(&c, L"--fake", L"440,0,0.25", L"--out", path,
+                                  L"--duration", L"0.4", L"--quiet"));
+    ASSERT_TRUE(wav_is_playable(path, NULL));
+    DeleteFileW(path);
+}
+
+TEST(a_paused_recording_leaves_the_pause_out_of_the_file)
+{
+    RecThread r;
+    HANDLE    th;
+    Cap       control;
+    wchar_t   ctlpath[MAX_PATH];
+    uint32_t  paused_bytes = 0, control_bytes = 0;
+    int       i, saw_handler = 0;
+
+    /* The control: 700 ms of wall clock, none of it paused. */
+    tmp_path(ctlpath, MAX_PATH, L"pausectl", L"wav");
+    ASSERT_EQ_INT(APR_CLI_OK, RUN(&control, L"--fake", L"440,0,0.25",
+                                  L"--out", ctlpath, L"--duration", L"0.7",
+                                  L"--quiet"));
+    ASSERT_TRUE(wav_is_playable(ctlpath, &control_bytes));
+
+    /* The take: the same 700 ms, with 400 ms of it paused. */
+    memset(&r, 0, sizeof r);
+    tmp_path(r.path, MAX_PATH, L"pause", L"wav");
+    r.io.write = cap_write;
+    r.io.user  = &r.cap;
+    r.rc = (AprCliExit)-1;
+    r.started = CreateEventW(NULL, TRUE, FALSE, NULL);
+    ASSERT_NOT_NULL(r.started);
+
+    th = CreateThread(NULL, 0, record_until_stopped, &r, 0, NULL);
+    ASSERT_NOT_NULL(th);
+    WaitForSingleObject(r.started, 5000);
+    for (i = 0; i < 500 && !saw_handler; i++) {
+        saw_handler = apr_cli_test_ctrl_handler_installed();
+        if (!saw_handler) Sleep(10);
+    }
+    ASSERT_TRUE(saw_handler);
+
+    Sleep(150);
+    apr_cli_request_pause();
+    Sleep(400);
+    apr_cli_request_resume();
+    Sleep(150);
+    apr_cli_request_stop();
+
+    ASSERT_EQ_INT(WAIT_OBJECT_0, (int)WaitForSingleObject(th, 15000));
+    CloseHandle(th);
+    CloseHandle(r.started);
+
+    ASSERT_EQ_INT(APR_CLI_OK, r.rc);
+    ASSERT_TRUE(wav_is_playable(r.path, &paused_bytes));
+
+    printf("      control %lu bytes for 700 ms; paused take %lu bytes for the "
+           "same wall clock\n",
+           (unsigned long)control_bytes, (unsigned long)paused_bytes);
+
+    /* NOT the length of the afternoon. A mute would have produced about the
+     * same as the control; leaving the span out produces materially less. */
+    ASSERT_GT_INT(0, (int)paused_bytes);
+    ASSERT_TRUE(paused_bytes < control_bytes * 3u / 4u);
+
+    DeleteFileW(r.path);
+    DeleteFileW(ctlpath);
+}
+
+TEST(both_transitions_appear_in_the_transcript)
+{
+    /* A transcript that showed the pause and not the resume reads as a
+     * recording that ended there -- the same failure the recovery lines exist
+     * to prevent. Not --quiet, because the transcript IS the assertion. */
+    RecThread r;
+    HANDLE    th;
+    int       i, saw_handler = 0;
+
+    memset(&r, 0, sizeof r);
+    tmp_path(r.path, MAX_PATH, L"pausesay", L"wav");
+    r.io.write = cap_write;
+    r.io.user  = &r.cap;
+    r.rc = (AprCliExit)-1;
+    r.started = CreateEventW(NULL, TRUE, FALSE, NULL);
+    ASSERT_NOT_NULL(r.started);
+    r.loud = 1;
+
+    th = CreateThread(NULL, 0, record_until_stopped, &r, 0, NULL);
+    ASSERT_NOT_NULL(th);
+    WaitForSingleObject(r.started, 5000);
+    for (i = 0; i < 500 && !saw_handler; i++) {
+        saw_handler = apr_cli_test_ctrl_handler_installed();
+        if (!saw_handler) Sleep(10);
+    }
+    ASSERT_TRUE(saw_handler);
+
+    Sleep(150);
+    apr_cli_request_pause();
+    Sleep(250);
+    apr_cli_request_resume();
+    Sleep(150);
+    apr_cli_request_stop();
+
+    ASSERT_EQ_INT(WAIT_OBJECT_0, (int)WaitForSingleObject(th, 15000));
+    CloseHandle(th);
+    CloseHandle(r.started);
+
+    ASSERT_EQ_INT(APR_CLI_OK, r.rc);
+    ASSERT_TRUE(said(&r.cap, apr_str(APR_S_STATUS_PAUSED)));
+    ASSERT_TRUE(said(&r.cap, apr_str(APR_S_STATUS_RESUMED)));
+
+    /* AND THE FILE WAS NEVER CLOSED IN BETWEEN. "Finishing" is said once, at
+     * the end -- a pause that finalized would have said it twice and left two
+     * files. */
+    ASSERT_FALSE(file_exists_with_suffix(r.path, L"-2"));
+    ASSERT_TRUE(wav_is_playable(r.path, NULL));
+    DeleteFileW(r.path);
+}
+
+TEST(the_console_key_reader_stays_out_of_a_redirected_run)
+{
+    /* ctest gives this process a redirected standard input, so GetConsoleMode
+     * fails on it and no reader thread is started -- which is the behaviour a
+     * script depends on: an unattended `record` must not read, and therefore
+     * must not swallow, a byte of anybody's input. */
+    Cap     c;
+    wchar_t path[MAX_PATH];
+
+    tmp_path(path, MAX_PATH, L"nokeys", L"wav");
+    ASSERT_EQ_INT(APR_CLI_OK, RUN(&c, L"--fake", L"440,0,0.25", L"--out", path,
+                                  L"--duration", L"0.3"));
+    /* And with no reader, the hint that names the key is not printed either. */
+    ASSERT_FALSE(said(&c, apr_str(APR_S_CLI_PAUSE_HINT)));
+    ASSERT_FALSE(apr_cli_test_console_keys());
+    DeleteFileW(path);
 }
 
 TEST(a_stop_request_before_anything_starts_is_harmless)

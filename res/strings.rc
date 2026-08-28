@@ -78,6 +78,9 @@
 #define APR_EN_STATUS_RECORDING_TO       "Recording to %1!s!."
 #define APR_EN_STATUS_STOPPED            "Recording stopped."
 #define APR_EN_STATUS_FINISHING          "Finishing %1!s!."
+#define APR_EN_STATUS_PAUSED             "Paused. Nothing is being written; the file is still open."
+#define APR_EN_STATUS_RESUMED            "Recording again. The pause is not in the file."
+#define APR_EN_CLI_PAUSE_HINT            "Press P to pause or carry on. Paused time is left out of the file, not filled with silence."
 
 /* Both warnings are facts the capture spike established, not speculation:
  * loopback sits after the session volume, and WASAPI never reports the death
@@ -305,7 +308,14 @@
 
 #define APR_EN_UI_MENU_RECORDING         "&Recording"
 #define APR_EN_UI_MENU_RECORD_START      "&Start Recording\tCtrl+R"
-#define APR_EN_UI_MENU_RECORD_STOP       "S&top Recording\tCtrl+."
+/* "Ctrl+Full Stop", not "Ctrl+.", and that is the accessible reading rather
+ * than a typo. Help > Keyboard Shortcuts spells every key from the catalog
+ * (UI_KEYNAME_PERIOD) so a screen reader says a word instead of a punctuation
+ * mark, and the menu has to say the SAME thing or the product names one key in
+ * two places -- which tests/test_ui_pause.c now refuses. */
+#define APR_EN_UI_MENU_RECORD_STOP       "S&top Recording\tCtrl+Full Stop"
+#define APR_EN_UI_MENU_RECORD_PAUSE      "&Pause Recording\tCtrl+P"
+#define APR_EN_UI_MENU_RECORD_RESUME     "Res&ume Recording\tCtrl+Shift+P"
 
 #define APR_EN_UI_MENU_VIEW              "&View"
 #define APR_EN_UI_MENU_VIEW_TREE         "&Structure Panel\tCtrl+T"
@@ -403,6 +413,26 @@
 #define APR_EN_UI_KEY_GAIN_DOWN                 "Make this source quieter"
 #define APR_EN_UI_KEY_CANCEL                    "Cancel what is half done"
 #define APR_EN_UI_KEY_DESCRIBE                  "Say this node and its connections again"
+
+/* The FRAME's own keys, which this screen used to leave out entirely -- Ctrl+R
+ * and Ctrl+. were bound, documented in the menu, and absent from the one screen
+ * a keyboard user goes to for the list. One table in src/ui/app.c now binds
+ * them, builds the menu from them and answers this screen with them, so a
+ * shortcut cannot be listed here as one key and pressed as another. */
+#define APR_EN_UI_KEY_FILE_NEW                  "Start a new session"
+#define APR_EN_UI_KEY_FILE_OPEN                 "Open a session"
+#define APR_EN_UI_KEY_FILE_SAVE                 "Save this session"
+#define APR_EN_UI_KEY_FILE_SAVE_AS              "Save this session under a new name"
+#define APR_EN_UI_KEY_RENAME_BUS                "Rename this bus"
+#define APR_EN_UI_KEY_REMOVE_OUTPUT             "Remove an output"
+#define APR_EN_UI_KEY_HIDE_TO_TRAY              "Hide the window to the notification area"
+#define APR_EN_UI_KEY_RECORD_START              "Start recording"
+#define APR_EN_UI_KEY_RECORD_PAUSE              "Pause the recording, leaving the file open"
+#define APR_EN_UI_KEY_RECORD_RESUME             "Resume the recording"
+#define APR_EN_UI_KEY_RECORD_STOP               "Stop recording and close the files"
+#define APR_EN_UI_KEY_VIEW_TREE                 "Show or hide the structure panel"
+#define APR_EN_UI_KEY_VIEW_DARK                 "Switch between light and dark appearance"
+#define APR_EN_UI_KEY_HELP_KEYS                 "Show this list of keyboard shortcuts"
 
 /* The names of keys that are not a printable character. IN THE CATALOG, not in
  * C: the modifiers already were, so a shortcut rendered half in the interface
@@ -579,6 +609,18 @@
 #define APR_EN_UI_ANN_SOURCE_RECOVERED   "%1!s! is back and is being recorded again. The time it was away is silence in the file."
 #define APR_EN_UI_ANN_EXCLUSION_HELD     "%1!s! has stopped recording, because the application it holds back has exited. Carrying on would record that application the moment it starts again."
 
+/* BOTH TRANSITIONS ARE SAID OUT LOUD. A pause the author cannot hear is an
+ * hour of a meeting that was never recorded, and it looks exactly like a
+ * recording that is going fine -- so neither half may be left to a colour or an
+ * icon. The status line then keeps saying "paused" underneath, with the
+ * RECORDED length: the length of the file, which is the number a clock counting
+ * the pause would get wrong. */
+#define APR_EN_UI_STATUS_PAUSED          "Paused. %1!s! recorded."
+#define APR_EN_UI_ANN_RECORD_PAUSED      "Recording paused. The file is still open and nothing is being written."
+#define APR_EN_UI_ANN_RECORD_RESUMED     "Recording again. The pause is not in the file."
+#define APR_EN_UI_ANN_ALREADY_PAUSED     "The recording is already paused."
+#define APR_EN_UI_ANN_NOT_PAUSED         "The recording is not paused."
+
 /* ---- dialogs ---- */
 #define APR_EN_UI_DLG_OK                   "OK"
 #define APR_EN_UI_DLG_CANCEL               "Cancel"
@@ -688,6 +730,15 @@
 #define APR_EN_UI_TRAY_INFO_OUTPUT_RENAMED "That name was already a recording, so this take is being saved as %1!s! instead."
 #define APR_EN_UI_TRAY_INFO_SOURCE_RECOVERED "%1!s! is back and is being recorded again."
 #define APR_EN_UI_TRAY_INFO_EXCLUSION_HELD "%1!s! has stopped recording: the application it holds back has exited."
+
+/* The tooltip is a status readout reached with Windows+B, so it has to be able
+ * to say PAUSED: an icon that goes on claiming "recording" through a pause
+ * answers the one question this tooltip exists for, wrongly. */
+#define APR_EN_UI_TRAY_TIP_PAUSED          "apprecorder - paused, %1!s! recorded"
+#define APR_EN_UI_TRAY_MENU_PAUSE          "&Pause Recording"
+#define APR_EN_UI_TRAY_MENU_RESUME         "Res&ume Recording"
+#define APR_EN_UI_TRAY_INFO_PAUSED         "Recording paused. The file is still open."
+#define APR_EN_UI_TRAY_INFO_RESUMED        "Recording again."
 
 #define APR_EN_UI_MENU_DISCONNECT           "&Disconnect\tCtrl+Shift+E"
 #define APR_EN_UI_MENU_RENAME_BUS           "Re&name this bus\tF2"
@@ -926,6 +977,9 @@ END
 #define APR_AR_STATUS_RECORDING_TO(id)       /* not translated yet */
 #define APR_AR_STATUS_STOPPED(id)            /* not translated yet */
 #define APR_AR_STATUS_FINISHING(id)          /* not translated yet */
+#define APR_AR_STATUS_PAUSED(id)             /* not translated yet */
+#define APR_AR_STATUS_RESUMED(id)            /* not translated yet */
+#define APR_AR_CLI_PAUSE_HINT(id)            /* not translated yet */
 #define APR_AR_WARN_SOURCE_MUTED(id)         /* not translated yet */
 #define APR_AR_WARN_SOURCE_EXITED(id)        /* not translated yet */
 #define APR_AR_WARN_SOURCE_RECOVERED(id)     /* not translated yet */
@@ -1079,6 +1133,8 @@ END
 #define APR_AR_UI_MENU_RECORDING(id)      /* not translated yet */
 #define APR_AR_UI_MENU_RECORD_START(id)   /* not translated yet */
 #define APR_AR_UI_MENU_RECORD_STOP(id)    /* not translated yet */
+#define APR_AR_UI_MENU_RECORD_PAUSE(id)   /* not translated yet */
+#define APR_AR_UI_MENU_RECORD_RESUME(id)  /* not translated yet */
 #define APR_AR_UI_MENU_VIEW(id)           /* not translated yet */
 #define APR_AR_UI_MENU_VIEW_TREE(id)      /* not translated yet */
 #define APR_AR_UI_MENU_VIEW_DARK(id)      /* not translated yet */
@@ -1143,6 +1199,20 @@ END
 #define APR_AR_UI_KEY_GAIN_DOWN(id)             /* not translated yet */
 #define APR_AR_UI_KEY_CANCEL(id)                /* not translated yet */
 #define APR_AR_UI_KEY_DESCRIBE(id)              /* not translated yet */
+#define APR_AR_UI_KEY_FILE_NEW(id)              /* not translated yet */
+#define APR_AR_UI_KEY_FILE_OPEN(id)             /* not translated yet */
+#define APR_AR_UI_KEY_FILE_SAVE(id)             /* not translated yet */
+#define APR_AR_UI_KEY_FILE_SAVE_AS(id)          /* not translated yet */
+#define APR_AR_UI_KEY_RENAME_BUS(id)            /* not translated yet */
+#define APR_AR_UI_KEY_REMOVE_OUTPUT(id)         /* not translated yet */
+#define APR_AR_UI_KEY_HIDE_TO_TRAY(id)          /* not translated yet */
+#define APR_AR_UI_KEY_RECORD_START(id)          /* not translated yet */
+#define APR_AR_UI_KEY_RECORD_PAUSE(id)          /* not translated yet */
+#define APR_AR_UI_KEY_RECORD_RESUME(id)         /* not translated yet */
+#define APR_AR_UI_KEY_RECORD_STOP(id)           /* not translated yet */
+#define APR_AR_UI_KEY_VIEW_TREE(id)             /* not translated yet */
+#define APR_AR_UI_KEY_VIEW_DARK(id)             /* not translated yet */
+#define APR_AR_UI_KEY_HELP_KEYS(id)             /* not translated yet */
 #define APR_AR_UI_KEYNAME_TAB(id)               /* not translated yet */
 #define APR_AR_UI_KEYNAME_ENTER(id)             /* not translated yet */
 #define APR_AR_UI_KEYNAME_SPACE(id)             /* not translated yet */
@@ -1257,6 +1327,11 @@ END
 #define APR_AR_UI_ANN_NO_TRAY(id)               /* not translated yet */
 #define APR_AR_UI_ANN_SOURCE_RECOVERED(id)      /* not translated yet */
 #define APR_AR_UI_ANN_EXCLUSION_HELD(id)        /* not translated yet */
+#define APR_AR_UI_STATUS_PAUSED(id)             /* not translated yet */
+#define APR_AR_UI_ANN_RECORD_PAUSED(id)         /* not translated yet */
+#define APR_AR_UI_ANN_RECORD_RESUMED(id)        /* not translated yet */
+#define APR_AR_UI_ANN_ALREADY_PAUSED(id)        /* not translated yet */
+#define APR_AR_UI_ANN_NOT_PAUSED(id)            /* not translated yet */
 
 #define APR_AR_UI_DLG_OK(id)                   /* not translated yet */
 #define APR_AR_UI_DLG_CANCEL(id)               /* not translated yet */
@@ -1364,6 +1439,11 @@ END
 #define APR_AR_UI_TRAY_INFO_OUTPUT_RENAMED(id) /* not translated yet */
 #define APR_AR_UI_TRAY_INFO_SOURCE_RECOVERED(id) /* not translated yet */
 #define APR_AR_UI_TRAY_INFO_EXCLUSION_HELD(id) /* not translated yet */
+#define APR_AR_UI_TRAY_TIP_PAUSED(id)          /* not translated yet */
+#define APR_AR_UI_TRAY_MENU_PAUSE(id)          /* not translated yet */
+#define APR_AR_UI_TRAY_MENU_RESUME(id)         /* not translated yet */
+#define APR_AR_UI_TRAY_INFO_PAUSED(id)         /* not translated yet */
+#define APR_AR_UI_TRAY_INFO_RESUMED(id)        /* not translated yet */
 
 #define APR_AR_UI_MENU_DISCONNECT(id)       /* not translated yet */
 #define APR_AR_UI_MENU_RENAME_BUS(id)       /* not translated yet */

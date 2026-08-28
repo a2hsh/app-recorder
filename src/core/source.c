@@ -92,8 +92,16 @@ struct AprSourceReader {
     uint64_t       in_need;     /* absolute ring index of the next input frame */
     uint64_t       in_base;     /* ring index the resampler counts from */
     uint64_t       first_bus;   /* bus frame carrying this reader's output 0 */
-    uint64_t       out_pos;     /* output frames placed so far */
+    uint64_t       out_pos;     /* output frames placed since the last begin */
+
+    /* Output frames placed BEFORE the last re-base. A pause re-begins this
+     * reader (source.h), and begin() zeroes out_pos because it is measured from
+     * first_bus; the take is still one take, so the count carries. */
+    uint64_t       out_carry;
     int            begun;
+
+    /* The next begin() is a RESUME, not a first start. See begin(). */
+    int            rebased;
 
     float         *scratch;     /* APR_SOURCE_BLOCK frames x channels */
 };
@@ -552,30 +560,86 @@ static uint64_t pull_aligned(AprSourceReader *rd, float *dst, size_t count,
 
 /* Decide where this reader's output frame 0 lands on the bus timeline, and
  * which ring frame it comes from. Returns 0 while the reader is not ready. */
-static int begin(AprSourceReader *rd, const AprClock *bus_clock, uint64_t bus_frame)
+static int begin(AprSourceReader *rd, const AprClock *bus_clock,
+                 uint64_t bus_frame, uint64_t now_ticks)
 {
     AprSource *s        = rd->src;
     uint64_t   base     = rb_reader_pos(&rd->rr);
     uint64_t   produced = rb_write_pos(s->rb);
     int64_t    f0, first;
 
-    /* A device source starts reading only once its jitter buffer holds the
-     * target, so the backlog begins AT the target instead of climbing to it.
-     * Because the mixer runs exactly that far behind wall clock, this instant
-     * is also the instant the bus reaches the source's true start -- so the
-     * jitter buffer costs no alignment. A process tap needs none of this. */
-    if (rd->rs && produced < base + (uint64_t)rd->target) return 0;
+    f0 = apr_clock_expected_frames(bus_clock, s->clock.anchor_ticks);
 
-    f0    = apr_clock_expected_frames(bus_clock, s->clock.anchor_ticks);
-    first = f0 + (int64_t)base;
+    if (rd->rebased) {
+        /* ===================================================================
+         * A RESUME, NOT A START. The bus's origin has already moved forward by
+         * the paused duration (bus.h), so `bus_frame` is where output carries
+         * on and the only question left is which ring frame belongs there.
+         *
+         * THE TWO SOURCE KINDS ANSWER IT DIFFERENTLY, exactly as they do
+         * everywhere else in this file (design 5.1):
+         *
+         *   A PROCESS TAP IS THE REFERENCE TIMELINE, so its ring index and the
+         *   bus's frame index are the same clock and the answer is arithmetic:
+         *   bus_frame - f0, which is where the timeline says the recording is
+         *   now. That is what makes the resumed audio land sample-exactly.
+         *
+         *   A DEVICE CAPTURE'S RING IS IN ITS OWN FRAMES, running at its
+         *   crystal's rate and not the session's, so the same subtraction
+         *   would be wrong by the whole drift accumulated since the anchor --
+         *   eight frames after six seconds at 30 ppm, and growing with the
+         *   length of the session. So it resumes the way it started: at the
+         *   backlog its controller holds, which source.h's target argument
+         *   already says IS the source's true bus position, because a mixer
+         *   running one lookbehind behind wall clock has exactly that much
+         *   waiting in every ring. The controller therefore restarts AT its
+         *   setpoint rather than several frames off it.
+         * ================================================================ */
+        if (rd->rs) {
+            /* Frames THIS SOURCE has produced since the instant bus_frame
+             * names -- read off its own ring rather than off the bus's frame
+             * count, which is the whole point. The span is one lookbehind plus
+             * one block, so the crystal's error over it is a hundredth of a
+             * frame and the nominal rate is exact enough; what would not be
+             * exact is the same subtraction over the WHOLE session, which is
+             * what the bus-timeline answer amounts to. */
+            uint64_t at    = apr_clock_frame_ticks(bus_clock, bus_frame);
+            uint64_t lag   = now_ticks > at ? now_ticks - at : 0;
+            uint64_t ahead = apr_ticks_to_frames(lag, s->clock.qpc_freq,
+                                                 s->rate, NULL);
+            base = produced > ahead ? produced - ahead : 0;
+        } else {
+            int64_t want = (int64_t)bus_frame - f0;
+            base = want > 0 ? (uint64_t)want : 0;
+        }
+        first       = (int64_t)bus_frame;
+        rd->rebased = 0;
+    } else {
+        /* A device source starts reading only once its jitter buffer holds the
+         * target, so the backlog begins AT the target instead of climbing to
+         * it. Because the mixer runs exactly that far behind wall clock, this
+         * instant is also the instant the bus reaches the source's true start
+         * -- so the jitter buffer costs no alignment. A process tap needs none
+         * of this. */
+        if (rd->rs && produced < base + (uint64_t)rd->target) return 0;
 
-    if (first < (int64_t)bus_frame) {
-        /* The source has been running since before this bus reached it (a bus
-         * added mid-session, or a slow first tick). Drop the stale head so
-         * what remains still lands at its true absolute position. */
-        base += (uint64_t)((int64_t)bus_frame - first);
-        first = (int64_t)bus_frame;
+        first = f0 + (int64_t)base;
+
+        if (first < (int64_t)bus_frame) {
+            /* The source has been running since before this bus reached it (a
+             * bus added mid-session, or a slow first tick). Drop the stale head
+             * so what remains still lands at its true absolute position. */
+            base += (uint64_t)((int64_t)bus_frame - first);
+            first = (int64_t)bus_frame;
+        }
     }
+
+    /* PLACE the cursor rather than let the first pull walk to it. On the first
+     * begin this is a no-op -- base came from rb_reader_pos. After a re-base it
+     * is the whole point: the cursor is a lap or more behind, and walking to
+     * the target with rb_skip would reap the overrun first and overshoot,
+     * leaving the next read to report a hole that is not there (ringbuf.h). */
+    rb_reader_seek(&rd->rr, base);
 
     rd->in_need   = base;
     rd->in_base   = base;
@@ -583,6 +647,26 @@ static int begin(AprSourceReader *rd, const AprClock *bus_clock, uint64_t bus_fr
     rd->out_pos   = 0;
     rd->begun     = 1;
     return 1;
+}
+
+void apr_source_reader_rebase(AprSourceReader *rd)
+{
+    if (!rd) return;
+
+    /* The count survives; the position does not. See source.h. */
+    rd->out_carry += rd->out_pos;
+    rd->out_pos    = 0;
+    rd->begun      = 0;
+    rd->rebased    = 1;
+
+    if (rd->rs) {
+        /* History from before the excised span would be filtered into the
+         * frames after it, and in_pos_q32 is the consumer half of the backlog
+         * the controller reads -- both have to start again from the new base
+         * that begin() is about to choose. */
+        apr_resampler_reset(rd->rs);
+        apr_drift_ctl_reset(&rd->ctl);
+    }
 }
 
 static void update_ratio(AprSourceReader *rd, uint64_t now_ticks, uint64_t block)
@@ -619,7 +703,10 @@ AprSourcePull apr_source_pull(AprSourceReader *rd, const AprClock *bus_clock,
 
     apr_source_poll(s, NULL);
     if (!s->clock.anchored)             { p.lead = frames; return p; }
-    if (!rd->begun && !begin(rd, bus_clock, bus_frame)) { p.lead = frames; return p; }
+    if (!rd->begun && !begin(rd, bus_clock, bus_frame, now_ticks)) {
+        p.lead = frames;
+        return p;
+    }
 
     p.running = 1;
     if (rd->first_bus >= bus_frame + frames) { p.lead = frames; return p; }
@@ -696,7 +783,7 @@ double apr_source_reader_trim_ppm(const AprSourceReader *rd)
 
 uint64_t apr_source_reader_out_frames(const AprSourceReader *rd)
 {
-    return rd ? rd->out_pos : 0;
+    return rd ? rd->out_carry + rd->out_pos : 0;
 }
 
 uint64_t apr_source_reader_first_bus_frame(const AprSourceReader *rd)

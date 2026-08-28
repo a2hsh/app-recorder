@@ -403,10 +403,127 @@ static volatile LONG g_handler_installed;
 static HANDLE        g_stop_event;       /* manual reset */
 static HANDLE        g_finished_event;   /* manual reset; files are closed */
 
+/* THE RECORDING IN FLIGHT, OR NULL. Published with an interlocked exchange
+ * because apr_cli_request_pause() may be called from the console-key thread or
+ * from a test's thread while record_loop owns the runner on this one.
+ *
+ * It is a pointer and not an event, unlike the stop above, and the difference
+ * is not an inconsistency: the stop signal has to exist BEFORE any runner does,
+ * because the console control handler is installed first and must be able to
+ * stop a recording that has not started yet. A pause before there is anything
+ * to pause is a no-op with nothing to remember. */
+static AprRunner *volatile g_runner;
+
+/* The console-key reader, and the event that retires it. Separate from
+ * g_stop_event: the reader must be joined when record_loop ends, and that is
+ * not the same instant as "the user asked to stop". */
+static HANDLE        g_keys_thread;
+static HANDLE        g_keys_stop;
+static volatile LONG g_keys_running;
+
 void apr_cli_request_stop(void)
 {
     InterlockedExchange(&g_stop_requested, 1);
     if (g_stop_event) SetEvent(g_stop_event);
+}
+
+static AprRunner *live_runner(void)
+{
+    return (AprRunner *)InterlockedCompareExchangePointer(
+               (PVOID volatile *)&g_runner, NULL, NULL);
+}
+
+void apr_cli_request_pause(void)
+{
+    apr_runner_request_pause(live_runner());
+}
+
+void apr_cli_request_resume(void)
+{
+    apr_runner_request_resume(live_runner());
+}
+
+/* P, upper or lower. ONE key that does both halves, which is the opposite of
+ * the choice the windowed front end makes (ui_app.h) and right for the opposite
+ * reason: a menu can grey the half that does not apply and say so, and a
+ * console cannot -- there is nothing to read out and nothing to grey, so a
+ * second key would only be a second thing to remember. What the console DOES
+ * have is a transcript: every transition prints a line, so the state after the
+ * key is on screen either way. */
+AprCliKey apr_cli_key_intent(wchar_t ch)
+{
+    if (ch == L'p' || ch == L'P') return APR_CLI_KEY_PAUSE_TOGGLE;
+    return APR_CLI_KEY_NONE;
+}
+
+int apr_cli_test_console_keys(void)
+{
+    return (int)InterlockedCompareExchange(&g_keys_running, 0, 0);
+}
+
+static DWORD WINAPI console_key_thread(LPVOID param)
+{
+    HANDLE in = (HANDLE)param;
+    HANDLE wait[2];
+
+    wait[0] = g_keys_stop;
+    wait[1] = in;
+
+    for (;;) {
+        INPUT_RECORD ir;
+        DWORD got = 0;
+        DWORD w = WaitForMultipleObjects(2, wait, FALSE, INFINITE);
+
+        if (w != WAIT_OBJECT_0 + 1) break;   /* stop, or the handle went bad */
+
+        /* Raw records, so a Ctrl+C still reaches the control handler and the
+         * console's own line editing is untouched -- nothing here changes the
+         * console mode, which a recording has no business doing. */
+        if (!ReadConsoleInputW(in, &ir, 1, &got) || got == 0) continue;
+        if (ir.EventType != KEY_EVENT || !ir.Event.KeyEvent.bKeyDown) continue;
+        if (apr_cli_key_intent(ir.Event.KeyEvent.uChar.UnicodeChar) !=
+            APR_CLI_KEY_PAUSE_TOGGLE) continue;
+
+        /* Toggled against what the LOOP says is true, not against a flag kept
+         * here: the loop is the only thing that knows whether the pause it was
+         * asked for has actually happened yet (runner.h). */
+        if (apr_runner_paused(live_runner())) apr_cli_request_resume();
+        else                                  apr_cli_request_pause();
+    }
+    return 0;
+}
+
+/* Start reading the console keyboard, IF THERE IS ONE. GetConsoleMode fails on
+ * a handle that is a pipe or a file, which is what `record` gets from a script
+ * and from the test suite -- so an unattended run grows no thread, reads no
+ * input, and cannot swallow a byte somebody else was going to read. */
+static void console_keys_open(void)
+{
+    HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD  mode = 0;
+
+    if (in == NULL || in == INVALID_HANDLE_VALUE) return;
+    if (!GetConsoleMode(in, &mode)) return;
+
+    if (!g_keys_stop) g_keys_stop = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!g_keys_stop) return;
+    ResetEvent(g_keys_stop);
+
+    g_keys_thread = CreateThread(NULL, 0, console_key_thread, in, 0, NULL);
+    if (!g_keys_thread) return;
+    InterlockedExchange(&g_keys_running, 1);
+}
+
+static void console_keys_close(void)
+{
+    InterlockedExchange(&g_keys_running, 0);
+    if (g_keys_stop) SetEvent(g_keys_stop);
+    if (g_keys_thread) {
+        WaitForSingleObject(g_keys_thread, INFINITE);
+        CloseHandle(g_keys_thread);
+        g_keys_thread = NULL;
+    }
+    if (g_keys_stop) { CloseHandle(g_keys_stop); g_keys_stop = NULL; }
 }
 
 int apr_cli_test_ctrl_handler_installed(void)
@@ -1994,6 +2111,10 @@ static void cli_observer(void *user, const AprRunNotice *n)
         say_output_lines(o, APR_S_STATUS_RECORDING_TO);
         if (!o->p->duration_ms && !o->cx->quiet && !o->cx->json)
             SAY0(o->cx, APR_CLI_STDOUT, APR_S_CLI_STOP_HINT);
+        /* Only when there is a keyboard to press it on. Telling a script to
+         * press P would be telling it about a key that is not being read. */
+        if (apr_cli_test_console_keys() && !o->cx->quiet && !o->cx->json)
+            SAY0(o->cx, APR_CLI_STDOUT, APR_S_CLI_PAUSE_HINT);
         break;
 
     case APR_RUN_EV_SOURCE_DIED:
@@ -2056,6 +2177,18 @@ static void cli_observer(void *user, const AprRunNotice *n)
         warn(o->cx, APR_S_WARN_OUTPUT_RENAMED, args, 1);
         break;
 
+    /* BOTH TRANSITIONS, ON THE ORDINARY OUTPUT STREAM. A transcript that
+     * showed the pause and not the resume reads as a recording that ended
+     * there, which is the same failure the recovery lines above exist to
+     * prevent. */
+    case APR_RUN_EV_PAUSED:
+        SAY0(o->cx, APR_CLI_STDOUT, APR_S_STATUS_PAUSED);
+        break;
+
+    case APR_RUN_EV_RESUMED:
+        SAY0(o->cx, APR_CLI_STDOUT, APR_S_STATUS_RESUMED);
+        break;
+
     case APR_RUN_EV_FINISHING:
         o->finishing = 1;
         say_output_lines(o, APR_S_STATUS_FINISHING);
@@ -2100,7 +2233,19 @@ static AprCliExit record_loop(const Ctx *cx, const AprCliPlan *p, RunState *st)
         return fail(cx, APR_CLI_INTERNAL, APR_S_ERR_CAPTURE_START, args, 2);
     }
 
+    /* PUBLISHED BEFORE THE LOOP AND WITHDRAWN AFTER IT, so that a pause asked
+     * for from anywhere -- the console-key thread, a test -- reaches the runner
+     * that is really running and never one that has been freed. The reader is
+     * started after the runner exists and joined before it is destroyed, which
+     * is the whole of its thread-safety story. */
+    InterlockedExchangePointer((PVOID volatile *)&g_runner, r);
+    console_keys_open();
+
     e = apr_runner_run(r);
+
+    console_keys_close();
+    InterlockedExchangePointer((PVOID volatile *)&g_runner, NULL);
+
     if (apr_failed(&e)) {
         wchar_t why[512];
         const wchar_t *args[2];

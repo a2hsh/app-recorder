@@ -5540,3 +5540,298 @@ tray. No Arabic was written.
 - **`apr_session_resolve` uses `static` buffers**, so the live path is
   single-caller. Pre-existing; the worker is the only caller during a run, but a
   front end resolving a session concurrently with a recording would race it.
+
+---
+
+## 2026-08-28 — Pause and resume: the origin moves, the ring does not
+
+The last substantial feature before 0.1.0 packaging. A recording can now be
+paused and resumed, and the paused span is **absent from the file** rather than
+written as silence.
+
+### The design problem, and the model chosen
+
+Everything below the runner derives a position from an absolute QPC timestamp
+against one anchor. That identity between elapsed time and output position is
+what buys 0.43 frames of drift over three hours — and a pause breaks it on
+purpose, so the only question was *how*.
+
+**THE ORIGIN MOVES; THE SOURCE SIDE STAYS ON WALL CLOCK.**
+
+| | during a pause | at the resume |
+|---|---|---|
+| **Bus clock** | frozen; ticks are successful no-ops | anchor shifted **later** by the paused duration (`apr_clock_shift_anchor`) |
+| **Source clock / ring** | untouched — the capture keeps running and the 250 ms ring laps repeatedly | untouched |
+| **Each bus reader** | idle | **re-based** onto the new origin (`apr_source_reader_rebase`) |
+| **Encoders** | open; `on_audio` is simply not called | open |
+
+Because the bus anchor and wall clock both move forward by the same Δ, the very
+next tick is due at exactly the frame the last tick before the pause reached:
+`frames_out` is continuous, no block is rendered twice, and nothing accumulates.
+The arithmetic is the same absolute-position arithmetic as before, measured from
+a new origin.
+
+**One shift, one instant, every bus.** `apr_graph_pause/resume` own the
+bookkeeping for the same reason `apr_graph_run` owns the one anchor: alignment
+*between* buses is the property a pause can destroy silently and permanently.
+Mapping to wall clock is given up deliberately; inter-bus alignment is not.
+
+**What it costs:** the mixer runs 50 ms behind wall clock, so the cut is
+`APR_BUS_LOOKBEHIND_MS` before the keystroke and the resume 50 ms before the
+next one. The excised span is *exactly* the paused duration either way —
+nothing duplicated, nothing dropped — it simply begins and ends 50 ms earlier
+than the fingers did. The one visible case is **stop while paused**, which ends
+the file 50 ms before the pause keystroke because that audio was never rendered
+and is long gone from a 250 ms ring. The loop deliberately skips its lookbehind
+drain when paused: a paused bus renders nothing however long it is ticked for,
+and resuming in order to drain it would splice the paused audio onto the end.
+
+### Where "is this loss?" is decided — and why it can only be there
+
+A source's ring is an index of real time. During a pause its capture keeps
+producing and the ring laps several times over, so the next pull would find its
+frames overwritten, call that an overrun, and **emit exactly the paused duration
+as silence** — injecting the pause back into the file, which is the one thing
+pause must never do.
+
+Every other layer sees identical arithmetic in both cases (a reader far behind a
+write cursor). Only the reader knows the timeline moved, so the decision lives in
+`apr_source_reader_rebase()` (`src/core/source.c`) and is expressed by **seeking**
+rather than skipping:
+
+- **`rb_reader_seek()` is new in `ringbuf.c`** — place the cursor at an absolute
+  index, clamped to what the ring can still serve, **counting nothing as loss**.
+  Loss means "frames that belonged to this reader's timeline went past it"; a
+  seek means "this reader's timeline moved", which is a statement about the
+  consumer, not the data. `rb_skip` cannot do the job: it reaps an overrun
+  *before* applying the caller's frame count, so a request computed from a lapped
+  cursor overshoots and the next read reports a hole that is not there.
+- `begin()` grew a **re-base branch**, and the two source kinds answer
+  differently, exactly as design 5.1 has them do everywhere else:
+  - **a process tap** is the reference timeline, so its ring index and the bus's
+    frame index are the same clock: `base = bus_frame - f0`. That is what makes
+    the resumed audio land *sample-exactly*.
+  - **a device capture's ring is in its own frames**, running at its crystal's
+    rate, so the same subtraction would be wrong by the whole drift accumulated
+    since the anchor (8 frames after six seconds at 30 ppm, growing with the
+    session). It resumes the way it started: at the backlog its controller holds,
+    computed from the ticks between `bus_frame` and now. The controller therefore
+    restarts **at** its setpoint rather than several frames off it.
+
+### Drift state across a pause: the position error is dropped, the rate is kept
+
+`apr_drift_ctl_reset()` (new, `drift.c`) zeroes the integrator, the last error
+and the update count and leaves tau, target, clamp and gains alone.
+
+- **Holding it is wrong.** While paused the device produces and the reader does
+  not consume, so the raw backlog grows by the whole paused duration. That is not
+  an alignment error — nothing is out of position, the consumer was excused — but
+  the integrator cannot tell, and would spend minutes unwinding a fiction into
+  the audio after the resume.
+- **Throwing the whole controller away is also wrong** — except that it is not
+  what a reset does. The crystal's measured rate is **not** in the integrator: it
+  is the feed-forward, recomputed every tick from `apr_clock_drift()` over the
+  source's whole life, and a source's clock is not touched by a pause. So the
+  rate survives for free and the only thing discarded is a position error that
+  was never real.
+- The resampler's filter history goes too (`apr_resampler_reset`), or the last
+  block before the pause is smeared into the first block after it. That one is
+  load-bearing: without it the device edge ends 1+ frames out.
+
+Measured: a 3.03 s pause on a +30 ppm device edge leaves **0.29 frames** of
+alignment error and 1.4 ppm of trim.
+
+### A source that dies, or rejoins, while paused: nothing special happens
+
+And that is the point of leaving the source side on wall clock. The reconnect
+worker (`core/reconnect.c`) runs on its own thread against QPC and knows nothing
+about the pause: it notices the loss, detaches, pads the ring to the frame index
+that is due, searches, and reattaches at the original anchor — all in the
+source's real-time frame index, which a pause does not touch. When the recording
+resumes, the reader re-bases to the current position and finds whatever the
+source is producing *now*: real audio if it came back, silence if it did not, at
+the right absolute position either way. **No pause-specific code, and that claim
+is tested rather than asserted** (`a_source_reconnected_while_paused_...`).
+
+`poll_sources` keeps running while paused, so a death and a recovery are still
+announced — the user should hear "Teams has exited" whether or not the take is
+paused at that moment.
+
+### Editing while paused: REFUSED, `APR_E_BUSY`, same as running
+
+`apr_graph_running()` stays nonzero through a pause. The encoders are open, the
+captures are live, the reconnect worker is running, and adding a source mid-take
+would produce a file that starts in the middle. A pause is a quiet part of a
+recording, not a gap in one. No code change was needed; a test pins it.
+
+### Elapsed time is RECORDED time
+
+`apr_runner_elapsed_ms()` is now wall clock minus every millisecond spent paused
+(`apr_graph_paused_ticks`). It is the recording clock in the status bar and in the
+tray tooltip a screen reader reads with Windows+B, and a clock that counted a
+twenty-minute pause would be describing a file twenty minutes longer than the one
+on disk. It is also what a duration limit is measured against, so
+`--duration 600` records ten minutes however long the session was paused for.
+`apr_runner_paused_ms()` is there for anyone who wants the other half.
+
+### Keys, and the binding table that had a hole in it
+
+**Ctrl+P pauses. Ctrl+Shift+P resumes.** Two commands and two menu items, not one
+toggle — the same shape as Start (Ctrl+R) and Stop (Ctrl+.), and Ctrl+Shift+P
+undoes Ctrl+P the way Ctrl+Shift+3 undoes Ctrl+3. A toggle whose *label* flips
+has no reading for a screen reader user: the only way to learn the state is to
+press it and hear what happened, which is the trap a pause must not be. Greyed
+the right way round, "Pause Recording, unavailable" answers the question before
+the key is pressed.
+
+**The frame had no binding table.** It had an `ACCEL` array, menu labels that
+spell the key out in their own catalog text, and a Help screen that listed the
+*canvas's* bindings and none of the frame's — so **Ctrl+R and Ctrl+. were bound,
+named in the menu, and absent from the one screen a keyboard user opens to find
+out what the keys are.** For somebody working by ear that is not an omission from
+a document; it is an operation that does not exist.
+
+So `k_bindings[]` in `src/ui/app.c` is now the single source of:
+
+- the accelerator table (`build_accelerators` derives `ACCEL` from it),
+- `apr_ui_app_accel_command()` (which used to read a second copy),
+- every menu item's label (`build_menu` takes a list of command ids),
+- the frame's half of **Help > Keyboard Shortcuts** (`fill_keys` renders the
+  frame table, then the canvas table minus its `platform` rows, which the frame
+  table now carries).
+
+`APR_KMOD_*` moved from `ui_canvas.h` to `ui_app.h` (same names, same values) so
+both tables and `apr_dlg_key_name` speak one language. `apr_dlg_key_row()` is the
+shared row formatter; `apr_dlg_binding_row()` now calls it.
+
+`tests/test_ui_pause.c` holds the one thing a table cannot enforce on its own:
+**the key spelt out in each menu label is the key that row really binds** (19
+commands checked). That test immediately found a real divergence — the menu said
+`Ctrl+.` while Help said `Ctrl+Full Stop` — and the menu label was changed to
+match the catalog's spoken key name, not the other way round: the shortcut list
+spells keys as words so a screen reader says one.
+
+### Announcing it — both transitions, on the channel that can reach the user
+
+`APR_RUN_EV_PAUSED` / `APR_RUN_EV_RESUMED` fire on the loop thread at the
+**transition**, never at the request, so the sentence is never ahead of the file.
+
+- **UI:** `say_and_notify` — status-bar live region in the foreground, tray
+  balloon when not, per `a_better_channel_exists()`. The flag and the sentence
+  are adjacent lines, for the reason `start_recording` already documents.
+- **Tray:** new `APR_TRAY_PAUSED` state; the tooltip reads
+  "apprecorder - paused, 00:12:04 recorded" and the elapsed figure is recorded
+  time. Menu gained Pause/Resume (`apr_tray_set_can_pause`), between Start and
+  Stop, greyed rather than absent.
+- **Status bar:** the one-second clock writes `UI_STATUS_PAUSED` while paused, so
+  somebody who comes back to the window ten minutes later reads "Paused." rather
+  than a recording clock that has stopped moving for no stated reason.
+- **CLI:** both transitions print a line. A transcript showing the pause and not
+  the resume reads as a recording that ended there.
+
+### CLI
+
+`apr_cli_request_pause()` / `apr_cli_request_resume()` mirror
+`apr_cli_request_stop()` — one entry point that the console and the suite both
+reach. They act on an interlocked `g_runner` published for the length of
+`apr_runner_run` (a pause before there is anything to pause is a no-op with
+nothing to remember, unlike a stop, which must be *remembered* because the
+console control handler exists before any runner does).
+
+**Windows offers no console control event for a pause**, so the console reads the
+keyboard directly: `console_key_thread` waits on the input handle and the
+key→intent mapping is the pure, public `apr_cli_key_intent()` (P, either case;
+one key does both halves, because a console has nothing to grey and nothing to
+read out — what it does have is a transcript). The thread is started **only when
+`GetConsoleMode` succeeds on standard input**, so a scripted or piped `record`
+grows no reader, reads nothing, and cannot swallow a byte anyone else was going
+to read. The hint naming the key is printed only when the reader is running.
+
+### Tests — `tests/test_pause.c` (15 cases) and `tests/test_ui_pause.c` (15)
+
+`APR_SRC_FAKE` throughout. No real time elapses except the five runner/controller
+cases that need a live loop to have notices to count.
+
+The central proof is against a **control take that ran the same tick grid and was
+never paused**:
+
+- before the cut the two files are **identical, sample for sample**;
+- after it the paused take matches the control at an offset of exactly the
+  excised span — i.e. it holds the audio that really happened at those instants;
+- and it does **not** match at the same index, which is what stops this from
+  being two empty buffers agreeing with each other;
+- the longest run of consecutive zero samples in the whole output is **1** — the
+  direct measurement of "nothing was filled in", where an implementation that
+  reported the discarded audio as loss would answer with the paused duration.
+
+Also pinned: two pauses accumulate correctly (a second pause that re-derived its
+shift from the original anchor passes every single-pause assertion and fails
+this); three buses come out the same length to the frame and two readers of one
+source are sample-identical to each other; a pause finalizes nothing and the
+graph still records a second time afterwards; editing is `APR_E_BUSY`; pause and
+resume are idempotent and `APR_E_STATE` on an idle graph; a source that dies and
+returns inside the pause leaves no hole; one that stays dead still holds its
+place; the reconnect worker's real detach/pad/reattach runs across a paused span
+and the audio afterwards is still at its true absolute frame.
+
+**A latent bug in `capture_fake` that this found.** The replacement capture's
+tone was indexed by `resume.padded + frames` — the pad *it* wrote, not the index
+it wrote it at. The two agree only when the ring was empty before the rejoin, and
+on a real reconnection it never is, because the ring has been held at the frame
+index that is due the whole time the source was detached. The replacement's tone
+was therefore offset by however far the ring had already got. Invisible at 480 Hz
+(that tone's sample sequence repeats every 100 frames, so `test_reconnect`'s
+sample-identity assertion agreed with it) and very visible at 997 Hz, which is
+why `test_pause.c` uses a tone that is prime to the sample rate. Fixed:
+`FakeImpl::base` is read off the ring after the rejoin pad.
+
+**Red runs watched** (each reverted): no reader re-base → 5 cases fail; no
+`rb_reader_seek` in `begin()` → the same 5; no origin shift → 4; ticks rendering
+while paused → 6; no resampler reset → the device edge exceeds one frame; no
+drift-controller reset → the controller resumes still pushing 187 ppm against an
+error that no longer exists; elapsed counting the pause → the clock case; the
+PAUSED or RESUMED notice dropped → the UI cases; the CLI not publishing its
+runner → both CLI cases.
+
+### Build and test
+
+`build.cmd Debug test` and `build.cmd Release test`: **37 of 37 suites, 100%**,
+no warnings under `/W4 /WX`. (35 before; `test_pause` and `test_ui_pause` are
+new.) `test_ui_pause` was stress-run eight times in Release after a genuine race
+was closed — the state flag flips inside the posted notice handler, which then
+re-greys the menu and rebuilds two views, so the suite now takes a synchronous
+`WM_NULL` round trip to the window's own thread rather than sleeping.
+
+**Safety (AGENTS.md rule 1):** nothing was rendered to any audio device. Every
+source in both new suites is `APR_SRC_FAKE`; nothing opens an audio endpoint or
+activates an `IAudioClient`. Tray registration stays suppressed by
+`APPRECORDER_NO_TRAY` in CMake. No Arabic was written — every new catalog entry
+has its English text and an explicit `/* not translated yet */` on the Arabic
+side.
+
+### Catalog additions (ids chosen to avoid a merge)
+
+`STATUS_PAUSED` 1023, `STATUS_RESUMED` 1024, `CLI_PAUSE_HINT` 1025;
+`UI_MENU_RECORD_PAUSE` 1333, `UI_MENU_RECORD_RESUME` 1334;
+`UI_KEY_*` for the frame's commands 1560–1573;
+`UI_STATUS_PAUSED` 1632, `UI_ANN_RECORD_PAUSED` 1633, `UI_ANN_RECORD_RESUMED`
+1634, `UI_ANN_ALREADY_PAUSED` 1635, `UI_ANN_NOT_PAUSED` 1636;
+`UI_TRAY_TIP_PAUSED` 1770, `UI_TRAY_MENU_PAUSE` 1771, `UI_TRAY_MENU_RESUME` 1772,
+`UI_TRAY_INFO_PAUSED` 1773, `UI_TRAY_INFO_RESUMED` 1774.
+
+One existing string changed: `UI_MENU_RECORD_STOP` now reads
+`"S&top Recording\tCtrl+Full Stop"`, so the menu and the shortcut list name the
+same key. See the comment above it in `res/strings.rc`.
+
+### Left undone, deliberately
+
+- **No session key for "paused".** A pause is a property of a take in flight, not
+  of a routing document, and a session that loaded already-paused would be a
+  recording that starts by not recording.
+- **No pause in `--duration` arithmetic beyond the obvious.** A duration limit is
+  measured against recorded time, which is what it should mean; there is no way
+  to ask for "stop after N seconds of wall clock" and nobody has wanted one.
+- **The console key reader is P only.** No stop key, no status key: every extra
+  key is another thing the reader can swallow, and Ctrl+C already stops.
+- **No pause button on the canvas.** Pause is a frame command like start and
+  stop; the canvas's table is about navigating and editing a graph.

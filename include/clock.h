@@ -142,6 +142,22 @@ void apr_clock_init(AprClock *c, uint64_t qpc_freq, uint32_t sample_rate);
  * passed here: a poisoned anchor misaligns everything that follows. */
 void apr_clock_anchor(AprClock *c, uint64_t anchor_ticks);
 
+/* MOVE THE ORIGIN LATER BY `delta_ticks`. Every position this clock derives
+ * afterwards is smaller by exactly the frames `delta_ticks` spans, so a span of
+ * wall time is EXCISED from the timeline rather than filled.
+ *
+ * This is what a pause is (bus.h): the mixer's output position must stop
+ * mapping to wall clock the moment recorded time and elapsed time part company,
+ * and the only honest way to say that with an absolute-position design is to
+ * move the origin. Adding a "paused frames" correction at every reader instead
+ * would put a second timeline in the product, which is the thing design 5 is
+ * built to avoid.
+ *
+ * A NO-OP ON AN UNANCHORED CLOCK: there is no origin to move yet. Exact -- one
+ * integer addition on the anchor, no accumulation, so a hundred pauses cost no
+ * more error than one (see the note at the top of this file). */
+void apr_clock_shift_anchor(AprClock *c, uint64_t delta_ticks);
+
 /* Nonzero once apr_clock_anchor has been called. */
 int apr_clock_anchored(const AprClock *c);
 

@@ -57,6 +57,7 @@
 #include "err.h"
 #include "graph.h"
 #include "ui_app.h"
+#include "ui_tray.h"
 
 /* Posted to the frame by the runner's observer, from the runner's thread.
  * lParam is a heap AprRunNotice the UI thread frees. */
@@ -84,6 +85,12 @@ AprGraph *apr_controller_graph(AprController *c);
 AprErr apr_controller_set_graph(AprController *c, AprGraph *g);
 
 int apr_controller_recording(const AprController *c);
+
+/* Nonzero while the recording is PAUSED -- once the loop has actually paused,
+ * not once one was asked for (runner.h). A recording that is paused is still a
+ * recording: apr_controller_recording() stays nonzero, every editing command
+ * stays refused, and the files stay open. */
+int apr_controller_paused(const AprController *c);
 
 /* The model changed behind the controller's back -- re-read it.
  *
@@ -185,6 +192,16 @@ size_t apr_controller_last_announcement(const AprController *c,
 size_t apr_controller_last_balloon(const AprController *c,
                                    wchar_t *buf, size_t cch);
 unsigned apr_controller_balloon_count(const AprController *c);
+
+/* What the notification area's tooltip is currently saying, as a state.
+ *
+ * Same argument as the balloon seams above: APPRECORDER_NO_TRAY is set for
+ * every test (AGENTS.md rule 1), so there is deliberately no shell icon to
+ * observe, and "the tooltip a screen reader reads on Windows+B says PAUSED"
+ * would otherwise be checkable only by a human with a mouse. The tray object
+ * exists either way and is the thing that formats the tooltip; this is what it
+ * was last told. */
+AprTrayState apr_controller_tray_state(const AprController *c);
 
 /* ---------------------------------------------------------------------------
  * Pure

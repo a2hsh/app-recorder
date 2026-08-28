@@ -117,6 +117,14 @@ void apr_clock_anchor(AprClock *c, uint64_t anchor_ticks)
     c->anchored     = 1;
 }
 
+void apr_clock_shift_anchor(AprClock *c, uint64_t delta_ticks)
+{
+    /* Not anchored means there is no origin yet, and inventing one here would
+     * anchor the clock at a time nothing ever happened. */
+    if (!c || !c->anchored) return;
+    c->anchor_ticks += delta_ticks;
+}
+
 int apr_clock_anchored(const AprClock *c)
 {
     return c && c->anchored;

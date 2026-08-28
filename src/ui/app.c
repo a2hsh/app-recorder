@@ -442,17 +442,99 @@ static LRESULT CALLBACK splitter_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
  * Menu
  * ----------------------------------------------------------------------- */
 
-typedef struct MenuItem { int cmd; AprStrId label; } MenuItem;
+/* ==========================================================================
+ * THE FRAME'S BINDING TABLE -- one table, four consumers
+ *
+ * See the note in ui_app.h for why this exists. It is the source of:
+ *
+ *   the accelerator table       build_accelerators()
+ *   "what is this key bound to" apr_ui_app_accel_command()
+ *   the menu item labels        build_menu()
+ *   Help > Keyboard Shortcuts   apr_dlg_keyboard_help(), via apr_ui_binding_at
+ *
+ * ORDER IS THE ORDER HELP READS THEM OUT, so it runs File, Edit, Recording,
+ * View, Help -- the menu bar's order, because that is the order the same user
+ * meets them in.
+ *
+ * A ROW WITH NO KEY IS STILL A ROW. Exit and the pane cycle are on the menu and
+ * have no accelerator of their own (Alt+F4 and F6 are the platform's, and
+ * rebinding either would be worse than leaving it to Windows), so they carry
+ * vk 0: build_accelerators skips them, the menu still gets its item, and Help
+ * still lists them as operations. Ctrl+Shift+E is the mirror case -- the canvas
+ * claims that keystroke itself (its table says why), so the row here has the
+ * menu label and no key.
+ * ======================================================================== */
 
-static void menu_append(HMENU m, const MenuItem *items, size_t n)
+static const AprUiBinding k_bindings[] = {
+    /* cmd                    vk             mods                             key label                     menu label */
+    { APR_CMD_FILE_NEW,       'N',           APR_KMOD_CTRL,                   APR_S_UI_KEY_FILE_NEW,        APR_S_UI_MENU_FILE_NEW },
+    { APR_CMD_FILE_OPEN,      'O',           APR_KMOD_CTRL,                   APR_S_UI_KEY_FILE_OPEN,       APR_S_UI_MENU_FILE_OPEN },
+    { APR_CMD_FILE_SAVE,      'S',           APR_KMOD_CTRL,                   APR_S_UI_KEY_FILE_SAVE,       APR_S_UI_MENU_FILE_SAVE },
+    { APR_CMD_FILE_SAVE_AS,   'S',           APR_KMOD_CTRL | APR_KMOD_SHIFT,  APR_S_UI_KEY_FILE_SAVE_AS,    APR_S_UI_MENU_FILE_SAVE_AS },
+    { APR_CMD_FILE_EXIT,      0,             0,                               APR_S__NONE,                  APR_S_UI_MENU_FILE_EXIT },
+
+    { APR_CMD_ADD_SOURCE,     '1',           APR_KMOD_CTRL,                   APR_S_UI_KEY_ADD_SOURCE,      APR_S_UI_MENU_ADD_SOURCE },
+    { APR_CMD_ADD_BUS,        '2',           APR_KMOD_CTRL,                   APR_S_UI_KEY_ADD_BUS,         APR_S_UI_MENU_ADD_BUS },
+    { APR_CMD_ADD_ACTION,     '3',           APR_KMOD_CTRL,                   APR_S_UI_KEY_ADD_ACTION,      APR_S_UI_MENU_ADD_ACTION },
+    { APR_CMD_CONNECT,        'E',           APR_KMOD_CTRL,                   APR_S_UI_KEY_CONNECT,         APR_S_UI_MENU_CONNECT },
+    /* Ctrl+Shift+E belongs to the canvas: accelerator matching is exact on
+     * modifiers, so putting it here would take disconnect away from the one
+     * table that exists to stop that happening (ui_canvas.h). */
+    { APR_CMD_DISCONNECT,     0,             0,                               APR_S__NONE,                  APR_S_UI_MENU_DISCONNECT },
+    /* Ctrl+Shift+3 mirrors Ctrl+3: the key that adds an output, with Shift, is
+     * the key that takes one away. F2 is the platform's rename key. */
+    { APR_CMD_RENAME_BUS,     VK_F2,         0,                               APR_S_UI_KEY_RENAME_BUS,      APR_S_UI_MENU_RENAME_BUS },
+    { APR_CMD_REMOVE_OUTPUT,  '3',           APR_KMOD_CTRL | APR_KMOD_SHIFT,  APR_S_UI_KEY_REMOVE_OUTPUT,   APR_S_UI_MENU_REMOVE_OUTPUT },
+    { APR_CMD_REMOVE,         VK_DELETE,     0,                               APR_S_UI_KEY_REMOVE,          APR_S_UI_MENU_REMOVE },
+
+    { APR_CMD_RECORD_START,   'R',           APR_KMOD_CTRL,                   APR_S_UI_KEY_RECORD_START,    APR_S_UI_MENU_RECORD_START },
+    /* Ctrl+P pauses and Ctrl+Shift+P undoes it, the same mirror as Ctrl+3 and
+     * Ctrl+Shift+3 above. Ctrl+P is free in this product -- there is nothing to
+     * print -- and it is the letter the operation is named after in both the
+     * menu and this list. */
+    { APR_CMD_RECORD_PAUSE,   'P',           APR_KMOD_CTRL,                   APR_S_UI_KEY_RECORD_PAUSE,    APR_S_UI_MENU_RECORD_PAUSE },
+    { APR_CMD_RECORD_RESUME,  'P',           APR_KMOD_CTRL | APR_KMOD_SHIFT,  APR_S_UI_KEY_RECORD_RESUME,   APR_S_UI_MENU_RECORD_RESUME },
+    { APR_CMD_RECORD_STOP,    VK_OEM_PERIOD, APR_KMOD_CTRL,                   APR_S_UI_KEY_RECORD_STOP,     APR_S_UI_MENU_RECORD_STOP },
+
+    { APR_CMD_VIEW_TREE,      'T',           APR_KMOD_CTRL,                   APR_S_UI_KEY_VIEW_TREE,       APR_S_UI_MENU_VIEW_TREE },
+    { APR_CMD_VIEW_DARK,      'D',           APR_KMOD_CTRL,                   APR_S_UI_KEY_VIEW_DARK,       APR_S_UI_MENU_VIEW_DARK },
+    { APR_CMD_HIDE_TO_TRAY,   'H',           APR_KMOD_CTRL | APR_KMOD_SHIFT,  APR_S_UI_KEY_HIDE_TO_TRAY,    APR_S_UI_MENU_HIDE_TO_TRAY },
+    { APR_CMD_NEXT_PANE,      0,             0,                               APR_S__NONE,                  APR_S_UI_MENU_VIEW_NEXT_PANE },
+
+    { APR_CMD_HELP_KEYS,      VK_F1,         0,                               APR_S_UI_KEY_HELP_KEYS,       APR_S_UI_MENU_HELP_KEYS },
+    { APR_CMD_HELP_ABOUT,     0,             0,                               APR_S__NONE,                  APR_S_UI_MENU_HELP_ABOUT }
+};
+
+size_t apr_ui_binding_count(void)
+{
+    return sizeof k_bindings / sizeof k_bindings[0];
+}
+
+const AprUiBinding *apr_ui_binding_at(size_t index)
+{
+    if (index >= apr_ui_binding_count()) return NULL;
+    return &k_bindings[index];
+}
+
+static const AprUiBinding *binding_for_command(int cmd)
+{
+    size_t i, n = apr_ui_binding_count();
+    for (i = 0; i < n; ++i) if (k_bindings[i].cmd == cmd) return &k_bindings[i];
+    return NULL;
+}
+
+/* The label comes from the BINDING, not from a second list, so a menu and a
+ * shortcut list cannot name the same command differently. `cmd == 0` is still a
+ * separator. */
+static void menu_append(HMENU m, const int *cmds, size_t n)
 {
     size_t i;
     for (i = 0; i < n; ++i) {
-        if (items[i].cmd == 0) {
-            AppendMenuW(m, MF_SEPARATOR, 0, NULL);
-        } else {
-            AppendMenuW(m, MF_STRING, (UINT_PTR)items[i].cmd, apr_str(items[i].label));
-        }
+        const AprUiBinding *b;
+        if (cmds[i] == 0) { AppendMenuW(m, MF_SEPARATOR, 0, NULL); continue; }
+        b = binding_for_command(cmds[i]);
+        if (!b || !b->menu_label) continue;
+        AppendMenuW(m, MF_STRING, (UINT_PTR)cmds[i], apr_str(b->menu_label));
     }
 }
 
@@ -460,41 +542,28 @@ static HMENU build_menu(void)
 {
     HMENU bar, sub;
 
-    static const MenuItem file[] = {
-        { APR_CMD_FILE_NEW,     APR_S_UI_MENU_FILE_NEW },
-        { APR_CMD_FILE_OPEN,    APR_S_UI_MENU_FILE_OPEN },
-        { 0, 0 },
-        { APR_CMD_FILE_SAVE,    APR_S_UI_MENU_FILE_SAVE },
-        { APR_CMD_FILE_SAVE_AS, APR_S_UI_MENU_FILE_SAVE_AS },
-        { 0, 0 },
-        { APR_CMD_FILE_EXIT,    APR_S_UI_MENU_FILE_EXIT }
+    static const int file[] = {
+        APR_CMD_FILE_NEW, APR_CMD_FILE_OPEN, 0,
+        APR_CMD_FILE_SAVE, APR_CMD_FILE_SAVE_AS, 0,
+        APR_CMD_FILE_EXIT
     };
-    static const MenuItem edit[] = {
-        { APR_CMD_ADD_SOURCE, APR_S_UI_MENU_ADD_SOURCE },
-        { APR_CMD_ADD_BUS,    APR_S_UI_MENU_ADD_BUS },
-        { APR_CMD_ADD_ACTION, APR_S_UI_MENU_ADD_ACTION },
-        { 0, 0 },
-        { APR_CMD_CONNECT,    APR_S_UI_MENU_CONNECT },
-        { APR_CMD_DISCONNECT, APR_S_UI_MENU_DISCONNECT },
-        { 0, 0 },
-        { APR_CMD_RENAME_BUS,    APR_S_UI_MENU_RENAME_BUS },
-        { APR_CMD_REMOVE_OUTPUT, APR_S_UI_MENU_REMOVE_OUTPUT },
-        { APR_CMD_REMOVE,     APR_S_UI_MENU_REMOVE }
+    static const int edit[] = {
+        APR_CMD_ADD_SOURCE, APR_CMD_ADD_BUS, APR_CMD_ADD_ACTION, 0,
+        APR_CMD_CONNECT, APR_CMD_DISCONNECT, 0,
+        APR_CMD_RENAME_BUS, APR_CMD_REMOVE_OUTPUT, APR_CMD_REMOVE
     };
-    static const MenuItem rec[] = {
-        { APR_CMD_RECORD_START, APR_S_UI_MENU_RECORD_START },
-        { APR_CMD_RECORD_STOP,  APR_S_UI_MENU_RECORD_STOP }
+    /* Pause and Resume sit between Start and Stop because that is the order
+     * they happen in, and a screen reader walks this menu in order. */
+    static const int rec[] = {
+        APR_CMD_RECORD_START, APR_CMD_RECORD_PAUSE, APR_CMD_RECORD_RESUME,
+        APR_CMD_RECORD_STOP
     };
-    static const MenuItem view[] = {
-        { APR_CMD_VIEW_TREE, APR_S_UI_MENU_VIEW_TREE },
-        { APR_CMD_VIEW_DARK, APR_S_UI_MENU_VIEW_DARK },
-        { APR_CMD_HIDE_TO_TRAY, APR_S_UI_MENU_HIDE_TO_TRAY },
-        { 0, 0 },
-        { APR_CMD_NEXT_PANE, APR_S_UI_MENU_VIEW_NEXT_PANE }
+    static const int view[] = {
+        APR_CMD_VIEW_TREE, APR_CMD_VIEW_DARK, APR_CMD_HIDE_TO_TRAY, 0,
+        APR_CMD_NEXT_PANE
     };
-    static const MenuItem help[] = {
-        { APR_CMD_HELP_KEYS,  APR_S_UI_MENU_HELP_KEYS },
-        { APR_CMD_HELP_ABOUT, APR_S_UI_MENU_HELP_ABOUT }
+    static const int help[] = {
+        APR_CMD_HELP_KEYS, APR_CMD_HELP_ABOUT
     };
 
     bar = CreateMenu();
@@ -520,49 +589,30 @@ static HMENU build_menu(void)
 
 /* Accelerators. Not localized -- the key a user presses does not change with
  * the interface language, and a translator changing Ctrl+R to Ctrl+ت would
- * produce a shortcut no keyboard can send. The TEXT beside the menu item is in
- * the catalog so it can be rendered in the local convention; the binding is
- * here. */
-/* THE TABLE IS DATA, AND IT HAS TO BE READABLE BACK.
+ * produce a shortcut no keyboard can send.
  *
- * File scope rather than a local, because apr_ui_app_pretranslate() has to be
- * able to answer "what command is this keystroke bound to" for a key
- * TranslateAccelerator is about to swallow. See that function. */
-static const ACCEL k_accel[] = {
-        { FVIRTKEY | FCONTROL,            'N', APR_CMD_FILE_NEW },
-        { FVIRTKEY | FCONTROL,            'O', APR_CMD_FILE_OPEN },
-        { FVIRTKEY | FCONTROL,            'S', APR_CMD_FILE_SAVE },
-        { FVIRTKEY | FCONTROL | FSHIFT,   'S', APR_CMD_FILE_SAVE_AS },
-        { FVIRTKEY | FCONTROL,            '1', APR_CMD_ADD_SOURCE },
-        { FVIRTKEY | FCONTROL,            '2', APR_CMD_ADD_BUS },
-        { FVIRTKEY | FCONTROL,            '3', APR_CMD_ADD_ACTION },
-        { FVIRTKEY | FCONTROL,            'E', APR_CMD_CONNECT },
-        { FVIRTKEY,                  VK_DELETE, APR_CMD_REMOVE },
-        /* Ctrl+Shift+3 mirrors Ctrl+3: the key that adds an output, with
-         * Shift, is the key that takes one away. F2 is the platform's rename
-         * key everywhere else and there is no reason to invent another.
-         *
-         * Ctrl+Shift+E is deliberately NOT here. The canvas claims it as a
-         * keystroke, and accelerator matching is exact on modifiers, so
-         * putting it in this table would silently take disconnect away from
-         * the canvas's own binding table -- which is the one thing that table
-         * exists to prevent. */
-        { FVIRTKEY | FCONTROL | FSHIFT,   '3', APR_CMD_REMOVE_OUTPUT },
-        { FVIRTKEY,                     VK_F2, APR_CMD_RENAME_BUS },
-        { FVIRTKEY | FCONTROL | FSHIFT,   'H', APR_CMD_HIDE_TO_TRAY },
-        { FVIRTKEY | FCONTROL,            'R', APR_CMD_RECORD_START },
-        { FVIRTKEY | FCONTROL,   VK_OEM_PERIOD, APR_CMD_RECORD_STOP },
-        { FVIRTKEY | FCONTROL,            'T', APR_CMD_VIEW_TREE },
-        { FVIRTKEY | FCONTROL,            'D', APR_CMD_VIEW_DARK },
-        { FVIRTKEY,                      VK_F1, APR_CMD_HELP_KEYS }
-};
-
+ * BUILT FROM k_bindings, never written out a second time. The ACCEL array used
+ * to be the definition, which meant the binding lived here, the key's NAME
+ * lived in the menu string, and Help listed neither -- three places to change
+ * and no way to notice when one of them was not. */
 static HACCEL build_accelerators(void)
 {
-    /* CreateAcceleratorTableW takes a non-const LPACCEL and does not modify
-     * it; the table stays const here so nothing can edit it at run time. */
-    return CreateAcceleratorTableW((LPACCEL)(void *)k_accel,
-                                   (int)(sizeof k_accel / sizeof k_accel[0]));
+    ACCEL  acc[64];
+    size_t i, n = apr_ui_binding_count();
+    int    k = 0;
+
+    for (i = 0; i < n && k < (int)(sizeof acc / sizeof acc[0]); ++i) {
+        BYTE f = FVIRTKEY;
+        if (k_bindings[i].vk == 0) continue;    /* on the menu, no key of its own */
+        if (k_bindings[i].mods & APR_KMOD_CTRL)  f |= FCONTROL;
+        if (k_bindings[i].mods & APR_KMOD_SHIFT) f |= FSHIFT;
+        if (k_bindings[i].mods & APR_KMOD_ALT)   f |= FALT;
+        acc[k].fVirt = f;
+        acc[k].key   = (WORD)k_bindings[i].vk;
+        acc[k].cmd   = (WORD)k_bindings[i].cmd;
+        k++;
+    }
+    return CreateAcceleratorTableW(acc, k);
 }
 
 /* --------------------------------------------------------------------------
@@ -1314,7 +1364,8 @@ AprErr apr_ui_app_create(HINSTANCE inst, AprUiApp **out)
             APR_CMD_FILE_SAVE_AS, APR_CMD_ADD_SOURCE, APR_CMD_ADD_BUS,
             APR_CMD_ADD_ACTION, APR_CMD_CONNECT, APR_CMD_DISCONNECT,
             APR_CMD_REMOVE, APR_CMD_RENAME_BUS, APR_CMD_REMOVE_OUTPUT,
-            APR_CMD_RECORD_START, APR_CMD_RECORD_STOP,
+            APR_CMD_RECORD_START, APR_CMD_RECORD_PAUSE,
+            APR_CMD_RECORD_RESUME, APR_CMD_RECORD_STOP,
             APR_CMD_HELP_KEYS, APR_CMD_HELP_ABOUT
         };
         for (i = 0; i < (int)(sizeof owned_by_model / sizeof owned_by_model[0]); ++i) {
@@ -1405,20 +1456,16 @@ int apr_ui_app_command_enabled(const AprUiApp *app, int command_id)
 
 int apr_ui_app_accel_command(UINT vk, UINT mods)
 {
-    BYTE want = 0;
-    size_t i;
+    size_t i, n = apr_ui_binding_count();
 
-    if (mods & APR_KMOD_CTRL)  want |= FCONTROL;
-    if (mods & APR_KMOD_SHIFT) want |= FSHIFT;
-    if (mods & APR_KMOD_ALT)   want |= FALT;
-
-    for (i = 0; i < sizeof k_accel / sizeof k_accel[0]; ++i) {
-        if (!(k_accel[i].fVirt & FVIRTKEY)) continue;
-        if (k_accel[i].key != (WORD)vk) continue;
-        if ((BYTE)(k_accel[i].fVirt & (FCONTROL | FSHIFT | FALT)) != want) {
-            continue;
-        }
-        return k_accel[i].cmd;
+    /* Read off the SAME table the accelerator was built from. Asking the ACCEL
+     * array instead -- which is what this used to do -- meant the answer came
+     * from a second copy of the bindings and could disagree with the first. */
+    for (i = 0; i < n; ++i) {
+        if (k_bindings[i].vk == 0) continue;
+        if (k_bindings[i].vk != vk) continue;
+        if (k_bindings[i].mods != mods) continue;
+        return k_bindings[i].cmd;
     }
     return 0;
 }

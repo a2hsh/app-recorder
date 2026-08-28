@@ -102,6 +102,30 @@ void apr_drift_ctl_init(AprDriftCtl *c, uint32_t sample_rate,
 uint64_t apr_drift_ctl_update(AprDriftCtl *c, const AprDrift *d,
                               double backlog, uint64_t block_frames);
 
+/* FORGET THE ACCUMULATED POSITION ERROR, KEEP THE TUNING. Zeroes the
+ * integrator, the last error and the update count; leaves tau, target, the
+ * clamp and the gains exactly as apr_drift_ctl_init left them.
+ *
+ * WHY THIS IS THE RIGHT ANSWER FOR A PAUSE, and why "reset it all" and "hold it"
+ * are both wrong:
+ *
+ *   While a recording is paused the device goes on producing and the reader
+ *   stops consuming, so the raw backlog grows by the whole paused duration. It
+ *   is not an alignment error -- nothing is out of position, the consumer has
+ *   simply been excused -- but the integrator cannot tell the difference and
+ *   would wind up against a fiction, then spend minutes unwinding it into the
+ *   audio after the resume. HOLDING it is therefore wrong.
+ *
+ *   Throwing away the whole controller is wrong too, and the reason is where
+ *   the knowledge lives: the crystal's measured rate is NOT in the integrator.
+ *   It is the feed-forward term, recomputed every tick from apr_clock_drift()
+ *   over the source's whole life -- and a source's clock is not touched by a
+ *   pause, because the ring is still real time. So the rate survives a reset
+ *   for free, and the only thing this discards is a position error that was
+ *   never real. The controller resumes at its setpoint, already knowing the
+ *   crystal. */
+void apr_drift_ctl_reset(AprDriftCtl *c);
+
 /* Last backlog error in frames: what the multi-hour alignment test asserts on.
  * Positive means the source is ahead of where the loop wants it. */
 double apr_drift_ctl_error(const AprDriftCtl *c);

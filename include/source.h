@@ -285,6 +285,39 @@ AprErr apr_source_reader_open(AprSource *s, double target_backlog,
 /* Lowers the refcount. NULL is allowed. */
 void apr_source_reader_close(AprSourceReader *rd);
 
+/* ---------------------------------------------------------------------------
+ * RE-BASING: the reader is told the bus timeline has moved under it.
+ *
+ * THIS IS WHERE PAUSE IS DECIDED, AND IT IS ONE FUNCTION FOR A REASON.
+ *
+ *   A pause excises a span of wall clock from the OUTPUT (bus.h) and changes
+ *   nothing at all about the SOURCE: the capture goes on running, the ring goes
+ *   on being an index of real time, and the 250 ms ring therefore laps several
+ *   times over while nobody reads it. That audio is not wanted -- it is the
+ *   audio the user asked not to record.
+ *
+ *   WHICH MAKES "IS THIS LOSS?" THE WHOLE QUESTION, and this is the only place
+ *   in the product that can answer it. Every other layer sees the same
+ *   arithmetic in both cases: a reader far behind a write cursor. Left alone,
+ *   the next pull would find its frames overwritten, call that an overrun, and
+ *   emit exactly the paused duration as silence -- injecting the pause back
+ *   into the file, which is the one thing pause must never do. So the decision
+ *   belongs to the reader, at the instant it is told the timeline moved, and it
+ *   is expressed by SEEKING rather than skipping (ringbuf.h): a seek is the
+ *   consumer moving, and a consumer that moved lost nothing.
+ *
+ *   Everything per-consumer is discarded with it -- the resampler's filter
+ *   history, which would otherwise smear the last block before the pause into
+ *   the first block after it, and the drift controller's accumulated position
+ *   error, which is a fiction after a pause (drift.h). What is NOT discarded is
+ *   this reader's output frame count: the take is one take, and a file does not
+ *   restart because a pause happened in the middle of it.
+ *
+ * The next apr_source_pull re-derives where this reader belongs from the bus
+ * clock it is handed, so the caller must shift that clock BEFORE calling this.
+ * Cheap, allocation-free, and safe to call on a reader that has not begun. */
+void apr_source_reader_rebase(AprSourceReader *rd);
+
 /* What one pull produced. The caller mixes `frames` frames from
  * `out + lead * channels` at destination offset `lead`. */
 typedef struct AprSourcePull {

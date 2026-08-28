@@ -327,3 +327,26 @@ size_t rb_skip(RingReader *rd, size_t max_frames, uint64_t *out_lost)
     rd->pos += n;
     return (size_t)n;
 }
+
+/* See ringbuf.h. The clamp is against the CLAIM cursor's oldest safe frame and
+ * the WRITE cursor, because those are the same two bounds every read is held
+ * to; landing outside them would hand back frames the producer is in the middle
+ * of, or frames it has not written. `lost` is deliberately untouched: this is
+ * the reader moving its own timeline, not data going past it. */
+uint64_t rb_reader_seek(RingReader *rd, uint64_t pos)
+{
+    uint64_t w, c, cap, oldest;
+
+    if (!rd || !rd->rb) return 0;
+
+    w   = load_acquire(&rd->rb->write_pos);
+    c   = load_acquire(&rd->rb->claim_pos);
+    cap = (uint64_t)rd->rb->capacity;
+
+    oldest = c > cap ? c - cap : 0;
+    if (pos < oldest) pos = oldest;
+    if (pos > w)      pos = w;
+
+    rd->pos = pos;
+    return rd->pos;
+}

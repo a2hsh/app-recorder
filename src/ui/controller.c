@@ -96,6 +96,10 @@ struct AprController {
 
     AprRunner *runner;
     int        recording;
+    /* The loop has ACTUALLY paused -- not merely been asked to. The two are a
+     * tick apart, and a status line that reported the request would say
+     * "paused" while frames were still being written (runner.h). */
+    int        paused;
     int        closing;          /* a close is waiting on the files */
     int        allow_close;
     int64_t    last_elapsed_ms;
@@ -355,10 +359,16 @@ static void update_commands(AprController *c)
     apr_ui_app_enable_command(c->app, APR_CMD_RECORD_START,
                               !rec && graph_has_output(c->graph));
     apr_ui_app_enable_command(c->app, APR_CMD_RECORD_STOP, rec);
+    /* GREYED, NEVER ABSENT, and greyed the right way round: "Pause Recording,
+     * unavailable" is how a screen reader user learns the take is ALREADY
+     * paused without having to press anything and listen to what happened. */
+    apr_ui_app_enable_command(c->app, APR_CMD_RECORD_PAUSE, rec && !c->paused);
+    apr_ui_app_enable_command(c->app, APR_CMD_RECORD_RESUME, rec && c->paused);
     apr_ui_app_enable_command(c->app, APR_CMD_HELP_KEYS, 1);
     apr_ui_app_enable_command(c->app, APR_CMD_HELP_ABOUT, 1);
 
     apr_tray_set_can_record(c->tray, !rec && graph_has_output(c->graph), rec);
+    apr_tray_set_can_pause(c->tray, rec && !c->paused, rec && c->paused);
 }
 
 /* A CHOOSER RETURNED 0. WAS THAT A CANCEL, OR DID NOTHING OPEN?
@@ -1115,13 +1125,26 @@ static void tick_clock(AprController *c)
     apr_controller_format_elapsed(ms, elapsed, 64);
 
     args[0] = elapsed;
-    apr_str_format(APR_S_UI_STATUS_RECORDING, text, CTL_TEXT_CCH, args, 1);
+    /* THE PAUSED SENTENCE KEEPS BEING WRITTEN, once a second, alongside the
+     * one-off announcement. The announcement is what a screen reader speaks at
+     * the transition; this is what is THERE when somebody comes back to the
+     * window ten minutes later and reads the status bar deliberately -- and a
+     * bar still reading "Recording 00:12:04" through a pause is exactly the
+     * state this feature must not be able to hide.
+     *
+     * `ms` is RECORDED time either way (runner.h), so the figure is the length
+     * of the file and it stops climbing while paused, which is itself an answer
+     * to "is it running" for anyone watching the number. */
+    apr_str_format(c->paused ? APR_S_UI_STATUS_PAUSED
+                             : APR_S_UI_STATUS_RECORDING,
+                   text, CTL_TEXT_CCH, args, 1);
     /* announce = 0. A clock that spoke once a second would make the
      * application unusable inside a minute; the text is here for anyone who
      * reads the status bar deliberately, and for the tray tooltip that
      * Windows+B reaches without disturbing anyone. */
     apr_ui_app_set_status_text(c->app, text, 0);
-    apr_tray_set_status(c->tray, APR_TRAY_RECORDING, elapsed);
+    apr_tray_set_status(c->tray, c->paused ? APR_TRAY_PAUSED
+                                           : APR_TRAY_RECORDING, elapsed);
 }
 
 static int start_recording(AprController *c)
@@ -1155,6 +1178,7 @@ static int start_recording(AprController *c)
     }
 
     c->recording = 1;
+    c->paused    = 0;
     c->last_elapsed_ms = 0;
 
     /* SAID IMMEDIATELY, and the adjacency is deliberate. Anything watching
@@ -1195,6 +1219,32 @@ static int stop_recording(AprController *c)
     return 1;
 }
 
+/* ONLY A REQUEST IS MADE HERE. The runner's loop owns the graph between run()
+ * and its return, so the transition happens on that thread and comes back as
+ * APR_RUN_EV_PAUSED / APR_RUN_EV_RESUMED -- which is where the sentence is
+ * said. Announcing here instead would say "paused" while the mixer was still
+ * writing frames, and the whole value of announcing a pause is that the
+ * sentence and the file agree.
+ *
+ * The REFUSALS are said here, because nothing downstream will ever hear about
+ * them. A key that does nothing and says nothing is indistinguishable from a
+ * broken application to somebody working by ear. */
+static int pause_recording(AprController *c)
+{
+    if (!c->recording) { say0(c, APR_S_UI_ANN_NOT_RECORDING); return 1; }
+    if (c->paused)     { say0(c, APR_S_UI_ANN_ALREADY_PAUSED); return 1; }
+    apr_runner_request_pause(c->runner);
+    return 1;
+}
+
+static int resume_recording(AprController *c)
+{
+    if (!c->recording) { say0(c, APR_S_UI_ANN_NOT_RECORDING); return 1; }
+    if (!c->paused)    { say0(c, APR_S_UI_ANN_NOT_PAUSED); return 1; }
+    apr_runner_request_resume(c->runner);
+    return 1;
+}
+
 /* The run is over and every file is closed. Runs on the UI thread. */
 static void recording_finished(AprController *c)
 {
@@ -1209,6 +1259,7 @@ static void recording_finished(AprController *c)
     apr_runner_destroy(c->runner);
     c->runner = NULL;
     c->recording = 0;
+    c->paused = 0;
 
     apr_controller_format_elapsed(c->last_elapsed_ms, elapsed, 64);
     args[0] = elapsed;
@@ -1309,6 +1360,39 @@ static void handle_notice(AprController *c, AprRunNotice *n)
         args[0] = n->path;
         say_and_notify(c, APR_S_UI_ANN_OUTPUT_RENAMED,
                        APR_S_UI_TRAY_INFO_OUTPUT_RENAMED, args, 1);
+        break;
+
+    /* BOTH TRANSITIONS, ON WHICHEVER CHANNEL CAN REACH THE USER. A recording
+     * paused from the notification area runs with the window hidden by
+     * definition, which is where a status-bar live region reaches nobody -- and
+     * a pause nobody hears is an hour of a meeting that was never recorded,
+     * looking exactly like a recording that is going fine. The resume is the
+     * half that is easy to forget, and it is the one that says the take is
+     * running again. */
+    case APR_RUN_EV_PAUSED:
+        /* THE FLAG AND THE SENTENCE ARE ADJACENT, exactly as they are in
+         * start_recording and for the same reason: anything watching
+         * apr_controller_paused() -- a test, the tray, a future scripting
+         * surface -- learns the state from the line above, and every call
+         * between that line and the announcement is time in which the state is
+         * true and the sentence is not yet available. Rebuilding two views sits
+         * on the far side of it, because that destroys and recreates every node
+         * window and takes long enough to lose the race. */
+        c->paused = 1;
+        say_and_notify(c, APR_S_UI_ANN_RECORD_PAUSED,
+                       APR_S_UI_TRAY_INFO_PAUSED, NULL, 0);
+        update_commands(c);
+        tick_clock(c);      /* the readout follows the sentence immediately */
+        refresh_views(c);
+        break;
+
+    case APR_RUN_EV_RESUMED:
+        c->paused = 0;
+        say_and_notify(c, APR_S_UI_ANN_RECORD_RESUMED,
+                       APR_S_UI_TRAY_INFO_RESUMED, NULL, 0);
+        update_commands(c);
+        tick_clock(c);
+        refresh_views(c);
         break;
 
     case APR_RUN_EV_FINISHING:
@@ -1490,8 +1574,10 @@ int apr_controller_command(AprController *c, int command_id)
         }
         return 1;
 
-    case APR_CMD_RECORD_START: return start_recording(c);
-    case APR_CMD_RECORD_STOP:  return stop_recording(c);
+    case APR_CMD_RECORD_START:  return start_recording(c);
+    case APR_CMD_RECORD_PAUSE:  return pause_recording(c);
+    case APR_CMD_RECORD_RESUME: return resume_recording(c);
+    case APR_CMD_RECORD_STOP:   return stop_recording(c);
 
     case APR_CMD_SHOW_WINDOW:
         ShowWindow(c->frame, SW_SHOW);
@@ -1777,6 +1863,7 @@ void apr_controller_destroy(AprController *c)
         c->runner = NULL;
     }
     c->recording = 0;
+    c->paused    = 0;
 
     if (c->canvas) apr_canvas_set_announce(c->canvas, NULL, NULL);
     if (c->canvas) apr_canvas_set_edit_sink(c->canvas, NULL, NULL);
@@ -1821,6 +1908,16 @@ AprErr apr_controller_set_graph(AprController *c, AprGraph *g)
 int apr_controller_recording(const AprController *c)
 {
     return c ? c->recording : 0;
+}
+
+int apr_controller_paused(const AprController *c)
+{
+    return c ? c->paused : 0;
+}
+
+AprTrayState apr_controller_tray_state(const AprController *c)
+{
+    return c ? apr_tray_state(c->tray) : APR_TRAY_IDLE;
 }
 
 void apr_controller_model_changed(AprController *c)

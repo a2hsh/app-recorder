@@ -162,6 +162,8 @@
     X(STATUS_RECORDING_TO,       1020)                                         \
     X(STATUS_STOPPED,            1021)                                         \
     X(STATUS_FINISHING,          1022)                                         \
+    X(STATUS_PAUSED,             1023)                                         \
+    X(STATUS_RESUMED,            1024)                                         \
     X(WARN_SOURCE_MUTED,         1030)                                         \
     X(WARN_SOURCE_EXITED,        1031)                                         \
     X(WARN_SOURCE_RECOVERED,     1032)                                         \
@@ -223,7 +225,8 @@
     X(CLI_EXAMPLE_TWO,             1096)                                      \
     X(CLI_STOP_HINT,               1097)                                      \
     X(CLI_VERSION_LINE,            1098)                                      \
-    X(CLI_OPT_FAKE_HEALTH,         1099)
+    X(CLI_OPT_FAKE_HEALTH,         1099)                                      \
+    X(CLI_PAUSE_HINT,              1025)
 
 /* ---- the command line: what it says when it refuses. ---- */
 #define APR_STR_LIST_CLI_ERR(X)                                                \
@@ -319,6 +322,8 @@
     X(UI_MENU_RECORDING,           1330)                                      \
     X(UI_MENU_RECORD_START,        1331)                                      \
     X(UI_MENU_RECORD_STOP,         1332)                                      \
+    X(UI_MENU_RECORD_PAUSE,        1333)                                      \
+    X(UI_MENU_RECORD_RESUME,       1334)                                      \
     X(UI_MENU_VIEW,                1340)                                      \
     X(UI_MENU_VIEW_TREE,           1341)                                      \
     X(UI_MENU_VIEW_DARK,           1342)                                      \
@@ -406,6 +411,20 @@
     X(UI_KEY_GAIN_DOWN,            1475)                                      \
     X(UI_KEY_CANCEL,               1476)                                      \
     X(UI_KEY_DESCRIBE,             1477)                                      \
+    X(UI_KEY_FILE_NEW,             1560)                                      \
+    X(UI_KEY_FILE_OPEN,            1561)                                      \
+    X(UI_KEY_FILE_SAVE,            1562)                                      \
+    X(UI_KEY_FILE_SAVE_AS,         1563)                                      \
+    X(UI_KEY_RENAME_BUS,           1564)                                      \
+    X(UI_KEY_REMOVE_OUTPUT,        1565)                                      \
+    X(UI_KEY_HIDE_TO_TRAY,         1566)                                      \
+    X(UI_KEY_RECORD_START,         1567)                                      \
+    X(UI_KEY_RECORD_PAUSE,         1568)                                      \
+    X(UI_KEY_RECORD_RESUME,        1569)                                      \
+    X(UI_KEY_RECORD_STOP,          1570)                                      \
+    X(UI_KEY_VIEW_TREE,            1571)                                      \
+    X(UI_KEY_VIEW_DARK,            1572)                                      \
+    X(UI_KEY_HELP_KEYS,            1573)                                      \
     X(UI_KEYNAME_TAB,              1480)                                      \
     X(UI_KEYNAME_ENTER,            1481)                                      \
     X(UI_KEYNAME_SPACE,            1482)                                      \
@@ -552,7 +571,12 @@
     X(UI_ANN_CLOSE_TIMEOUT,         1628)                                  \
     X(UI_ANN_NO_TRAY,               1629)                                  \
     X(UI_ANN_SOURCE_RECOVERED,      1630)                                  \
-    X(UI_ANN_EXCLUSION_HELD,        1631)
+    X(UI_ANN_EXCLUSION_HELD,        1631)                                  \
+    X(UI_STATUS_PAUSED,             1632)                                  \
+    X(UI_ANN_RECORD_PAUSED,         1633)                                  \
+    X(UI_ANN_RECORD_RESUMED,        1634)                                  \
+    X(UI_ANN_ALREADY_PAUSED,        1635)                                  \
+    X(UI_ANN_NOT_PAUSED,            1636)
 
 
 /* ---- the dialogs: the half of the product that turns "navigate a graph" into
@@ -692,7 +716,12 @@
     X(UI_TRAY_INFO_ARM_FAILED,      1766)                                 \
     X(UI_TRAY_INFO_OUTPUT_RENAMED,  1767)                                 \
     X(UI_TRAY_INFO_SOURCE_RECOVERED, 1768)                                \
-    X(UI_TRAY_INFO_EXCLUSION_HELD,  1769)
+    X(UI_TRAY_INFO_EXCLUSION_HELD,  1769)                                 \
+    X(UI_TRAY_TIP_PAUSED,           1770)                                 \
+    X(UI_TRAY_MENU_PAUSE,           1771)                                 \
+    X(UI_TRAY_MENU_RESUME,          1772)                                 \
+    X(UI_TRAY_INFO_PAUSED,          1773)                                 \
+    X(UI_TRAY_INFO_RESUMED,         1774)
 
 /* ---- WHY SOMETHING FAILED, in the user's language.
  *

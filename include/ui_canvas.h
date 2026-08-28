@@ -187,9 +187,9 @@ typedef enum AprCanvasOp {
     APR_CANVAS_OP_COUNT
 } AprCanvasOp;
 
-#define APR_KMOD_CTRL  0x0001u
-#define APR_KMOD_SHIFT 0x0002u
-#define APR_KMOD_ALT   0x0004u
+/* APR_KMOD_CTRL / SHIFT / ALT moved to ui_app.h, which this file includes.
+ * Both binding tables and the one key-name formatter need them, and the frame
+ * cannot include this header. The names and values are unchanged. */
 
 typedef struct AprCanvasBinding {
     AprCanvasOp op;

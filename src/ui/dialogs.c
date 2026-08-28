@@ -498,19 +498,28 @@ size_t apr_dlg_key_name(UINT vk, UINT mods, wchar_t *buf, size_t cch)
     return wcslen(buf);
 }
 
-size_t apr_dlg_binding_row(const AprCanvasBinding *b, wchar_t *buf, size_t cch)
+size_t apr_dlg_key_row(AprStrId label, UINT vk, UINT mods,
+                       wchar_t *buf, size_t cch)
 {
     wchar_t key[128];
     const wchar_t *args[2];
 
     if (!buf || cch == 0) return 0;
     buf[0] = 0;
-    if (!b) return 0;
+    if (!label) return 0;
 
-    apr_dlg_key_name(b->vk, b->mods, key, 128);
-    args[0] = apr_str(b->label);
+    apr_dlg_key_name(vk, mods, key, 128);
+    args[0] = apr_str(label);
     args[1] = key;
     return apr_str_format(APR_S_UI_DLG_KEYS_ROW, buf, cch, args, 2);
+}
+
+size_t apr_dlg_binding_row(const AprCanvasBinding *b, wchar_t *buf, size_t cch)
+{
+    if (!buf || cch == 0) return 0;
+    buf[0] = 0;
+    if (!b) return 0;
+    return apr_dlg_key_row(b->label, b->vk, b->mods, buf, cch);
 }
 
 /* ==========================================================================
@@ -1763,15 +1772,38 @@ int apr_dlg_resolve_report(HWND owner, const AprSessionResolveReport *rep)
  * Help
  * ======================================================================== */
 
+/* BOTH TABLES, IN THE ORDER A USER MEETS THEM: the frame's commands first --
+ * File, Edit, Recording, View, Help, exactly as the menu bar runs -- then the
+ * canvas's own navigation keys.
+ *
+ * THE FRAME'S HALF USED TO BE MISSING ENTIRELY. Ctrl+R started a recording and
+ * Ctrl+. stopped one, and neither appeared on the one screen a keyboard user
+ * opens to find out what the keys are; the list held canvas navigation and
+ * nothing else. For someone working by ear that is not an omission from a
+ * document, it is an operation that does not exist.
+ *
+ * The canvas's `platform` rows are skipped here because the frame's table now
+ * carries them -- they are the same keys, delivered by the frame, and listing
+ * them twice would make the screen look like there were two of each. */
 static void fill_keys(HWND lb, void *user)
 {
-    size_t i, n = apr_canvas_binding_count();
+    size_t i, n;
+    wchar_t row[DLG_TEXT_CCH];
 
     (void)user;
+
+    n = apr_ui_binding_count();
+    for (i = 0; i < n; i++) {
+        const AprUiBinding *fb = apr_ui_binding_at(i);
+        if (!fb || !fb->key_label || fb->vk == 0) continue;
+        apr_dlg_key_row(fb->key_label, fb->vk, fb->mods, row, DLG_TEXT_CCH);
+        lb_add(lb, row, (LPARAM)i);
+    }
+
+    n = apr_canvas_binding_count();
     for (i = 0; i < n; i++) {
         const AprCanvasBinding *bd = apr_canvas_binding_at(i);
-        wchar_t row[DLG_TEXT_CCH];
-        if (!bd) continue;
+        if (!bd || bd->platform) continue;
         apr_dlg_binding_row(bd, row, DLG_TEXT_CCH);
         lb_add(lb, row, (LPARAM)i);
     }

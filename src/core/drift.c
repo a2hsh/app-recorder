@@ -32,6 +32,21 @@ void apr_drift_ctl_init(AprDriftCtl *c, uint32_t sample_rate,
     c->updates   = 0;
 }
 
+/* See drift.h. The gains, the target and the clamp are configuration and stay;
+ * `trim` and `ratio_q32` are the last output, and they go back to "no
+ * correction" so that the first tick after a resume issues a ratio built from
+ * the feed-forward alone rather than from a correction the reset just
+ * invalidated. */
+void apr_drift_ctl_reset(AprDriftCtl *c)
+{
+    if (!c) return;
+    c->integ     = 0.0;
+    c->error     = 0.0;
+    c->trim      = 0.0;
+    c->ratio_q32 = (uint64_t)1 << 32;
+    c->updates   = 0;
+}
+
 uint64_t apr_drift_ctl_update(AprDriftCtl *c, const AprDrift *d,
                               double backlog, uint64_t block_frames)
 {

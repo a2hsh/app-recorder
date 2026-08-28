@@ -100,9 +100,19 @@ struct AprRunner {
     AprReconnector *reconnect;
 
     volatile LONG   stop_requested;
+
+    /* WHAT WAS ASKED FOR, and WHAT IS TRUE. Two flags, not one: the request
+     * arrives on any thread and the graph may only be touched by the loop, so
+     * a front end reading a single flag would hear "paused" while the mixer was
+     * still writing frames. `pause_wanted` is the request; `paused` is set by
+     * the loop once apr_graph_pause has actually run. */
+    volatile LONG   pause_wanted;
+    volatile LONG   paused;
+
     volatile LONG   running;
     volatile LONG   incomplete;
     volatile LONG64 elapsed_ms;
+    volatile LONG64 paused_ms;
 
     SourceSlot source[APR_MAX_SOURCES];
     size_t     source_count;
@@ -305,10 +315,41 @@ static int stop_requested(const AprRunner *r)
     return load32(&r->stop_requested);
 }
 
+/* THE ONLY PLACE THE GRAPH IS PAUSED OR RESUMED. Runs on the loop thread,
+ * before the tick, so that no bus is ever mid-block when its origin moves.
+ *
+ * Announcing on the TRANSITION and not on the request is what makes "the state
+ * he cannot see is the state he hears" true: APR_RUN_EV_PAUSED is fired after
+ * apr_graph_pause has returned, so the sentence is never ahead of the file.
+ * A failure to pause is left unannounced and unrecorded on purpose -- the only
+ * failure apr_graph_pause has is "the graph is not running", which is a race
+ * with the stop the loop is about to notice anyway. */
+static void apply_pause(AprRunner *r, uint64_t now)
+{
+    int want = load32(&r->pause_wanted);
+    int have = load32(&r->paused);
+    AprErr e;
+
+    if (want == have) return;
+
+    if (want) {
+        e = apr_graph_pause(r->graph, now);
+        if (apr_failed(&e)) return;
+        InterlockedExchange(&r->paused, 1);
+        notice(r, APR_RUN_EV_PAUSED, SIZE_MAX, SIZE_MAX, SIZE_MAX, NULL, NULL);
+    } else {
+        e = apr_graph_resume(r->graph, now);
+        if (apr_failed(&e)) return;
+        InterlockedExchange(&r->paused, 0);
+        notice(r, APR_RUN_EV_RESUMED, SIZE_MAX, SIZE_MAX, SIZE_MAX, NULL, NULL);
+    }
+}
+
 AprErr apr_runner_run(AprRunner *r)
 {
     uint64_t freq;
     uint64_t start;
+    int64_t  paused = 0;
     AprErr   e;
 
     if (!r) return APR_ERR(APR_E_INVALID_ARG, L"apr_runner_run: runner is NULL");
@@ -319,6 +360,11 @@ AprErr apr_runner_run(AprRunner *r)
     ResetEvent(r->finished_event);
     ResetEvent(r->loop_left);
     InterlockedExchange(&r->in_run, 1);
+    /* A pause asked for before the run started is not carried into it: the
+     * request is about a recording, and this is a different one. */
+    InterlockedExchange(&r->pause_wanted, 0);
+    InterlockedExchange(&r->paused, 0);
+    store64(&r->paused_ms, 0);
     freq = apr_qpc_freq();
 
     e = apr_graph_start(r->graph, apr_qpc_now());
@@ -369,12 +415,29 @@ AprErr apr_runner_run(AprRunner *r)
         }
 
         now = apr_qpc_now();
+
+        /* RECONCILED BEFORE THE TICK, on the loop thread, because the graph
+         * has exactly one toucher between here and the end of the run and a
+         * pause applied from a UI thread would be a shape change racing a
+         * mixer. Fired once per TRANSITION -- a key pressed twice is one
+         * state and gets one sentence. */
+        apply_pause(r, now);
+
         (void)apr_graph_tick(r->graph, now);
         poll_sources(r);
         poll_actions(r);
         sample_bus_frames(r);
 
+        /* RECORDED time, not wall time (runner.h). Both are read from the same
+         * `now` so the subtraction cannot straddle two instants, and paused
+         * time comes from the graph rather than being counted here, so there
+         * is one answer to "how long was it paused" rather than two that can
+         * disagree. */
+        paused = (int64_t)apr_mul_div_u64(apr_graph_paused_ticks(r->graph, now),
+                                          1000u, freq, NULL);
         elapsed_ms = (int64_t)apr_mul_div_u64(now - start, 1000u, freq, NULL);
+        elapsed_ms = elapsed_ms > paused ? elapsed_ms - paused : 0;
+        store64(&r->paused_ms, paused);
         store64(&r->elapsed_ms, elapsed_ms);
 
         if (r->duration_ms && elapsed_ms >= r->duration_ms) break;
@@ -383,9 +446,17 @@ AprErr apr_runner_run(AprRunner *r)
 
     /* The mixer deliberately runs APR_BUS_LOOKBEHIND_MS behind wall clock
      * (bus.h), so stopping at this instant would throw away the last block.
-     * Wait for it to become due, render it, and only then finalize. */
-    Sleep(APR_BUS_LOOKBEHIND_MS + 10);
-    (void)apr_graph_tick(r->graph, apr_qpc_now());
+     * Wait for it to become due, render it, and only then finalize.
+     *
+     * NOT WHILE PAUSED. A paused bus renders nothing however long it is ticked
+     * for, so the drain would be a wait for something that cannot happen -- and
+     * resuming first, to drain it, would splice the paused audio onto the end
+     * of the take, which is the one thing pause promises not to do. The file
+     * ends where the pause stopped it. */
+    if (!load32(&r->paused)) {
+        Sleep(APR_BUS_LOOKBEHIND_MS + 10);
+        (void)apr_graph_tick(r->graph, apr_qpc_now());
+    }
 
     sample_bus_frames(r);
 
@@ -401,6 +472,12 @@ AprErr apr_runner_run(AprRunner *r)
     e = apr_graph_stop(r->graph);
     poll_actions(r);
     if (apr_failed(&e)) InterlockedExchange(&r->incomplete, 1);
+
+    /* The recording is over, so it is no longer paused -- a front end that
+     * kept saying "paused" after the files were closed would be describing a
+     * state that does not exist. */
+    InterlockedExchange(&r->paused, 0);
+    InterlockedExchange(&r->pause_wanted, 0);
 
     InterlockedExchange(&r->running, 0);
     SetEvent(r->finished_event);
@@ -577,6 +654,37 @@ void apr_runner_request_stop(AprRunner *r)
     if (!r) return;
     InterlockedExchange(&r->stop_requested, 1);
     if (r->stop_event) SetEvent(r->stop_event);
+}
+
+/* Requests only. See runner.h: the loop owns the graph, so these set a flag and
+ * the next wake reconciles it. Setting the flag before a run has started is
+ * harmless -- apr_runner_run clears it, because a pause asked for is about the
+ * recording that was running when it was asked for. */
+void apr_runner_request_pause(AprRunner *r)
+{
+    if (!r) return;
+    InterlockedExchange(&r->pause_wanted, 1);
+    /* Wake the loop rather than let it sit out its tick. The stop event is
+     * MANUAL-RESET and setting it would be a stop, so there is nothing to
+     * signal here: one tick is 10 ms, which is below anything a key press can
+     * perceive, and adding a second event would put two ways to end the wait
+     * into a loop whose whole contract is that the event IS a stop. */
+}
+
+void apr_runner_request_resume(AprRunner *r)
+{
+    if (!r) return;
+    InterlockedExchange(&r->pause_wanted, 0);
+}
+
+int apr_runner_paused(const AprRunner *r)
+{
+    return r ? load32(&r->paused) : 0;
+}
+
+int64_t apr_runner_paused_ms(const AprRunner *r)
+{
+    return r ? load64(&r->paused_ms) : 0;
 }
 
 int apr_runner_wait(AprRunner *r, DWORD ms)

@@ -67,6 +67,7 @@ struct AprBus {
     uint64_t  lookbehind_ticks;
     double    lookbehind_frames;
     int       running;
+    int       paused;
     uint64_t  frames_out;
     float     peak;
 
@@ -156,6 +157,7 @@ int apr_bus_set_name(AprBus *b, const wchar_t *name)
 uint32_t       apr_bus_rate(const AprBus *b)     { return b ? b->rate : 0; }
 uint16_t       apr_bus_channels(const AprBus *b) { return b ? b->channels : 0; }
 int            apr_bus_running(const AprBus *b)  { return b ? b->running : 0; }
+int            apr_bus_paused(const AprBus *b)   { return b ? b->paused : 0; }
 uint64_t apr_bus_frames_out(const AprBus *b)     { return b ? b->frames_out : 0; }
 float    apr_bus_peak(const AprBus *b)           { return b ? b->peak : 0.0f; }
 const AprClock *apr_bus_clock(const AprBus *b)   { return b ? &b->clock : NULL; }
@@ -586,6 +588,40 @@ AprErr apr_bus_start(AprBus *b, uint64_t start_ticks)
     apr_clock_anchor(&b->clock, start_ticks);
     b->frames_out = 0;
     b->running    = 1;
+    b->paused     = 0;
+    return apr_ok();
+}
+
+/* ---------------------------------------------------------------------------
+ * Pause. See the long note in bus.h for why the origin moves rather than the
+ * gap being filled.
+ * ------------------------------------------------------------------------- */
+
+AprErr apr_bus_pause(AprBus *b)
+{
+    if (!b) return APR_ERR(APR_E_INVALID_ARG, L"null bus");
+    if (!b->running || b->paused) return apr_ok();
+    b->paused = 1;
+    return apr_ok();
+}
+
+AprErr apr_bus_resume(AprBus *b, uint64_t delta_ticks)
+{
+    size_t i;
+
+    if (!b) return APR_ERR(APR_E_INVALID_ARG, L"null bus");
+    if (!b->running || !b->paused) return apr_ok();
+
+    /* THE ORIGIN FIRST, THE READERS SECOND, and the order is load-bearing:
+     * each reader re-derives where it belongs from this clock on its next
+     * pull, so re-basing before the shift would place every source against the
+     * origin the pause is being removed from. */
+    apr_clock_shift_anchor(&b->clock, delta_ticks);
+    for (i = 0; i < b->edge_count; i++) {
+        apr_source_reader_rebase(b->edges[i].rd);
+    }
+
+    b->paused = 0;
     return apr_ok();
 }
 
@@ -596,6 +632,13 @@ AprErr apr_bus_tick(AprBus *b, uint64_t now_ticks)
 
     if (!b) return APR_ERR(APR_E_INVALID_ARG, L"null bus");
     if (!b->running) return APR_ERR(APR_E_STATE, L"bus %u is not running", b->id);
+
+    /* PAUSED IS A SUCCESSFUL NO-OP, not a failure: the caller is ticking a bus
+     * that is deliberately producing nothing, which is a state and not a
+     * mistake. Rendering here would be the bug -- the clock has not been
+     * shifted yet, so every frame due since the pause would be produced at
+     * once the moment somebody ticked. */
+    if (b->paused) return apr_ok();
 
     /* Frames due at (now - lookbehind), from an ABSOLUTE timestamp. Ticks are
      * never counted: a late or early tick changes the block size and nothing
@@ -640,5 +683,6 @@ AprErr apr_bus_stop(AprBus *b)
         }
     }
     b->running = 0;
+    b->paused  = 0;
     return first;
 }

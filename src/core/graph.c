@@ -24,6 +24,12 @@ struct AprGraph {
     AprBusId next_bus_id;
 
     int running;
+
+    /* Pause state, owned here because ONE shift for every bus is the property
+     * this layer exists to guarantee (graph.h). */
+    int      paused;
+    uint64_t pause_ticks;      /* QPC when the current pause began */
+    uint64_t paused_ticks;     /* completed paused time this run */
 };
 
 /* ---------------------------------------------------------------------------
@@ -402,7 +408,10 @@ AprErr apr_graph_run(AprGraph *g, uint64_t start_ticks)
 
     /* One anchor for every bus. */
     for (i = 0; i < g->bus_count; i++) apr_bus_start(g->buses[i], start_ticks);
-    g->running = 1;
+    g->running      = 1;
+    g->paused       = 0;
+    g->pause_ticks  = 0;
+    g->paused_ticks = 0;
     return apr_ok();
 }
 
@@ -434,6 +443,59 @@ AprErr apr_graph_tick(AprGraph *g, uint64_t now_ticks)
     return first;
 }
 
+/* ---------------------------------------------------------------------------
+ * Pause. The reasoning is in graph.h and bus.h; what is here is the bookkeeping
+ * that keeps ONE instant and ONE shift true for every bus.
+ * ------------------------------------------------------------------------- */
+
+AprErr apr_graph_pause(AprGraph *g, uint64_t now_ticks)
+{
+    size_t i;
+
+    if (!g) return APR_ERR(APR_E_INVALID_ARG, L"null graph");
+    if (!g->running) return APR_ERR(APR_E_STATE, L"graph is not running");
+    if (g->paused) return apr_ok();
+
+    for (i = 0; i < g->bus_count; i++) (void)apr_bus_pause(g->buses[i]);
+    g->pause_ticks = now_ticks;
+    g->paused      = 1;
+    return apr_ok();
+}
+
+AprErr apr_graph_resume(AprGraph *g, uint64_t now_ticks)
+{
+    uint64_t delta;
+    size_t   i;
+
+    if (!g) return APR_ERR(APR_E_INVALID_ARG, L"null graph");
+    if (!g->running) return APR_ERR(APR_E_STATE, L"graph is not running");
+    if (!g->paused) return apr_ok();
+
+    /* A timestamp before the pause excises nothing. It cannot arise from QPC,
+     * which is monotonic, but a caller stepping a synthetic clock can produce
+     * one and a negative shift would move every origin BACKWARDS -- rendering
+     * the same frames twice into an already open file. */
+    delta = now_ticks > g->pause_ticks ? now_ticks - g->pause_ticks : 0;
+
+    /* ONE delta, applied to every bus, before any of them ticks again. */
+    for (i = 0; i < g->bus_count; i++) (void)apr_bus_resume(g->buses[i], delta);
+
+    g->paused_ticks += delta;
+    g->paused        = 0;
+    g->pause_ticks   = 0;
+    return apr_ok();
+}
+
+int apr_graph_paused(const AprGraph *g) { return g ? g->paused : 0; }
+
+uint64_t apr_graph_paused_ticks(const AprGraph *g, uint64_t now_ticks)
+{
+    if (!g) return 0;
+    if (!g->paused) return g->paused_ticks;
+    return g->paused_ticks +
+           (now_ticks > g->pause_ticks ? now_ticks - g->pause_ticks : 0);
+}
+
 AprErr apr_graph_stop(AprGraph *g)
 {
     AprErr first = apr_ok();
@@ -450,6 +512,8 @@ AprErr apr_graph_stop(AprGraph *g)
     }
     for (i = 0; i < g->source_count; i++) apr_source_stop(g->sources[i]);
 
-    g->running = 0;
+    g->running     = 0;
+    g->paused      = 0;
+    g->pause_ticks = 0;
     return first;
 }

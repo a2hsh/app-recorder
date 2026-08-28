@@ -158,6 +158,47 @@ AprErr apr_graph_start(AprGraph *g, uint64_t start_ticks);
 /* Ticks every bus. */
 AprErr apr_graph_tick(AprGraph *g, uint64_t now_ticks);
 
+/* ---------------------------------------------------------------------------
+ * PAUSE -- ONE ORIGIN FOR ALL OF THEM, EXACTLY LIKE apr_graph_run
+ *
+ * bus.h holds the timeline reasoning. What this layer adds is the thing only
+ * this layer can guarantee: every bus is paused at ONE timestamp and given ONE
+ * shift, so the files still line up WITH EACH OTHER afterwards. Inter-bus
+ * alignment is the property a pause can destroy silently and permanently;
+ * mapping to wall clock is not, and is given up on purpose.
+ *
+ * WHAT THE SOURCES DO: exactly what they were doing. Captures keep pumping,
+ * rings keep indexing real time, and the reconnect worker keeps watching --
+ * so a source that dies while paused is detached, padded and searched for as
+ * usual, and one that rejoins while paused lands at its true absolute ring
+ * index and is simply there when the recording resumes. Neither case needs a
+ * line of pause-specific code, and that is the point of leaving the source
+ * side on wall clock.
+ *
+ * THE SHAPE IS STILL FROZEN. apr_graph_running() stays nonzero while paused --
+ * the encoders are open, the captures are live and the worker is running -- so
+ * every editing call still refuses with APR_E_BUSY. A pause is a quiet part of
+ * a recording, not a gap in one.
+ * ------------------------------------------------------------------------- */
+
+/* Stop producing output, at `now_ticks`. Nothing is finalized and no file is
+ * closed. Ticks while paused are successful no-ops. Idempotent; APR_E_STATE if
+ * the graph is not running. */
+AprErr apr_graph_pause(AprGraph *g, uint64_t now_ticks);
+
+/* Resume at `now_ticks`, excising [pause, now] from every bus's timeline.
+ * Idempotent; APR_E_STATE if the graph is not running. A `now_ticks` earlier
+ * than the pause excises nothing rather than travelling backwards. */
+AprErr apr_graph_resume(AprGraph *g, uint64_t now_ticks);
+
+int apr_graph_paused(const AprGraph *g);
+
+/* Total QPC ticks this run has spent paused, the current pause included while
+ * one is in progress. It is what turns wall time into RECORDED time, which is
+ * the only elapsed figure worth showing: a clock that counted the pause would
+ * be describing a file that does not exist (runner.h). */
+uint64_t apr_graph_paused_ticks(const AprGraph *g, uint64_t now_ticks);
+
 /* Stops every bus (finalizing every action), then every source. Idempotent. */
 AprErr apr_graph_stop(AprGraph *g);
 

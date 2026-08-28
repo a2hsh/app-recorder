@@ -78,6 +78,16 @@
 typedef enum AprTrayState {
     APR_TRAY_IDLE = 0,
     APR_TRAY_RECORDING,
+
+    /* THE TOOLTIP HAS TO BE ABLE TO SAY THIS. Windows+B then arrows is how the
+     * author checks a session from inside another application, and an icon
+     * that goes on reading "recording" through a pause answers the one
+     * question this tooltip exists for, wrongly -- which the header above says
+     * is worse than saying nothing. The elapsed time it carries is RECORDED
+     * time (runner.h), so the readout is "paused, 12:04 recorded" and not the
+     * length of the afternoon. */
+    APR_TRAY_PAUSED,
+
     APR_TRAY_FINISHING
 } AprTrayState;
 
@@ -133,5 +143,12 @@ HMENU apr_tray_build_menu(const AprTray *t);
 /* What the menu offers depends on whether a recording is running; the frame
  * tells the tray rather than the tray reaching into a controller. */
 void apr_tray_set_can_record(AprTray *t, int can_start, int can_stop);
+
+/* The same, for the pause pair. A separate call rather than two more arguments
+ * to the one above: every existing caller of that means what it says, and a
+ * front end that does not offer pause yet should not have to pass two zeros to
+ * keep compiling. Both items are always PRESENT and greyed when they do not
+ * apply -- an item that vanishes says nothing to a screen reader (ui_app.h). */
+void apr_tray_set_can_pause(AprTray *t, int can_pause, int can_resume);
 
 #endif /* APPRECORDER_UI_TRAY_H */

@@ -222,6 +222,67 @@ AprErr apr_bus_start(AprBus *b, uint64_t start_ticks);
  * catches up in full if called late. */
 AprErr apr_bus_tick(AprBus *b, uint64_t now_ticks);
 
+/* ---------------------------------------------------------------------------
+ * PAUSE -- THE OUTPUT POSITION STOPS MAPPING TO WALL CLOCK
+ *
+ *   Everything above this line derives a position from an absolute QPC
+ *   timestamp against one anchor, and that identity between elapsed time and
+ *   output position is what buys sub-frame alignment over three hours. A pause
+ *   breaks it deliberately, and how it is broken is the whole design:
+ *
+ *   PAUSED TIME IS EXCISED, NOT FILLED. That is the difference between pause
+ *   and mute, and it is why this cannot borrow the gap-fill path: the gap-fill
+ *   path exists to keep output position equal to elapsed time, which is exactly
+ *   what a pause must stop doing. Writing silence for the paused span would
+ *   produce a file as long as the wall clock, which is a mute.
+ *
+ *   THE ORIGIN MOVES. apr_bus_resume shifts this bus's anchor LATER by the
+ *   paused duration (clock.h), so the very next tick is due at the frame the
+ *   last tick before the pause reached. frames_out is continuous, no block is
+ *   rendered twice, and nothing accumulates -- the arithmetic is the same
+ *   absolute-position arithmetic as before, measured from a new origin.
+ *
+ *   EVERY BUS TAKES THE SAME SHIFT, AT ONE INSTANT. apr_graph_pause and
+ *   apr_graph_resume are what callers use, for the same reason apr_graph_run
+ *   anchors every bus at one timestamp: alignment BETWEEN buses is the property
+ *   that matters, and it is the only one a pause can quietly destroy. Two buses
+ *   given different shifts are two files that no longer line up, silently, for
+ *   the rest of the session.
+ *
+ *   THE SOURCES ARE NOT TOLD, and that is not an omission. A source's ring is
+ *   an index of real time; its capture keeps running, its 250 ms ring laps
+ *   several times over, and its clock, its drift figure and the reconnect
+ *   worker's padding all stay correct BECAUSE they were never asked to model
+ *   the pause. Only each reader is re-based onto the new origin
+ *   (apr_source_reader_rebase), which is also where the paused audio is
+ *   discarded rather than reported as loss -- see source.h for why that
+ *   decision can only live there.
+ *
+ *   THE ENCODERS STAY OPEN. A pause is not a stop: no action is finalized, no
+ *   file is closed, and the take is one file. apr_bus_stop is still the only
+ *   thing that ends an action's life (see the lifetime note above), so pausing
+ *   and resuming cannot produce a second file and cannot lose one.
+ *
+ *   WHAT IT COSTS: the mixer runs APR_BUS_LOOKBEHIND_MS behind wall clock, so
+ *   the cut is that far before the keystroke and the resume that far before the
+ *   one after it. The excised span is EXACTLY the paused duration either way --
+ *   nothing is duplicated and nothing is dropped -- it simply begins and ends
+ *   50 ms earlier than the fingers did. The one place that is visible is a stop
+ *   made WHILE paused, which ends the file 50 ms before the pause keystroke,
+ *   because that audio was never rendered and is long gone from the ring.
+ * ------------------------------------------------------------------------- */
+
+/* Stop rendering. Ticks become no-ops; nothing is finalized and no file is
+ * closed. Idempotent, and a no-op on a bus that is not running. */
+AprErr apr_bus_pause(AprBus *b);
+
+/* Resume, moving this bus's origin later by `delta_ticks` -- the wall time that
+ * elapsed while it was paused. Every reader is re-based onto the new origin.
+ * Idempotent, and a no-op on a bus that is not paused. */
+AprErr apr_bus_resume(AprBus *b, uint64_t delta_ticks);
+
+int apr_bus_paused(const AprBus *b);
+
 /* Finalizes every action, including failed ones, THEN DESTROYS IT: the
  * encoder's life ends with the recording it was made for. Idempotent, and the
  * failed flags survive it so a caller can still ask what went wrong. */
