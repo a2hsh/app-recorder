@@ -37,12 +37,12 @@
  * ---------------------------------------------------------------------------
  * VERSION DETECTION
  *
- *   GetVersionExW lies (it reports 6.2 for an unmanifested process) and
- *   VerifyVersionInfo needs a manifest to tell the truth about 10+. RtlGetNtVersionNumbers
- *   is undocumented but has been stable since Windows 2000 and reports the
- *   real build regardless of manifest -- which is what we need, because the
- *   whole point is to decide whether the ORDINALS are the ones we expect, and
- *   that is a property of the running OS, not of our compatibility manifest.
+ *   Asked of platform/winver.c, which owns it for the whole product -- the
+ *   console front end needs the same number for its own floor. Why it is not
+ *   GetVersionExW, and why the answer must be the OS's rather than our
+ *   compatibility manifest's, is documented there. What matters here is only
+ *   that the number is the running OS's, because the question this file asks
+ *   is whether the uxtheme ORDINALS are the ones we expect.
  */
 #include "ui_darkmode.h"
 
@@ -50,6 +50,7 @@
 #include <uxtheme.h>
 
 #include "log.h"
+#include "winver.h"
 
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "uxtheme.lib")
@@ -67,7 +68,6 @@
 #endif
 #define APR_DWMWA_USE_IMMERSIVE_DARK_MODE_OLD 19
 
-typedef void (WINAPI *PFN_RtlGetNtVersionNumbers)(DWORD *, DWORD *, DWORD *);
 typedef void (WINAPI *PFN_RefreshImmersiveColorPolicyState)(void);
 typedef BOOL (WINAPI *PFN_ShouldAppsUseDarkMode)(void);
 typedef BOOL (WINAPI *PFN_AllowDarkModeForWindow)(HWND, BOOL);
@@ -88,20 +88,19 @@ typedef struct DarkApi {
 
 static DarkApi g_dark;
 
+/* The build number now has one owner, platform/winver.c, because the console
+ * front end needs the same answer for its own floor and two copies of "what
+ * Windows is this" is exactly the duplication AGENTS.md rule 3 forbids. The
+ * reasoning that used to live here -- why not GetVersionExW, why not
+ * VerifyVersionInfo -- moved there with it.
+ *
+ * The major-version test that used to be here is gone rather than lost: it
+ * asked "is this Windows 10 or later" and returned 0 otherwise, but the only
+ * caller immediately compares against APR_DARK_MIN_BUILD (17763), which no
+ * pre-10 build can reach. */
 static DWORD dark_os_build(void)
 {
-    HMODULE ntdll;
-    PFN_RtlGetNtVersionNumbers fn;
-    DWORD major = 0, minor = 0, build = 0;
-
-    ntdll = GetModuleHandleW(L"ntdll.dll");
-    if (!ntdll) return 0;
-    fn = (PFN_RtlGetNtVersionNumbers)(void *)GetProcAddress(ntdll, "RtlGetNtVersionNumbers");
-    if (!fn) return 0;
-    fn(&major, &minor, &build);
-    (void)minor;
-    if (major < 10) return 0;
-    return build & 0x0FFFFFFFu;   /* the top nibble is a flag, not version */
+    return (DWORD)apr_win_build();
 }
 
 void apr_darkmode_init(void)

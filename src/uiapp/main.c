@@ -31,6 +31,7 @@
 #include "strings.h"
 #include "ui_app.h"
 #include "ui_controller.h"
+#include "winver.h"
 
 int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show)
 {
@@ -71,6 +72,39 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show)
     }
 
     (void)apr_str_init();
+
+    /* THE FLOOR, CHECKED BEFORE ANYTHING IS BUILT.
+     *
+     * Below Windows 10 2004 there is no process-loopback API, so there is no
+     * product -- every source would fail to open and the user would be left
+     * with a window that cannot do the one thing it is for. Refusing here is
+     * kinder than degrading.
+     *
+     * MessageBoxW rather than our own dialog layer, deliberately: this runs
+     * before the frame, the theme or the string-backed dialog builder exist,
+     * and it must work when they cannot. It is also a system dialog, so a
+     * screen reader announces it without anything from us.
+     *
+     * After apr_str_init() so the sentence comes from the catalog, and the
+     * sentence names BOTH numbers -- "your Windows is too old" leaves a person
+     * nowhere to go. */
+    if (!apr_win_meets_floor()) {
+        wchar_t text[512], need[32], have[32];
+        const wchar_t *args[2];
+
+        apr_str_number((int64_t)APR_WIN_MIN_BUILD, need, 32);
+        apr_str_number((int64_t)apr_win_build(),   have, 32);
+        args[0] = need;
+        args[1] = have;
+        apr_str_format(APR_S_ERR_WINDOWS_TOO_OLD, text, 512, args, 2);
+
+        APR_ERROR(L"refusing to start: build %u is below the floor of %u",
+                  (unsigned)apr_win_build(), (unsigned)APR_WIN_MIN_BUILD);
+        MessageBoxW(NULL, text, apr_str(APR_S_APP_NAME),
+                    MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+        if (SUCCEEDED(hr)) CoUninitialize();
+        return 1;
+    }
 
     e = apr_ui_app_create(inst, &app);
     if (apr_failed(&e)) {
