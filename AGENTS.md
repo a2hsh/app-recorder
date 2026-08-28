@@ -163,3 +163,32 @@ divergent implementations, which is the DRY failure above.
 
 Do not commit. Leave changes in the working tree and report what you did,
 including what failed and what you are unsure of.
+
+---
+
+## 8. Nothing enters `vendor/` without a stated reason and a measured cost
+
+The binary ceiling was 1 MB until 2026-08-28 and is now **10 MB**, to make room
+for bus effects and VST hosting.
+
+That number was never about disk space. It was a **proxy for dependency
+discipline**, and it did real work: fdk-aac refused, the MP3 decoder excluded
+from the shipping image, Opus pinned at 1.5.2 rather than the DNN-laden 1.6,
+libogg taken with no generated config. A 10 MB ceiling cannot force those
+questions, so the rule is now explicit instead:
+
+- **State why.** What does it do that we cannot, and what were the alternatives?
+- **Measure the cost.** Bytes added to the shipping image, not the tarball size.
+  `vendor/opus/PROVENANCE.md` is the model: it records 220.5 KB, and it records
+  an experiment that *failed to discriminate* rather than claiming a number it
+  could not support.
+- **Verify the source across channels that do not share a distribution path.**
+  Two is the floor; the existing entries use upstream plus Debian plus one more.
+- **Record the licence and any obligation it creates**, at the point where
+  someone would trip over it. LAME's LGPL §6 relinking requirement is in design
+  §8.1 for exactly this reason.
+- **Take the smallest thing that works.** Excluding `dnn/`, `silk/fixed/` and
+  the SIMD trees from Opus was a decision with a written rationale, not an
+  oversight.
+
+The ceiling is a backstop. This rule is the actual constraint.

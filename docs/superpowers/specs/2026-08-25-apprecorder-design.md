@@ -20,7 +20,20 @@ such limit.
 - Capture any running app's audio **per-process**, plus any hardware capture endpoint.
 - Arbitrary bus count. A source may feed several buses at once.
 - Encode to WAV, MP3, OGG/Opus. (AAC/M4A was built and then removed — see 8.0.)
-- Small and cheap: target under 1 MB binary, single-digit MB resident, negligible idle CPU.
+- Small and cheap: **10 MB binary ceiling**, single-digit MB resident, negligible
+  idle CPU.
+
+  **Raised from 1 MB on 2026-08-28**, to make room for bus effects and VST
+  hosting. Worth recording what the old number was actually doing, because it
+  was never about disk space: it was a **proxy for dependency discipline**, and
+  it did real work. It is why fdk-aac was refused, why the MP3 decoder is
+  excluded from the shipping image, why Opus is pinned at 1.5.2 rather than the
+  DNN-laden 1.6, and why libogg needed no generated config at all.
+
+  A 10 MB ceiling cannot do that job — it just means "vendor whatever". So the
+  proxy is replaced by the rule it stood for, in AGENTS.md: **nothing enters
+  `vendor/` without a stated reason and a measured cost, recorded in its
+  `PROVENANCE.md`.**
 - **Accessible and good-looking at the same time**, neither one a fallback.
 
 ### Non-goals
