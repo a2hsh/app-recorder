@@ -9,8 +9,10 @@ An Audio Hijack-style **recorder** for Windows: capture audio from chosen apps
 buses, written out to files. Built to give the user more capture buses than his
 GoXLR provides in hardware.
 
-**Status:** design approved. **Wave 1 (Foundation) complete** — see the
-2026-08-25 (wave 1) entry at the bottom. Next: wave 2, the capture spike.
+**Status:** preparing the first public release, **version 0.0.1**. The newest
+entry is always at the BOTTOM of this file; read that one first. Both front ends
+ship in one `apprecorder.exe`, and the build carries its own updater — see the
+2026-08-30 entry, and `include/update.h` before touching any of it.
 
 ---
 
@@ -6038,3 +6040,212 @@ Arabic side.
   instead — `GetConsoleMode` needs a readable `CONOUT$` — because reading a live
   console's screen buffer needs a second console, and a console window flashing
   on this author's screen is not an acceptable test artefact.
+
+---
+
+## 2026-08-30 — Version 0.0.1, and auto-update from public GitHub releases
+
+The author is releasing publicly as **0.0.1** — an initial release, to friends.
+Two jobs, and the second one is mostly about what it refuses to do.
+
+### The version now has one owner
+
+`include/version.h`. Three integers, and `APR_VERSION_STRING` built from them by
+the preprocessor so the text cannot disagree with the numbers:
+
+    #define APR_VERSION_MAJOR 0
+    #define APR_VERSION_MINOR 0
+    #define APR_VERSION_PATCH 1
+
+It was `#define APR_CLI_VERSION L"0.1.0"` in `src/cli/cli.c` and nowhere else,
+which was fine while the only reader was `apprecorder version`. It stopped being
+fine the moment an updater existed: the updater compares this number against one
+a server published and decides whether to replace the running image on the
+strength of it, so a second copy that drifts is a build that offers to overwrite
+itself with itself. `cli.c`, the About box and the updater now all read the one
+header. **`src/session/session_save.c` deliberately does not** — it writes
+`"writer": "apprecorder"`, a product name, not a version; the format's own
+`version`/`minReader` pair is a different number and stays where it is.
+
+**Comparison is numeric, never lexicographic.** `wcscmp(L"0.10.0", L"0.9.0") < 0`,
+so a string compare says the tenth release of a line is older than the ninth and
+it never installs — silently, months later, on machines nobody is watching.
+`apr_version_compare()` compares major, then minor, then patch, as integers, and
+`ten_is_newer_than_nine_which_a_string_compare_denies` is the case that fails if
+anybody ever "simplifies" it. An unparsable version is **not newer** and not
+older: it is not an answer, so a corrupt manifest becomes a refusal rather than
+a cheerful "you are up to date".
+
+### The updater
+
+New: `include/update.h` (the whole design and threat model), `src/platform/update.c`
+(decisions, cryptography, file moves), `src/platform/update_http.c` (WinHTTP, the
+only place in the program that opens a socket), `src/platform/update_key.c` (the
+public key, alone in a file so a reviewer can read the entire root of trust in
+ten seconds).
+
+**GitHub replaces infrastructure, not trust.** If the account is ever
+compromised, someone can publish a release and every install downloads it. So
+the host is untrusted and only the author's key is trusted:
+
+- **ECDSA P-256 via BCrypt** — in-box, so nothing enters `vendor/` for it
+  (rule 8 stays clean, and there is no third-party crypto to track for
+  advisories in an audio recorder).
+- The signature covers `release.json` **as fetched** — not a re-serialization,
+  not a normalized form. Verify first, parse second, over the same bytes.
+- The manifest carries the exe's SHA-256, so **one signature protects both**: a
+  swapped binary fails the hash, a rewritten manifest fails the signature.
+- **No fallback, ever.** A refusal is loud and logged; the staged file is
+  deleted.
+
+**Not the GitHub API** — 60 requests/hour per IP, shared across a NAT, so the
+failure mode is "updates stopped working for everyone in the building,
+intermittently". The stable `/releases/latest/download/` redirect is not the API
+and is not rate-limited that way. Redirects followed; certificate validation
+never relaxed, and there is no flag in `update_http.c` that could.
+
+**Cadence:** startup, every five minutes, and after a recording stops — all
+three through one gate, `apr_update_due()`, against a timestamp **stored in the
+registry**. Start/stop cycling while setting levels cannot become ten requests,
+and a crash-restart loop cannot either. Only an explicit "check now" bypasses
+the interval; nothing bypasses the opt-out. `If-None-Match` with the stored ETag
+makes the unchanged case a 304 with no body.
+
+**The ETag is remembered only after a good signature.** Storing it on a failed
+one would mean the next check gets a 304 and reports "up to date" for ever
+after — one forged release permanently silencing the refusal. The last-check
+*time*, by contrast, advances whenever the host answered at all, which is what
+stops a half-uploaded release being re-fetched in a loop.
+
+**Replacement, with no second process.** Windows permits renaming a running
+image. Download beside the exe, verify, and on exit rename current to `.old`,
+new to `apprecorder.exe`. The `.old` is kept until the new build has started
+once: `apr_update_startup_action()` is that rule as a pure function, driven from
+`src/app/main.c` before either front end is chosen. A build that does not start
+is one rename from recovery.
+
+**The four rules, and where each lives:**
+
+1. *Never during a recording.* `apply_update()` refuses and **says so** — the
+   take is not stopped, not paused, not interrupted. The swap itself only ever
+   runs in `apr_controller_destroy`, after the close path has finalized every
+   file, so the rule is satisfied by construction and not by a check that could
+   be forgotten.
+2. *Never discard the previous version until the new one starts.* Above.
+3. *Opt-out, persisted.* `HKCU\Software\apprecorder\Update`. Registry rather
+   than a file of our own: four scalars, per-user, and a second JSON writer
+   beside `session_save.c` would be the rule 3 failure that file warns about.
+   `apprecorder update --disable` reaches it from a headless machine, and
+   **switches off without making one last callback on its way out**.
+4. *Announced and keyboard-reachable.* Every outcome goes through the same
+   `say_and_notify` pair every recording event does, so it reaches a screen
+   reader on the status bar in front and as a tray balloon behind. Help >
+   "Check for &Updates", mnemonic, no accelerator (like Exit and About).
+
+**Do not silently self-install.** It asks. For an initial release going to
+friends, a binary that swaps itself unasked is worse than a prompt.
+
+**Quiet failures and loud ones are different sentences.** `UPDATE_FAILED` is
+"the download did not work"; `UPDATE_REFUSED` is "this was not signed by the
+person who publishes apprecorder". One means the wifi is bad and one means
+somebody is trying something, and a single "update failed" for both throws away
+the only one that matters. They are separate catalog entries and
+`tests/test_ui_update.c` asserts they cannot collapse into each other.
+
+**A build with no key does not look.** `update_key.c` is still all zeros until
+the author runs `keygen`, and `apr_update_have_key()` being 0 disables the check
+entirely — not "checks and refuses everything", which would announce a refusal
+every five minutes and teach a blind user to ignore the one sentence that
+matters.
+
+### The release side
+
+`tools/release/apprelease.py` — a `uv` inline-metadata script, one dependency
+(`cryptography`).
+
+    uv run tools/release/apprelease.py keygen
+    uv run tools/release/apprelease.py sign --exe build/Release/apprecorder.exe --version 0.0.2 --notes "What changed."
+    uv run tools/release/apprelease.py verify --dir dist
+
+`keygen` writes the private key to `%USERPROFILE%\.apprecorder\release-key.pem`
+(**outside the repository**, refuses to overwrite) and prints the public half
+already formatted as the C array to paste over the zeros in
+`src/platform/update_key.c`. `sign` hashes the exe, writes `release.json` and
+signs **exactly the bytes it wrote**. Signature format is raw `r||s`, 64 bytes,
+**not DER** — BCrypt speaks that natively, so there is no ASN.1 decoder in the
+updater and no place for one to have a length bug.
+
+**Still to do before the first release:** the owner/repo in
+`APR_UPDATE_BASE_URL` (`include/update.h`) is a guess — this clone has no git
+remote. Set it, run `keygen`, paste the key, rebuild.
+
+### Tests
+
+Three new suites, **41 of 41 green** in both configurations, and **ten
+consecutive Release runs clean** (66 s each; Debug 108 s).
+
+- `tests/test_version.c` (9 cases) — the string-compare trap, the `v` prefix, and
+  "unparsable is not newer".
+- `tests/test_update.c` (31 cases) — the two the file exists for are
+  **`a_tampered_manifest_is_refused`** (every byte position of a genuinely
+  signed manifest flipped, one at a time) and **`a_tampered_binary_is_refused`**
+  (a payload that is not the one the signed manifest describes). Plus: a
+  manifest signed with another key, a truncated signature, a signed-but-
+  malformed document, an asset name containing a path separator, the cadence
+  table, the persisted settings, the ETag rules, offline, the swap, and the
+  recovery window.
+- `tests/test_ui_update.c` (10 cases) — rule 4. Announced in front, balloon
+  behind, quiet when nobody asked and there is no news, always answering when
+  somebody did, nothing installed without being asked, and **nothing installed
+  during a recording**.
+- `tests/test_cli.c` gains six cases for `update` and pins `apprecorder version`
+  against `APR_VERSION_STRING`.
+
+**A golden vector is checked in.**
+`what_the_release_tool_signs_is_what_this_build_accepts` holds a `release.json`,
+its 64-byte signature and the matching public key, all produced by
+`apprelease.py` against a throwaway key that was then destroyed. It pins the
+Python side and the C side together — raw `r||s`, the exact byte layout of the
+JSON, the hex spelling of the hash — in every run, with no private key needed.
+The full round trip (keygen, sign, then verify in C) was also run by hand and
+passed before that vector was extracted.
+
+**Red runs watched, each reverted:**
+
+- `BCryptVerifySignature`'s result ignored → 3 failures, including both
+  tamper cases.
+- The payload hash compared against itself → 3 failures, including
+  `a_tampered_binary_is_refused`.
+- `apr_version_compare` reduced to a string compare → `test_version` fails on
+  `ten_is_newer_than_nine`.
+- The recording guard removed from `apply_update` → `test_ui_update` fails on
+  `an_update_is_refused_out_loud_while_a_recording_is_running`.
+
+A latent flake was found by the second red run and fixed: two cases in
+`test_update.c` could land in the same `%TEMP%` directory because the name used
+`GetTickCount()`. It is an `InterlockedIncrement` counter now.
+
+**Safety (AGENTS.md rule 1):** nothing was rendered to any audio device. The one
+UI case that records uses `--fake` and a WAV in `%TEMP%`, deleted on teardown.
+**No test contacts the network** — every request goes through the
+`AprUpdateHttp` seam and `update_http.c` is never called from a suite. No test
+touches the author's real update settings; `apr_update_state_test_redirect()`
+points the module at a per-process key, and `apr_update_state_test_erase()`
+refuses outright unless a redirect is in force. No test can rename the running
+executable: the controller carries an image override for exactly that reason. No
+Arabic was written — the 30 new catalog entries have English text and an
+explicit "not translated yet" on the Arabic side.
+
+**Size:** Release image 1,028,096 bytes (~1004 KB), up from ~990 KB. Nothing
+entered `vendor/`; `bcrypt` and `winhttp` are in-box and are the whole reason.
+
+### Left undone, deliberately
+
+- **No progress reporting during the download.** A megabyte on a normal line is
+  a second or two and the window stays responsive; a progress bar would be a
+  second announcement channel for something nobody is waiting on.
+- **No rollback command.** The `.old` file is beside the exe and recovery is one
+  rename. A command to do it would have to run *from* the build that will not
+  start, which is the one thing it cannot rely on.
+- **`docs/` does not describe `update` yet.** The docs were being written in
+  parallel by another agent while this landed; `apprecorder help` is correct.

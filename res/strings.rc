@@ -694,7 +694,7 @@
 #define APR_EN_UI_DLG_KEYS_COL_OP          "Operation"
 #define APR_EN_UI_DLG_KEYS_COL_KEY         "Key"
 #define APR_EN_UI_DLG_ABOUT_TITLE          "About apprecorder"
-#define APR_EN_UI_DLG_ABOUT_BODY           "%1!s! -- %2!s!"
+#define APR_EN_UI_DLG_ABOUT_BODY           "%1!s! %3!s! -- %2!s!"
 #define APR_EN_UI_DLG_NAME_NEEDED          "Give it a name first."
 #define APR_EN_UI_DLG_PATH_NEEDED          "Choose where to save the recording first."
 #define APR_EN_UI_DLG_PICK_NEEDED          "Choose something from the list first."
@@ -854,6 +854,58 @@
 #define APR_EN_ERR_REASON_NOT_ON_BUS          "That source is not on that bus."
 #define APR_EN_ERR_REASON_NAME_NEEDED         "The output has no file name to write to."
 
+/* ---------------------------------------------------------------------------
+ * STAYING UP TO DATE
+ *
+ * Read include/update.h before changing any of these. Two of them carry the
+ * whole point of the feature:
+ *
+ *   UPDATE_REFUSED is not an error message, it is a SECURITY message. It must
+ *   never be softened into "the update failed" and it must never be merged
+ *   with UPDATE_FAILED, which is the ordinary "the download did not work".
+ *   A user who hears the wrong one of those two will make the wrong decision.
+ *
+ *   UPDATE_PROMPT_BODY says what will happen and when, because this program
+ *   asks before replacing itself rather than doing it quietly. The sentence
+ *   about keeping the old version is not reassurance -- it is true, it is what
+ *   update.h section 5 implements, and it is the reason someone can say yes.
+ * ------------------------------------------------------------------------- */
+
+#define APR_EN_UPDATE_MENU_CHECK          "Check for &Updates"
+#define APR_EN_UPDATE_CHECKING            "Checking whether a newer apprecorder has been published."
+#define APR_EN_UPDATE_UP_TO_DATE          "apprecorder %1!s! is the newest version."
+#define APR_EN_UPDATE_AVAILABLE           "apprecorder %1!s! is available. This is %2!s!."
+#define APR_EN_UPDATE_PROMPT_TITLE        "A newer apprecorder is available"
+#define APR_EN_UPDATE_PROMPT_BODY         "apprecorder %1!s! is available and this is %2!s!. %3!s! Nothing is replaced now: the new version is downloaded, checked, and put in place the next time apprecorder starts. The version you have is kept until the new one has started once."
+#define APR_EN_UPDATE_PROMPT_INSTALL      "Download it"
+#define APR_EN_UPDATE_PROMPT_LATER        "Not now"
+#define APR_EN_UPDATE_DOWNLOADING         "Downloading apprecorder %1!s!."
+#define APR_EN_UPDATE_READY               "apprecorder %1!s! has been downloaded and checked. It will replace this version the next time apprecorder starts."
+/* THE SECURITY SENTENCE. See the note above. */
+#define APR_EN_UPDATE_REFUSED             "A download claiming to be a newer apprecorder was refused: %1!s! Nothing has been installed and the copy you are running is untouched."
+#define APR_EN_UPDATE_FAILED              "The newer version could not be downloaded: %1!s! Nothing has been installed."
+#define APR_EN_UPDATE_OFF                 "apprecorder will not check for newer versions."
+#define APR_EN_UPDATE_ON                  "apprecorder will check for newer versions."
+/* Rule 1 in update.h: refused, and told why, rather than stopping the take. */
+#define APR_EN_UPDATE_BUSY_RECORDING      "apprecorder will not replace itself while a recording is running. Stop the recording first; the newer version is kept and will be installed then."
+#define APR_EN_UPDATE_TRAY_AVAILABLE      "apprecorder %1!s! is available. Open apprecorder to install it."
+#define APR_EN_UPDATE_TRAY_READY          "apprecorder %1!s! is ready and will be installed the next time apprecorder starts."
+#define APR_EN_UPDATE_TRAY_REFUSED        "A download claiming to be a newer apprecorder was refused because it is not signed by the person who publishes apprecorder. Nothing has been installed."
+
+#define APR_EN_CLI_CMD_UPDATE             "update                 Check whether a newer apprecorder has been published."
+#define APR_EN_CLI_OPT_UPDATE_INSTALL     "--install              With update, download the newer version and put it in place the next time apprecorder starts."
+#define APR_EN_CLI_OPT_UPDATE_ON          "--enable               With update, check for newer versions from now on. Changes the setting and checks nothing."
+#define APR_EN_CLI_OPT_UPDATE_OFF         "--disable              With update, stop checking for newer versions. Changes the setting and checks nothing."
+#define APR_EN_UPDATE_LINE_CURRENT        "apprecorder %1!s! is what is installed."
+
+/* The `why` half of the two sentences above. Complete clauses, so a
+ * translator can move them inside the frame (AGENTS.md rule 6). */
+#define APR_EN_ERR_UPDATE_SIGNATURE       "it is not signed by the person who publishes apprecorder."
+#define APR_EN_ERR_UPDATE_PAYLOAD         "the file that arrived is not the file the signed release describes."
+#define APR_EN_ERR_UPDATE_MANIFEST        "the release description could not be read."
+#define APR_EN_ERR_UPDATE_SWAP            "the newer version could not be put in place."
+#define APR_EN_ERR_UPDATE_BOTH_WAYS       "%1!s! and %2!s! cannot both be given. apprecorder remembers this setting, so it would be remembering the wrong one."
+
 #define APR_EN_ENTRY(name, id)      id      APR_EN_##name
 #define APR_EN_PENTRY(name, base)                                              \
     base+0  APR_EN_##name##_ZERO                                               \
@@ -939,6 +991,11 @@ END
 STRINGTABLE
 BEGIN
     APR_STR_LIST_ERR_REASON(APR_EN_ENTRY)
+END
+
+STRINGTABLE
+BEGIN
+    APR_STR_LIST_UPDATE(APR_EN_ENTRY)
 END
 
 STRINGTABLE
@@ -1537,6 +1594,38 @@ END
 #define APR_AR_ERR_REASON_ALREADY_ON_BUS(id)  /* not translated yet */
 #define APR_AR_ERR_REASON_NOT_ON_BUS(id)      /* not translated yet */
 #define APR_AR_ERR_REASON_NAME_NEEDED(id)     /* not translated yet */
+
+/* The updater. Untranslated like everything else outside APP_NAME and
+ * N_SOURCES -- see the note at the top of this section. These fall back to
+ * English at runtime and are counted by tests/test_strings.c. */
+#define APR_AR_UPDATE_MENU_CHECK(id)          /* not translated yet */
+#define APR_AR_UPDATE_CHECKING(id)            /* not translated yet */
+#define APR_AR_UPDATE_UP_TO_DATE(id)          /* not translated yet */
+#define APR_AR_UPDATE_AVAILABLE(id)           /* not translated yet */
+#define APR_AR_UPDATE_PROMPT_TITLE(id)        /* not translated yet */
+#define APR_AR_UPDATE_PROMPT_BODY(id)         /* not translated yet */
+#define APR_AR_UPDATE_PROMPT_INSTALL(id)      /* not translated yet */
+#define APR_AR_UPDATE_PROMPT_LATER(id)        /* not translated yet */
+#define APR_AR_UPDATE_DOWNLOADING(id)         /* not translated yet */
+#define APR_AR_UPDATE_READY(id)               /* not translated yet */
+#define APR_AR_UPDATE_REFUSED(id)             /* not translated yet */
+#define APR_AR_UPDATE_FAILED(id)              /* not translated yet */
+#define APR_AR_UPDATE_OFF(id)                 /* not translated yet */
+#define APR_AR_UPDATE_ON(id)                  /* not translated yet */
+#define APR_AR_UPDATE_BUSY_RECORDING(id)      /* not translated yet */
+#define APR_AR_UPDATE_TRAY_AVAILABLE(id)      /* not translated yet */
+#define APR_AR_UPDATE_TRAY_READY(id)          /* not translated yet */
+#define APR_AR_UPDATE_TRAY_REFUSED(id)        /* not translated yet */
+#define APR_AR_CLI_CMD_UPDATE(id)             /* not translated yet */
+#define APR_AR_CLI_OPT_UPDATE_INSTALL(id)     /* not translated yet */
+#define APR_AR_CLI_OPT_UPDATE_ON(id)          /* not translated yet */
+#define APR_AR_CLI_OPT_UPDATE_OFF(id)         /* not translated yet */
+#define APR_AR_UPDATE_LINE_CURRENT(id)        /* not translated yet */
+#define APR_AR_ERR_UPDATE_SIGNATURE(id)       /* not translated yet */
+#define APR_AR_ERR_UPDATE_PAYLOAD(id)         /* not translated yet */
+#define APR_AR_ERR_UPDATE_MANIFEST(id)        /* not translated yet */
+#define APR_AR_ERR_UPDATE_SWAP(id)            /* not translated yet */
+#define APR_AR_ERR_UPDATE_BOTH_WAYS(id)       /* not translated yet */
 
 
 #define APR_AR_ENTRY(name, id)      APR_AR_##name(id)

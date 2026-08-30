@@ -39,6 +39,8 @@
  */
 #include "ui_dialogs.h"
 
+#include "version.h"
+
 #include <commctrl.h>
 #include <commdlg.h>
 #include <stdlib.h>
@@ -1859,10 +1861,16 @@ void apr_dlg_keyboard_help(HWND owner)
 void apr_dlg_about(HWND owner)
 {
     wchar_t body[DLG_TEXT_CCH];
-    const wchar_t *args[2];
+    const wchar_t *args[3];
 
+    /* THE VERSION IS HERE BECAUSE OF THE UPDATER. "Which build am I running"
+     * used to be answerable only from a command line, which is the wrong place
+     * to ask it once the program can replace itself: after a swap the first
+     * thing anybody wants is confirmation that the new one is what started.
+     * It comes from include/version.h, like every other reader of it. */
     args[0] = apr_str(APR_S_APP_NAME);
     args[1] = apr_str(APR_S_APP_TAGLINE);
-    apr_str_format(APR_S_UI_DLG_ABOUT_BODY, body, DLG_TEXT_CCH, args, 2);
+    args[2] = APR_VERSION_STRING;
+    apr_str_format(APR_S_UI_DLG_ABOUT_BODY, body, DLG_TEXT_CCH, args, 3);
     apr_dlg_say(owner, APR_S_UI_DLG_ABOUT_TITLE, body);
 }

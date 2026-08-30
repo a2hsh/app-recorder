@@ -22,6 +22,8 @@
 
 #include "cli/cli.h"
 #include "strings.h"
+#include "update.h"
+#include "version.h"
 
 /* The ogg action's own disk-failure seam. Reached from here because "every
  * output failed to open" is a property of the RUN, and the run is what this
@@ -715,6 +717,110 @@ TEST(version_answers)
     Cap c;
     ASSERT_EQ_INT(APR_CLI_OK, RUN(&c, L"version"));
     ASSERT_TRUE(has(c.out, L"apprecorder"));
+    /* THE ONE OWNER (include/version.h). The updater compares this number
+     * against one a server published, so a second copy that drifted would be
+     * a build offering to overwrite itself with itself. */
+    ASSERT_TRUE(has(c.out, APR_VERSION_STRING));
+}
+
+/* ===========================================================================
+ * update -- the scriptable half of the feature the window offers as a prompt
+ *
+ * NOTHING HERE OPENS A SOCKET. The only case that reaches apr_cli_run is
+ * `update --disable`, which writes the setting and returns before any check
+ * (see do_update): a command that switches the network callback off must not
+ * make one on its way out. Everything else stops at the parser.
+ *
+ * And the setting it writes is redirected to a per-process key first, so the
+ * author's own preference is never touched.
+ * ========================================================================= */
+
+TEST(update_is_a_command_and_carries_its_own_options)
+{
+    Cap c; static AprCliPlan p;
+
+    ASSERT_EQ_INT(APR_CLI_OK, PARSE(&c, &p, L"update"));
+    ASSERT_EQ_INT(APR_CLI_CMD_UPDATE, (int)p.cmd);
+    ASSERT_EQ_INT(0, p.update_install);
+
+    ASSERT_EQ_INT(APR_CLI_OK, PARSE(&c, &p, L"update", L"--install"));
+    ASSERT_EQ_INT(1, p.update_install);
+
+    ASSERT_EQ_INT(APR_CLI_OK, PARSE(&c, &p, L"update", L"--disable"));
+    ASSERT_EQ_INT(1, p.update_disable);
+    ASSERT_EQ_INT(0, p.update_enable);
+
+    ASSERT_EQ_INT(APR_CLI_OK, PARSE(&c, &p, L"update", L"--enable"));
+    ASSERT_EQ_INT(1, p.update_enable);
+}
+
+TEST(the_front_end_sends_update_to_the_command_line)
+{
+    AprCliCommand cmd = APR_CLI_CMD_RECORD;
+    /* frontend.c asks cli.c whether argv[1] is a command, so there is ONE list
+     * of command names in this program. A new command that is not in it opens
+     * an empty window instead of running. */
+    ASSERT_TRUE(apr_cli_command_from_name(L"update", &cmd));
+    ASSERT_EQ_INT(APR_CLI_CMD_UPDATE, (int)cmd);
+}
+
+TEST(enable_and_disable_together_are_refused_rather_than_ranked)
+{
+    Cap c; static AprCliPlan p;
+
+    /* The setting PERSISTS, so whichever way round a precedence rule went,
+     * half the people typing this would get the opposite of what they meant
+     * and it would stick. */
+    ASSERT_EQ_INT(APR_CLI_USAGE,
+                  PARSE(&c, &p, L"update", L"--enable", L"--disable"));
+    ASSERT_TRUE(said(&c, L"--enable"));
+    ASSERT_TRUE(said(&c, L"--disable"));
+}
+
+TEST(update_options_are_named_back_when_given_to_another_command)
+{
+    Cap c; static AprCliPlan p;
+
+    /* `apprecorder record --install` used to be the shape of thing that
+     * silently did nothing. */
+    ASSERT_EQ_INT(APR_CLI_USAGE, PARSE(&c, &p, L"record", L"--install"));
+    ASSERT_TRUE(said(&c, L"--install"));
+    ASSERT_EQ_INT(APR_CLI_USAGE, PARSE(&c, &p, L"list-apps", L"--disable"));
+}
+
+TEST(a_recording_option_is_not_an_update_option)
+{
+    Cap c; static AprCliPlan p;
+    ASSERT_EQ_INT(APR_CLI_USAGE, PARSE(&c, &p, L"update", L"--pid", L"1234"));
+}
+
+TEST(disabling_the_check_persists_it_and_makes_no_request)
+{
+    Cap c;
+    wchar_t key[128];
+    AprUpdateState st;
+
+    _snwprintf_s(key, 128, _TRUNCATE,
+                 L"Software\\apprecorder-test-cli-%lu\\Update",
+                 (unsigned long)GetCurrentProcessId());
+    apr_update_state_test_redirect(key);
+    (void)apr_update_state_test_erase();
+
+    ASSERT_EQ_INT(APR_CLI_OK, RUN(&c, L"update", L"--disable"));
+    apr_update_state_load(&st);
+    ASSERT_EQ_INT(0, st.enabled);
+    /* AND NOTHING WENT OUT ON ITS WAY OUT. A check made while switching the
+     * check off is the exact callback the user just refused; do_update returns
+     * before it. The evidence is the timestamp: a check that ran would have
+     * advanced it. */
+    ASSERT_EQ_INT(0, (int)st.last_check_unix);
+
+    ASSERT_EQ_INT(APR_CLI_OK, RUN(&c, L"update", L"--enable"));
+    apr_update_state_load(&st);
+    ASSERT_EQ_INT(1, st.enabled);
+
+    (void)apr_update_state_test_erase();
+    apr_update_state_test_redirect(NULL);
 }
 
 /* ===========================================================================

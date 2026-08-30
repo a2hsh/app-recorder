@@ -48,6 +48,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <time.h>
 #include <wchar.h>
 #include <wctype.h>
 
@@ -63,8 +64,16 @@
 #include "runner.h"
 #include "session.h"
 #include "strings.h"
+#include "update.h"
+#include "version.h"
 
-#define APR_CLI_VERSION L"0.1.0"
+/* THE VERSION LIVES IN include/version.h AND NOWHERE ELSE.
+ *
+ * It used to be a literal right here, which was fine while the only
+ * reader was `apprecorder version`. The updater compares this number
+ * against one a server published and decides whether to replace the
+ * running image on the strength of it, so a second copy that drifted
+ * would be a build that offers to overwrite itself with itself. */
 
 /* Longest single line the CLI composes. Catalog entries are whole sentences
  * and paths are up to MAX_PATH, so this has room for two of each. */
@@ -386,6 +395,7 @@ int apr_cli_command_from_name(const wchar_t *name, AprCliCommand *out)
     else if (eq(name, L"help"))         c = APR_CLI_CMD_HELP;
     else if (eq(name, L"version"))      c = APR_CLI_CMD_VERSION;
     else if (eq(name, L"save-session")) c = APR_CLI_CMD_SAVE_SESSION;
+    else if (eq(name, L"update"))       c = APR_CLI_CMD_UPDATE;
     else return 0;
 
     if (out) *out = c;
@@ -917,6 +927,23 @@ AprCliExit apr_cli_parse(int argc, const wchar_t *const *argv,
             continue;
         }
         if (eq(a, L"--allow-missing")) { plan->allow_missing = 1; continue; }
+
+        /* --- update ------------------------------------------------------- */
+        if (eq(a, L"--install") || eq(a, L"--enable") || eq(a, L"--disable")) {
+            /* Named back rather than ignored. `apprecorder record --install`
+             * used to be the shape of thing that silently did nothing. */
+            if (plan->cmd != APR_CLI_CMD_UPDATE) {
+                const wchar_t *args[2];
+                args[0] = a;
+                args[1] = argv[1] ? argv[1] : L"";
+                return fail(&cx, APR_CLI_USAGE, APR_S_ERR_OPTION_NOT_FOR_COMMAND,
+                            args, 2);
+            }
+            if (eq(a, L"--install")) plan->update_install = 1;
+            if (eq(a, L"--enable"))  plan->update_enable  = 1;
+            if (eq(a, L"--disable")) plan->update_disable = 1;
+            continue;
+        }
         if (eq(a, L"--help") || eq(a, L"-h") || eq(a, L"-?")) {
             plan->cmd = APR_CLI_CMD_HELP;
             continue;
@@ -1099,6 +1126,16 @@ AprCliExit apr_cli_parse(int argc, const wchar_t *const *argv,
     }
     if (plan->cmd == APR_CLI_CMD_SAVE_SESSION && !plan->session_file[0])
         return fail(&cx, APR_CLI_USAGE, APR_S_ERR_SESSION_NEEDED, NULL, 0);
+
+    /* --enable AND --disable. Refused rather than given a precedence rule,
+     * because whichever way round it went, half the people typing it would
+     * get the opposite of what they meant and the setting PERSISTS. */
+    if (plan->update_enable && plan->update_disable) {
+        const wchar_t *args[2];
+        args[0] = L"--enable";
+        args[1] = L"--disable";
+        return fail(&cx, APR_CLI_USAGE, APR_S_ERR_UPDATE_BOTH_WAYS, args, 2);
+    }
 
     return APR_CLI_OK;
 }
@@ -1623,7 +1660,8 @@ static void print_usage(const Ctx *cx)
         (AprStrId)0,
         APR_S_CLI_COMMANDS_HEADER,
         APR_S_CLI_CMD_RECORD, APR_S_CLI_CMD_LIST_APPS, APR_S_CLI_CMD_LIST_DEVICES,
-        APR_S_CLI_CMD_SAVE_SESSION, APR_S_CLI_CMD_HELP, APR_S_CLI_CMD_VERSION,
+        APR_S_CLI_CMD_SAVE_SESSION, APR_S_CLI_CMD_UPDATE,
+        APR_S_CLI_CMD_HELP, APR_S_CLI_CMD_VERSION,
         (AprStrId)0,
         APR_S_CLI_SOURCES_HEADER,
         APR_S_CLI_OPT_BUS, APR_S_CLI_OPT_PID, APR_S_CLI_OPT_EXE,
@@ -1643,6 +1681,8 @@ static void print_usage(const Ctx *cx)
         APR_S_CLI_OPT_LOG_FILE,
         APR_S_CLI_OPT_SESSION, APR_S_CLI_OPT_ALLOW_SYSTEM_CAPTURE,
         APR_S_CLI_OPT_ALLOW_MISSING,
+        APR_S_CLI_OPT_UPDATE_INSTALL, APR_S_CLI_OPT_UPDATE_ON,
+        APR_S_CLI_OPT_UPDATE_OFF,
         (AprStrId)0,
         APR_S_CLI_EXIT_HEADER,
         APR_S_CLI_EXIT_OK, APR_S_CLI_EXIT_USAGE, APR_S_CLI_EXIT_CONFIG,
@@ -1665,17 +1705,129 @@ static void print_usage(const Ctx *cx)
 static AprCliExit do_version(const Ctx *cx)
 {
     const wchar_t *args[1];
-    args[0] = APR_CLI_VERSION;
+    args[0] = APR_VERSION_STRING;
 
     if (cx->json) {
         jline(cx, 0, L"{");
         jstr(cx, 1, L"name", apr_str(APR_S_APP_NAME), 1);
-        jstr(cx, 1, L"version", APR_CLI_VERSION, 0);
+        jstr(cx, 1, L"version", APR_VERSION_STRING, 0);
         jline(cx, 0, L"}");
     } else {
         say(cx, APR_CLI_STDOUT, APR_S_CLI_VERSION_LINE, args, 1);
     }
     return APR_CLI_OK;
+}
+
+/* ---------------------------------------------------------------------------
+ * update
+ *
+ * The scriptable half of the feature the window offers as a prompt. It shares
+ * every rule with it, because they share the module: opt-out honoured, nothing
+ * trusted without a signature, nothing installed without --install.
+ *
+ * WHY A FAILED CHECK IS EXIT 0. `apprecorder update` on a laptop with no
+ * network answers "nothing to report" and succeeds, because a check that could
+ * not run is not an error (update.h section 7) and a scheduled task that mailed
+ * its owner every time the wifi was down would be turned off within a week. A
+ * REFUSED SIGNATURE is different and exits APR_CLI_CONFIG, so a script can
+ * branch on the one outcome that means something is wrong.
+ * ------------------------------------------------------------------------- */
+
+static AprCliExit do_update(const Ctx *cx, const AprCliPlan *plan)
+{
+    AprUpdateState  st;
+    AprUpdateResult res;
+    wchar_t         image[APR_CLI_SPEC_CCH];
+    wchar_t         why[512];
+    const wchar_t  *args[3];
+    AprErr          e;
+
+    /* THE OPT-OUT IS HANDLED FIRST AND ON ITS OWN. `update --disable` must
+     * work with no network, and must not perform one last check on its way
+     * out -- that would be the exact callback the user just refused. */
+    if (plan->update_disable || plan->update_enable) {
+        apr_update_state_load(&st);
+        st.enabled = plan->update_enable ? 1 : 0;
+        e = apr_update_state_save(&st);
+        if (apr_failed(&e)) {
+            args[0] = errtext(&e, why, 512);
+            return fail(cx, APR_CLI_INTERNAL, APR_S_UPDATE_FAILED, args, 1);
+        }
+        SAY0(cx, APR_CLI_STDOUT, st.enabled ? APR_S_UPDATE_ON : APR_S_UPDATE_OFF);
+        /* BOTH TOGGLES RETURN HERE. Changing the setting is not checking, and
+         * the symmetry is what makes it true: `--disable` must obviously not
+         * make one last callback on its way out, and `--enable` making one
+         * would mean the two commands differ in whether they touch the
+         * network, which is not something anybody would remember. Somebody
+         * who wants both can ask for both. */
+        return APR_CLI_OK;
+    }
+
+    /* WHY_USER: somebody typed this, so the five-minute interval does not
+     * apply. The opt-out still does -- see apr_update_due. */
+    memset(&res, 0, sizeof res);
+    e = apr_update_check(NULL, (int64_t)time(NULL), APR_UPDATE_WHY_USER, &res);
+    if (apr_failed(&e)) {
+        args[0] = errtext(&e, why, 512);
+        return fail(cx, APR_CLI_INTERNAL, APR_S_UPDATE_FAILED, args, 1);
+    }
+
+    args[0] = APR_VERSION_STRING;
+
+    switch (res.outcome) {
+    case APR_UPDATE_DISABLED:
+        SAY0(cx, APR_CLI_STDOUT, APR_S_UPDATE_OFF);
+        return APR_CLI_OK;
+
+    case APR_UPDATE_REFUSED:
+        /* LOUD, and on stderr, and with an exit code of its own. */
+        args[0] = errtext(&res.err, why, 512);
+        return fail(cx, APR_CLI_CONFIG, APR_S_UPDATE_REFUSED, args, 1);
+
+    case APR_UPDATE_AVAILABLE:
+        args[0] = res.manifest.version;
+        args[1] = APR_VERSION_STRING;
+        say(cx, APR_CLI_STDOUT, APR_S_UPDATE_AVAILABLE, args, 2);
+        if (res.manifest.notes[0]) emit(cx, APR_CLI_STDOUT, res.manifest.notes);
+        if (!plan->update_install) return APR_CLI_OK;
+
+        if (!apr_update_image_path(image, APR_CLI_SPEC_CCH)) {
+            return fail(cx, APR_CLI_INTERNAL, APR_S_UPDATE_FAILED, NULL, 0);
+        }
+        args[0] = res.manifest.version;
+        say(cx, APR_CLI_STDOUT, APR_S_UPDATE_DOWNLOADING, args, 1);
+
+        e = apr_update_stage(NULL, image, &res.manifest);
+        if (apr_failed(&e)) {
+            /* A hash that does not match the SIGNED manifest is the security
+             * sentence, not the network one, and they are told apart by the
+             * reason the raise site named. */
+            args[0] = errtext(&e, why, 512);
+            if (apr_err_reason_id(&e) == APR_S_ERR_UPDATE_PAYLOAD)
+                return fail(cx, APR_CLI_CONFIG, APR_S_UPDATE_REFUSED, args, 1);
+            return fail(cx, APR_CLI_OUTPUT, APR_S_UPDATE_FAILED, args, 1);
+        }
+
+        e = apr_update_swap(image, res.manifest.version);
+        if (apr_failed(&e)) {
+            args[0] = errtext(&e, why, 512);
+            return fail(cx, APR_CLI_OUTPUT, APR_S_UPDATE_FAILED, args, 1);
+        }
+        args[0] = res.manifest.version;
+        say(cx, APR_CLI_STDOUT, APR_S_UPDATE_READY, args, 1);
+        return APR_CLI_OK;
+
+    case APR_UPDATE_UP_TO_DATE:
+        say(cx, APR_CLI_STDOUT, APR_S_UPDATE_UP_TO_DATE, args, 1);
+        return APR_CLI_OK;
+
+    case APR_UPDATE_NONE:
+    default:
+        /* Offline, blocked, half-uploaded, or no key compiled in. Report what
+         * IS known -- which version is installed -- and succeed. */
+        say(cx, APR_CLI_STDOUT, APR_S_UPDATE_LINE_CURRENT, args, 1);
+        return APR_CLI_OK;
+    }
 }
 
 /* ---------------------------------------------------------------------------
@@ -3030,6 +3182,9 @@ AprCliExit apr_cli_run(int argc, const wchar_t *const *argv, const AprCliIo *io)
         break;
     case APR_CLI_CMD_LIST_DEVICES:
         rc = do_list_devices(&cx);
+        break;
+    case APR_CLI_CMD_UPDATE:
+        rc = do_update(&cx, &plan);
         break;
     case APR_CLI_CMD_SAVE_SESSION:
         rc = apr_cli_resolve(&plan, io);

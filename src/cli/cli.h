@@ -85,7 +85,15 @@ typedef enum AprCliCommand {
      * same positional grammar as `record` and the same --session flag; which
      * direction the file is read or written is the command's job to say, not
      * a second flag's. */
-    APR_CLI_CMD_SAVE_SESSION
+    APR_CLI_CMD_SAVE_SESSION,
+    /* Ask whether a newer apprecorder has been published, and -- only when
+     * --install is given -- fetch it. NEVER SILENT AND NEVER AUTOMATIC from
+     * here: this command is the scriptable half of the same feature the window
+     * offers as a prompt, and both ask before replacing anything
+     * (include/update.h). It also owns the opt-out, because a setting that
+     * can only be reached from a GUI is a setting a headless machine cannot
+     * turn off. */
+    APR_CLI_CMD_UPDATE
 } AprCliCommand;
 
 typedef enum AprCliSourceKind {
@@ -196,6 +204,18 @@ typedef struct AprCliPlan {
     int explicit_rate;
     int explicit_channels;
     int explicit_duration;
+
+    /* ---- update (include/update.h) ------------------------------------- */
+
+    /* Fetch and put in place, rather than only reporting. Explicit for the
+     * reason update.h gives at length: a binary that replaces itself unasked
+     * is worse than one that asks, and a script that wants the other
+     * behaviour can say so in one word. */
+    int update_install;
+    /* The opt-out, both ways, persisted. Giving both is a usage error rather
+     * than a precedence rule nobody would remember. */
+    int update_enable;
+    int update_disable;
 
     AprLogLevel log_level;
     wchar_t     log_file[APR_CLI_SPEC_CCH];

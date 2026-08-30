@@ -829,6 +829,54 @@
     X(ERR_REASON_NOT_ON_BUS,        1876)                                 \
     X(ERR_REASON_NAME_NEEDED,       1877)
 
+/* ---- staying up to date.
+ *
+ * A GROUP OF ITS OWN, at 1900, because the updater is a new area of the
+ * product rather than a few more lines of an existing one -- which is what
+ * the note at the top of this section says a new area should do instead of
+ * growing a group towards rc.exe's limit.
+ *
+ * Two things about the wording are deliberate and should survive translation:
+ *
+ *   THE REFUSAL AND THE FAILURE ARE DIFFERENT SENTENCES. UPDATE_FAILED is
+ *   "the download did not work"; UPDATE_REFUSED is "what arrived was not
+ *   signed by the person who publishes apprecorder". One of those means the
+ *   wifi is bad and one means somebody is trying something, and a single
+ *   "update failed" for both throws away the only sentence that matters.
+ *
+ *   NOTHING HERE IS DECORATIVE. The author is blind and every one of these is
+ *   read out; each is a complete sentence that makes sense heard once, out of
+ *   context, possibly from a background window (update.h rule 4). ---- */
+#define APR_STR_LIST_UPDATE(X)                                                \
+    X(UPDATE_MENU_CHECK,            1900)                                     \
+    X(UPDATE_CHECKING,              1901)                                     \
+    X(UPDATE_UP_TO_DATE,            1902)                                     \
+    X(UPDATE_AVAILABLE,             1903)                                     \
+    X(UPDATE_PROMPT_TITLE,          1904)                                     \
+    X(UPDATE_PROMPT_BODY,           1905)                                     \
+    X(UPDATE_PROMPT_INSTALL,        1906)                                     \
+    X(UPDATE_PROMPT_LATER,          1907)                                     \
+    X(UPDATE_DOWNLOADING,           1908)                                     \
+    X(UPDATE_READY,                 1909)                                     \
+    X(UPDATE_REFUSED,               1910)                                     \
+    X(UPDATE_FAILED,                1911)                                     \
+    X(UPDATE_OFF,                   1912)                                     \
+    X(UPDATE_ON,                    1913)                                     \
+    X(UPDATE_BUSY_RECORDING,        1914)                                     \
+    X(UPDATE_TRAY_AVAILABLE,        1915)                                     \
+    X(UPDATE_TRAY_READY,            1916)                                     \
+    X(UPDATE_TRAY_REFUSED,          1917)                                     \
+    X(CLI_CMD_UPDATE,               1918)                                     \
+    X(CLI_OPT_UPDATE_INSTALL,       1919)                                     \
+    X(CLI_OPT_UPDATE_ON,            1920)                                     \
+    X(CLI_OPT_UPDATE_OFF,           1921)                                     \
+    X(UPDATE_LINE_CURRENT,          1922)                                     \
+    X(ERR_UPDATE_SIGNATURE,         1930)                                     \
+    X(ERR_UPDATE_PAYLOAD,           1931)                                     \
+    X(ERR_UPDATE_MANIFEST,          1932)                                     \
+    X(ERR_UPDATE_SWAP,              1933)                                     \
+    X(ERR_UPDATE_BOTH_WAYS,         1934)
+
 /* Every plain string, in declaration order. This is what C, the generated
  * enum and tests/test_strings.c walk; the groups above exist only so that
  * res/strings.rc can emit them in rc.exe-sized pieces. */
@@ -846,7 +894,8 @@
     APR_STR_LIST_UI_DLG(X)                                                     \
     APR_STR_LIST_UI_TRAY(X)                                                    \
     APR_STR_LIST_ERR_HR(X)                                                     \
-    APR_STR_LIST_ERR_REASON(X)
+    APR_STR_LIST_ERR_REASON(X)                                                 \
+    APR_STR_LIST_UPDATE(X)
 
 
 /* X(NAME, base) -- a plural string. Referenced in C as APR_S_NAME, which is

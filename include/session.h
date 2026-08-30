@@ -540,7 +540,7 @@ const char *apr_session_kind_wire(AprSessionSrcKind k);
  * THE SCHEMA
  *
  * {
- *   "apprecorder": { "version": 1, "minReader": 1, "writer": "0.1.0" },
+ *   "apprecorder": { "version": 1, "minReader": 1, "writer": "apprecorder" },
  *   "session":     { "sampleRate": 48000, "channels": 2, "durationMs": 0 },
  *   "sources": [
  *     { "key": "s0", "kind": "process", "name": "Teams",

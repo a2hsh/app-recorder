@@ -38,6 +38,7 @@
 #include "frontend.h"
 #include "log.h"
 #include "strings.h"
+#include "update.h"
 #include "ui_app.h"
 #include "ui_controller.h"
 #include "winver.h"
@@ -280,6 +281,19 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show)
     if (choice.front == APR_FRONT_GUI) log_from_environment();
 
     (void)apr_str_init();
+
+    /* THE RECOVERY WINDOW CLOSES HERE.
+     *
+     * If a swap happened at the last exit, this run is the new build proving
+     * it starts -- and only once it has may the previous image be retired
+     * (update.h section 5, rule 2). Before the front-end split rather than
+     * after it, because both halves are the same executable and either one
+     * starting is proof enough; and before any window exists, because it
+     * announces nothing and asks nothing. It touches the network never. */
+    {
+        wchar_t image[1024];
+        if (apr_update_image_path(image, 1024)) apr_update_startup(image);
+    }
 
     if (floor_refused()) {
         if (argv) LocalFree(argv);

@@ -58,14 +58,27 @@
 #include "graph.h"
 #include "ui_app.h"
 #include "ui_tray.h"
+#include "update.h"
 
 /* Posted to the frame by the runner's observer, from the runner's thread.
  * lParam is a heap AprRunNotice the UI thread frees. */
 #define APR_CTL_WM_NOTICE (WM_APP + 0x50)
 
+/* Posted to the frame by the update check, from the check's own thread.
+ * lParam is a heap AprUpdateResult the UI thread frees. Posted for exactly the
+ * reason a run notice is: the check runs on a worker and a SendMessage from
+ * there would deadlock against a UI thread that is itself waiting. */
+#define APR_CTL_WM_UPDATE (WM_APP + 0x53)
+
 /* The one-second clock that keeps the status bar and the tray tooltip honest.
  * It does NOT announce -- see apr_ui_app_set_status_text. */
 #define APR_CTL_TIMER_CLOCK 0x101
+
+/* The five-minute update cadence (update.h section 4). It fires on a timer and
+ * the timer does NOT decide anything: apr_update_due() is asked every time,
+ * against the timestamp stored on disk, so a restart loop cannot turn into a
+ * request storm and a stop-check cannot either. */
+#define APR_CTL_TIMER_UPDATE 0x102
 
 typedef struct AprController AprController;
 
@@ -232,6 +245,52 @@ unsigned apr_controller_balloon_count(const AprController *c);
  * exists either way and is the thing that formats the tooltip; this is what it
  * was last told. */
 AprTrayState apr_controller_tray_state(const AprController *c);
+
+/* ---------------------------------------------------------------------------
+ * Staying up to date -- see include/update.h for the whole design
+ *
+ * The controller owns THE ANNOUNCEMENT and THE ASKING, and nothing else. The
+ * cadence, the signature, the hash and the file moves belong to update.c; what
+ * is here is rule 4 of update.h, which is the one this layer can get wrong:
+ * every outcome a person needs to know about goes out through the same
+ * say/notify pair every recording event does, so it reaches a screen reader on
+ * whichever channel can carry it.
+ * ------------------------------------------------------------------------- */
+
+/* Nonzero once a newer build has been downloaded AND verified and is waiting
+ * beside the executable. It is put in place when this controller is destroyed,
+ * i.e. on exit -- never under a running recording (update.h rule 1). */
+int apr_controller_update_staged(const AprController *c);
+
+/* TEST ONLY. The transport the check and the download use. NULL restores the
+ * real WinHTTP one. AGENTS.md rule 1: no suite in this tree contacts the
+ * network, and this is the seam that makes that possible without the UI layer
+ * knowing anything about it. */
+void apr_controller_test_set_update_http(AprController *c,
+                                         const AprUpdateHttp *http);
+
+/* TEST ONLY. What the "install it?" prompt answers without a human: -1 asks
+ * the real dialog, 0 declines, 1 accepts. Same shape as the foreground
+ * override above and for the same reason -- a modal dialog cannot be answered
+ * from the thread that opened it. */
+void apr_controller_test_set_update_answer(AprController *c, int answer);
+
+/* TEST ONLY. The image the swap would move aside. Empty restores the running
+ * executable. A suite must never be one bug away from renaming its own .exe. */
+void apr_controller_test_set_update_image(AprController *c,
+                                          const wchar_t *path);
+
+/* TEST ONLY. Hand the controller a result exactly as the check thread would,
+ * synchronously, on the calling thread.
+ *
+ * WHY THIS AND NOT "run a real check": what this layer owns is what is SAID
+ * and what is ASKED for each outcome, and driving that through a socket, a
+ * thread and a message queue would be testing three things that already have
+ * their own suites in order to assert one that does not. Every outcome
+ * apr_update_check can produce can be handed straight to the code that
+ * announces it. */
+void apr_controller_test_deliver_update(AprController *c,
+                                        const AprUpdateResult *r);
 
 /* ---------------------------------------------------------------------------
  * Pure

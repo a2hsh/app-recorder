@@ -55,8 +55,11 @@ file(GLOB CORE_SRC
 
 if(CORE_SRC)
   add_library(apprecorder_core STATIC ${CORE_SRC})
+  # bcrypt and winhttp are for the updater (src/platform/update*.c). Both are
+  # in-box Windows libraries, which is the whole reason ECDSA verification and
+  # HTTPS cost nothing in vendor/ -- see AGENTS.md rule 8 and include/update.h.
   target_link_libraries(apprecorder_core PUBLIC
-    ole32 oleaut32 uuid avrt mmdevapi winmm
+    ole32 oleaut32 uuid avrt mmdevapi winmm bcrypt winhttp
   )
 endif()
 

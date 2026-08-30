@@ -502,6 +502,10 @@ static const AprUiBinding k_bindings[] = {
     { APR_CMD_NEXT_PANE,      0,             0,                               APR_S__NONE,                  APR_S_UI_MENU_VIEW_NEXT_PANE },
 
     { APR_CMD_HELP_KEYS,      VK_F1,         0,                               APR_S_UI_KEY_HELP_KEYS,       APR_S_UI_MENU_HELP_KEYS },
+    /* No accelerator, like Exit and About: there is no key worth spending on
+     * an operation that also happens on a timer, and a row with vk 0 still
+     * gets its menu item and still appears in Help as an operation. */
+    { APR_CMD_HELP_UPDATE,    0,             0,                               APR_S__NONE,                  APR_S_UPDATE_MENU_CHECK },
     { APR_CMD_HELP_ABOUT,     0,             0,                               APR_S__NONE,                  APR_S_UI_MENU_HELP_ABOUT }
 };
 
@@ -563,7 +567,8 @@ static HMENU build_menu(void)
         APR_CMD_NEXT_PANE
     };
     static const int help[] = {
-        APR_CMD_HELP_KEYS, APR_CMD_HELP_ABOUT
+        APR_CMD_HELP_KEYS, 0,
+        APR_CMD_HELP_UPDATE, APR_CMD_HELP_ABOUT
     };
 
     bar = CreateMenu();

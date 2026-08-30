@@ -49,6 +49,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <wchar.h>
 
 #include "action.h"
@@ -65,6 +66,8 @@
 #include "ui_node.h"
 #include "ui_tray.h"
 #include "ui_tree_panel.h"
+#include "update.h"
+#include "version.h"
 
 /* "The model changed; re-read it." Marshalled rather than called, so any
  * thread may raise it and the work still happens on the window's own. */
@@ -134,6 +137,17 @@ struct AprController {
      * up is the thing worth asserting. */
     int close_wait_override;
 
+    /* ---- staying up to date (update.h) ------------------------------------
+     *
+     * All five are touched only on the window's own thread. The check itself
+     * runs on a worker and its answer arrives as a posted APR_CTL_WM_UPDATE,
+     * exactly as a run notice does, so there is nothing here to synchronise. */
+    const AprUpdateHttp *update_http;    /* NULL = the real WinHTTP one   */
+    int      update_answer;              /* -1 ask; 0/1 force. Tests only */
+    int      update_staged;              /* verified, waiting for exit    */
+    wchar_t  update_version[APR_UPDATE_VERSION_CCH];
+    wchar_t  update_image[APR_DISC_PATH_CCH];  /* empty = the running exe */
+
     /* SET WHILE NOTHING IS RECORDING (ui_controller.h). Manual reset, created
      * signalled, cleared by start_recording and set again by
      * recording_finished -- which is the only place that knows the files are
@@ -142,6 +156,12 @@ struct AprController {
      * cross. */
     HANDLE idle_event;
 };
+
+/* Forward-declared because the update section sits below the recording one and
+ * the end of a recording is one of its three triggers (update.h section 4).
+ * Moving the section up instead would put the least interesting part of this
+ * file in front of the most. */
+static void start_update_check(AprController *c, AprUpdateWhy why);
 
 /* One session-shaped object at a time; AprSession is a few hundred kilobytes
  * of fixed arrays and does not belong on a 1 MB stack (session.h). */
@@ -379,6 +399,11 @@ static void update_commands(AprController *c)
     apr_ui_app_enable_command(c->app, APR_CMD_RECORD_RESUME, rec && c->paused);
     apr_ui_app_enable_command(c->app, APR_CMD_HELP_KEYS, 1);
     apr_ui_app_enable_command(c->app, APR_CMD_HELP_ABOUT, 1);
+    /* NEVER GREYED, not even while recording. Asking whether a newer build
+     * exists opens no file and touches no graph; it is APPLYING one that rule
+     * 1 forbids, and that refusal is said out loud in apply_update() rather
+     * than expressed as a menu item that has quietly gone away. */
+    apr_ui_app_enable_command(c->app, APR_CMD_HELP_UPDATE, 1);
 
     apr_tray_set_can_record(c->tray, !rec && graph_has_output(c->graph), rec);
     apr_tray_set_can_pause(c->tray, rec && !c->paused, rec && c->paused);
@@ -1311,6 +1336,12 @@ static void recording_finished(AprController *c)
      * earlier would hand it the sentence from before the stop. */
     if (c->idle_event) SetEvent(c->idle_event);
 
+    /* THE THIRD TRIGGER, AND THE ONE THAT NEEDED THE GATE. Start/stop cycling
+     * while setting levels is normal, so "check after every stop" would turn
+     * ten takes into ten requests; apr_update_due() refuses unless five
+     * minutes have passed since the last check actually happened. */
+    start_update_check(c, APR_UPDATE_WHY_RECORDING_STOPPED);
+
     /* A close was waiting on the files. It can proceed now, and only now. */
     if (c->closing) {
         c->allow_close = 1;
@@ -1569,6 +1600,265 @@ static int on_close(AprUiApp *app, AprUiCloseReason why, void *user)
 }
 
 /* ==========================================================================
+ * Staying up to date
+ *
+ * WHAT THIS HALF OWNS, AND WHAT IT DOES NOT.
+ *
+ *   It owns rule 4 of update.h -- announced, and keyboard-reachable -- and
+ *   nothing else. Whether a check is due, whether a signature is genuine,
+ *   whether a payload matches the hash that was signed, and how the file moves
+ *   are all update.c's, and none of it is re-decided here.
+ *
+ *   WHY EVERY OUTCOME GOES THROUGH say_and_notify. This application spends its
+ *   recordings minimised, so the moment an update is found is exactly the
+ *   moment a status-bar live region reaches nobody. Same argument as the
+ *   source-died and output-renamed events, and the same one call, so a future
+ *   sixth outcome cannot quietly pick the wrong channel.
+ *
+ *   AND WHY THE REFUSAL IS ITS OWN SENTENCE. "The update failed" would be true
+ *   of a flat wifi and of a forged release, and only one of those is worth
+ *   interrupting somebody for.
+ * ======================================================================== */
+
+/* The image the swap will move aside. A test may point this somewhere safe --
+ * a suite must never be one bug away from renaming its own executable. */
+static size_t ctl_update_image(const AprController *c, wchar_t *buf, size_t cch)
+{
+    if (c->update_image[0]) {
+        lstrcpynW(buf, c->update_image, (int)cch);
+        return wcslen(buf);
+    }
+    return apr_update_image_path(buf, cch);
+}
+
+/* Runs on the CHECK'S OWN THREAD. Copies and posts; it must not touch a
+ * window, exactly like the runner's observer. */
+static void ctl_update_done(void *user, const AprUpdateResult *r)
+{
+    /* THE WINDOW HANDLE, NOT THE CONTROLLER, AND THAT IS THE POINT.
+     *
+     * The check thread is detached and can outlive this controller: the
+     * startup check is fired from apr_controller_create and a window closed a
+     * second later would free the controller while a socket was still timing
+     * out. Holding an AprController * here would then be a use-after-free on
+     * the very next line. An HWND is a VALUE -- PostMessageW to a window that
+     * has gone simply fails, and the copy is freed. The worst case is a stale
+     * handle that Windows has recycled inside this process, and the worst that
+     * does is deliver a WM_APP message some control ignores, which leaks one
+     * allocation rather than corrupting memory. */
+    HWND             frame = (HWND)user;
+    AprUpdateResult *copy;
+
+    if (!frame || !r || !IsWindow(frame)) return;
+    /* EVERY result is posted, including the dull ones. Deciding what is worth
+     * saying is handle_update's job and it lives on the UI thread, which is
+     * what lets tests/test_ui_update.c drive every outcome through the real
+     * code rather than through a filter that only exists on a worker. */
+    copy = (AprUpdateResult *)malloc(sizeof *copy);
+    if (!copy) return;
+    *copy = *r;
+    if (!PostMessageW(frame, APR_CTL_WM_UPDATE, 0, (LPARAM)copy)) free(copy);
+}
+
+static void start_update_check(AprController *c, AprUpdateWhy why)
+{
+    AprErr e;
+
+    if (!c || !c->frame) return;
+    e = apr_update_check_async(c->update_http, (int64_t)time(NULL), why,
+                               ctl_update_done, (void *)c->frame);
+    /* A check that could not even be started is exactly as uninteresting as
+     * one that could not reach the network (update.h section 7). */
+    if (apr_failed(&e)) APR_LOG_ERR(APR_LOG_INFO, &e);
+}
+
+/* Download it, prove it, and leave it beside the executable. Runs on the
+ * window's thread; the download is bounded by update_http.c's timeouts. */
+static void apply_update(AprController *c, const AprUpdateManifest *m)
+{
+    wchar_t        image[APR_DISC_PATH_CCH];
+    wchar_t        why[512];
+    const wchar_t *args[2];
+    AprErr         e;
+
+    /* RULE 1, AND IT IS SAID OUT LOUD. The recording is not stopped, not
+     * paused, and not interrupted -- the take wins, and the person is told
+     * why nothing happened rather than being left with a menu item that did
+     * nothing. */
+    if (!apr_update_may_apply(c->recording)) {
+        say0(c, APR_S_UPDATE_BUSY_RECORDING);
+        return;
+    }
+
+    if (!ctl_update_image(c, image, APR_DISC_PATH_CCH)) {
+        say0(c, APR_S_UPDATE_FAILED);
+        return;
+    }
+
+    args[0] = m->version;
+    say(c, APR_S_UPDATE_DOWNLOADING, args, 1);
+
+    e = apr_update_stage(c->update_http, image, m);
+    if (apr_failed(&e)) {
+        APR_LOG_ERR(APR_LOG_ERROR, &e);
+        apr_err_reason(&e, why, 512);
+        args[0] = why;
+        /* A payload that does not match the SIGNED hash is the security
+         * sentence, not the network one. They are told apart by the reason
+         * the raise site named, so the two can never be merged by accident. */
+        if (apr_err_reason_id(&e) == APR_S_ERR_UPDATE_PAYLOAD) {
+            say_and_notify(c, APR_S_UPDATE_REFUSED, APR_S_UPDATE_TRAY_REFUSED,
+                           args, 1);
+        } else {
+            say(c, APR_S_UPDATE_FAILED, args, 1);
+        }
+        return;
+    }
+
+    /* Staged and proven. THE SWAP HAPPENS ON EXIT, not now: renaming the
+     * running image is legal but a program that did it mid-session would be
+     * describing itself with a version it is no longer running. */
+    c->update_staged = 1;
+    lstrcpynW(c->update_version, m->version, APR_UPDATE_VERSION_CCH);
+    args[0] = m->version;
+    say_and_notify(c, APR_S_UPDATE_READY, APR_S_UPDATE_TRAY_READY, args, 1);
+}
+
+/* Whether to ask, and what the answer was. -1 means ask a real dialog. */
+static int update_accepted(AprController *c, const AprUpdateManifest *m)
+{
+    wchar_t        body[CTL_TEXT_CCH];
+    const wchar_t *args[3];
+
+    if (c->update_answer >= 0) return c->update_answer;
+
+    args[0] = m->version;
+    args[1] = APR_VERSION_STRING;
+    args[2] = m->notes;
+    apr_str_format(APR_S_UPDATE_PROMPT_BODY, body, CTL_TEXT_CCH, args, 3);
+
+    /* ASKED, NEVER ASSUMED. A binary that swaps itself unasked is worse than
+     * a prompt -- and this prompt is a standard dialog with standard buttons,
+     * which is what makes it announced and answerable from the keyboard with
+     * nothing needed from us (ui_dialogs.h). */
+    return apr_dlg_confirm(c->frame, APR_S_UPDATE_PROMPT_TITLE, body,
+                           APR_S_UPDATE_PROMPT_INSTALL,
+                           APR_S_UPDATE_PROMPT_LATER);
+}
+
+static void handle_update(AprController *c, const AprUpdateResult *r)
+{
+    wchar_t        why[512];
+    const wchar_t *args[2];
+
+    /* A CHECK NOBODY ASKED FOR ONLY SPEAKS WHEN IT HAS NEWS.
+     *
+     * "You are up to date", said out loud every five minutes for as long as
+     * the application is open, would make it unusable inside an hour -- the
+     * same argument the one-second clock's announce=0 rests on. A check the
+     * USER asked for always answers, because a command that appears to do
+     * nothing is indistinguishable from a broken one to somebody working by
+     * ear. So the filter is on WHO ASKED, not on the outcome. */
+    if (r->why != APR_UPDATE_WHY_USER &&
+        r->outcome != APR_UPDATE_AVAILABLE && r->outcome != APR_UPDATE_REFUSED) {
+        return;
+    }
+
+    switch (r->outcome) {
+    case APR_UPDATE_AVAILABLE:
+        args[0] = r->manifest.version;
+        args[1] = APR_VERSION_STRING;
+        say_and_notify(c, APR_S_UPDATE_AVAILABLE, APR_S_UPDATE_TRAY_AVAILABLE,
+                       args, 2);
+        if (update_accepted(c, &r->manifest)) apply_update(c, &r->manifest);
+        break;
+
+    case APR_UPDATE_REFUSED:
+        /* LOUD. Somebody published something this build will not run, or
+         * something on the way here changed it. Either way it is the one
+         * update outcome worth interrupting a person for. */
+        apr_err_reason(&r->err, why, 512);
+        args[0] = why;
+        say_and_notify(c, APR_S_UPDATE_REFUSED, APR_S_UPDATE_TRAY_REFUSED,
+                       args, 1);
+        break;
+
+    case APR_UPDATE_DISABLED:
+        say0(c, APR_S_UPDATE_OFF);
+        break;
+
+    case APR_UPDATE_UP_TO_DATE:
+        args[0] = APR_VERSION_STRING;
+        say(c, APR_S_UPDATE_UP_TO_DATE, args, 1);
+        break;
+
+    case APR_UPDATE_NONE:
+    default:
+        /* Offline, blocked, a release still being uploaded, or no release key
+         * compiled in. A check that could not run is not news -- but if a
+         * person pressed the menu item, saying nothing is worse than saying
+         * the little that is known, so the installed version is reported. */
+        args[0] = APR_VERSION_STRING;
+        say(c, APR_S_UPDATE_LINE_CURRENT, args, 1);
+        break;
+    }
+}
+
+/* The user asked. Bypasses the five-minute interval (but not the opt-out) and
+ * says so first, because a menu item that appears to do nothing for two
+ * seconds is a menu item somebody presses again. */
+static int do_check_update(AprController *c)
+{
+    say0(c, APR_S_UPDATE_CHECKING);
+    start_update_check(c, APR_UPDATE_WHY_USER);
+    return 1;
+}
+
+int apr_controller_update_staged(const AprController *c)
+{
+    return c ? c->update_staged : 0;
+}
+
+void apr_controller_test_set_update_http(AprController *c,
+                                         const AprUpdateHttp *http)
+{
+    if (c) c->update_http = http;
+}
+
+void apr_controller_test_set_update_answer(AprController *c, int answer)
+{
+    if (c) c->update_answer = answer;
+}
+
+void apr_controller_test_set_update_image(AprController *c, const wchar_t *path)
+{
+    if (!c) return;
+    if (path && path[0]) lstrcpynW(c->update_image, path, APR_DISC_PATH_CCH);
+    else                 c->update_image[0] = L'\0';
+}
+
+void apr_controller_test_deliver_update(AprController *c,
+                                        const AprUpdateResult *r)
+{
+    AprUpdateResult *copy;
+
+    if (!c || !r) return;
+    if (!c->frame || !IsWindow(c->frame)) { handle_update(c, r); return; }
+
+    /* THROUGH THE REAL MESSAGE, on the window's own thread. A test calling
+     * handle_update() directly from its own thread would be touching the
+     * status bar and the tray from the wrong one, which is the class of defect
+     * this codebase already fixed once in apr_controller_set_graph. Sent
+     * rather than posted so the announcement has happened by the time this
+     * returns -- no poll, no ceiling. The handler frees the copy, exactly as
+     * it does for one the check thread posted. */
+    copy = (AprUpdateResult *)malloc(sizeof *copy);
+    if (!copy) return;
+    *copy = *r;
+    SendMessageW(c->frame, APR_CTL_WM_UPDATE, 0, (LPARAM)copy);
+}
+
+/* ==========================================================================
  * Commands
  * ======================================================================== */
 
@@ -1645,6 +1935,8 @@ int apr_controller_command(AprController *c, int command_id)
     case APR_CMD_HELP_ABOUT:
         apr_dlg_about(c->frame);
         return 1;
+    case APR_CMD_HELP_UPDATE:
+        return do_check_update(c);
 
     default:
         break;
@@ -1714,12 +2006,25 @@ static LRESULT on_message(AprUiApp *app, UINT msg, WPARAM wp, LPARAM lp,
         *handled = 1;
         return 0;
     }
+    if (msg == APR_CTL_WM_UPDATE) {
+        AprUpdateResult *r = (AprUpdateResult *)lp;
+        if (r) { handle_update(c, r); free(r); }
+        *handled = 1;
+        return 0;
+    }
     if (msg == APR_TRAY_WM_ICON) {
         *handled = apr_tray_on_message(c->tray, wp, lp);
         return 0;
     }
     if (msg == WM_TIMER && wp == APR_CTL_TIMER_CLOCK) {
         tick_clock(c);
+        *handled = 1;
+        return 0;
+    }
+    if (msg == WM_TIMER && wp == APR_CTL_TIMER_UPDATE) {
+        /* The timer does not decide anything -- apr_update_due() is asked
+         * every time, against the timestamp on disk. See update.h section 4. */
+        start_update_check(c, APR_UPDATE_WHY_TIMER);
         *handled = 1;
         return 0;
     }
@@ -1868,6 +2173,7 @@ AprErr apr_controller_create(AprUiApp *app, AprController **out)
 
     c->fg_override = -1;   /* calloc gives 0, which would MEAN something */
     c->close_wait_override = -1;
+    c->update_answer = -1; /* likewise: 0 would mean "always decline" */
 
     /* Manual reset, created SIGNALLED: nothing is recording yet. Not fatal if
      * the handle cannot be made -- it is a test seam, and a controller that
@@ -1890,6 +2196,17 @@ AprErr apr_controller_create(AprUiApp *app, AprController **out)
 
     update_commands(c);
     apr_ui_app_set_status(app, APR_S_UI_STATUS_READY);
+
+    /* STAYING UP TO DATE (update.h). Three triggers, one gate: this one, the
+     * five-minute timer below, and the end of every recording all call
+     * apr_update_due() against the timestamp stored on disk, so a restart loop
+     * cannot become a request storm and neither can start/stop cycling.
+     *
+     * Started here rather than in main() so that everything it can say has a
+     * window to say it in -- an update prompt with no parent is a dialog a
+     * screen reader user meets with no context. */
+    start_update_check(c, APR_UPDATE_WHY_STARTUP);
+    SetTimer(c->frame, APR_CTL_TIMER_UPDATE, APR_UPDATE_INTERVAL_MS, NULL);
 
     *out = c;
     return apr_ok();
@@ -1917,6 +2234,23 @@ void apr_controller_destroy(AprController *c)
         apr_tree_panel_set_selection_sink(c->tree, NULL, NULL);
         apr_tree_panel_set_activate_sink(c->tree, NULL, NULL);
         apr_tree_panel_set_graph(c->tree, NULL);
+    }
+
+    if (c->frame && IsWindow(c->frame)) KillTimer(c->frame, APR_CTL_TIMER_UPDATE);
+
+    /* THE SWAP, ON EXIT, AND ONLY HERE. Every recording has been stopped and
+     * every file closed by the block above, so rule 1 is satisfied by
+     * construction rather than by a check that could be forgotten. Windows
+     * permits renaming a running image, which is why this needs no second
+     * process; the previous build is kept as .old until the new one has
+     * started once (update.h section 5). */
+    if (c->update_staged) {
+        wchar_t image[APR_DISC_PATH_CCH];
+        if (ctl_update_image(c, image, APR_DISC_PATH_CCH)) {
+            AprErr se = apr_update_swap(image, c->update_version);
+            if (apr_failed(&se)) APR_LOG_ERR(APR_LOG_ERROR, &se);
+        }
+        c->update_staged = 0;
     }
 
     apr_tray_destroy(c->tray);

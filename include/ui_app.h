@@ -240,6 +240,14 @@ void apr_ui_set_accessible_role(HWND hwnd, long msaa_role);
 
 #define APR_CMD_HELP_KEYS       0x0501
 #define APR_CMD_HELP_ABOUT      0x0502
+/* Ask now whether a newer apprecorder has been published (include/update.h).
+ *
+ * ON THE MENU BECAUSE IT HAS TO BE. The check is opt-out and it is on a timer,
+ * so most users never touch this -- but a person who has just been told a
+ * build exists, or who has just switched the check back on, needs a way to ask
+ * that does not involve waiting five minutes, and "no mouse-only paths" means
+ * that way has to be a named, mnemonic menu item like every other operation. */
+#define APR_CMD_HELP_UPDATE     0x0503
 
 /* ---------------------------------------------------------------------------
  * THE FRAME'S KEYBOARD MODEL IS DATA, FOR THE SAME REASON THE CANVAS'S IS
