@@ -133,6 +133,14 @@ struct AprController {
      * seconds of stalled disk away otherwise, and what it SAYS when it gives
      * up is the thing worth asserting. */
     int close_wait_override;
+
+    /* SET WHILE NOTHING IS RECORDING (ui_controller.h). Manual reset, created
+     * signalled, cleared by start_recording and set again by
+     * recording_finished -- which is the only place that knows the files are
+     * closed. It exists so that a test waiting for a take to finish waits on
+     * the transition instead of polling a flag against a ceiling that load can
+     * cross. */
+    HANDLE idle_event;
 };
 
 /* One session-shaped object at a time; AprSession is a few hundred kilobytes
@@ -204,6 +212,11 @@ void apr_controller_test_set_foreground(AprController *c, int state)
 void apr_controller_test_set_close_wait_ms(AprController *c, int ms)
 {
     if (c) c->close_wait_override = ms;
+}
+
+HANDLE apr_controller_test_idle_event(const AprController *c)
+{
+    return c ? c->idle_event : NULL;
 }
 
 static DWORD close_wait_ms(const AprController *c)
@@ -1197,6 +1210,10 @@ static int start_recording(AprController *c)
     c->recording = 1;
     c->paused    = 0;
     c->last_elapsed_ms = 0;
+    /* Beside the flag it mirrors, for the same reason the announcement below
+     * is beside it: nothing watching one of the two may see the other
+     * disagree. */
+    if (c->idle_event) ResetEvent(c->idle_event);
 
     /* SAID IMMEDIATELY, and the adjacency is deliberate. Anything watching
      * apr_controller_recording() -- a test, a future scripting surface, the
@@ -1288,6 +1305,11 @@ static void recording_finished(AprController *c)
     say_and_notify(c, incomplete ? APR_S_UI_ANN_RECORD_INCOMPLETE
                                  : APR_S_UI_ANN_RECORD_STOPPED,
                    APR_S_UI_TRAY_INFO_STOPPED, args, 1);
+
+    /* AFTER the sentence, not before it. A waiter woken by this handle goes
+     * straight on to read the last announcement, and waking it one line
+     * earlier would hand it the sentence from before the stop. */
+    if (c->idle_event) SetEvent(c->idle_event);
 
     /* A close was waiting on the files. It can proceed now, and only now. */
     if (c->closing) {
@@ -1846,6 +1868,11 @@ AprErr apr_controller_create(AprUiApp *app, AprController **out)
 
     c->fg_override = -1;   /* calloc gives 0, which would MEAN something */
     c->close_wait_override = -1;
+
+    /* Manual reset, created SIGNALLED: nothing is recording yet. Not fatal if
+     * the handle cannot be made -- it is a test seam, and a controller that
+     * refused to exist because of one would be the worse failure. */
+    c->idle_event = CreateEventW(NULL, TRUE, TRUE, NULL);
     apr_ui_app_set_command_handler(app, on_command, c);
     apr_ui_app_set_close_handler(app, on_close, c);
     apr_ui_app_set_message_handler(app, on_message, c);
@@ -1881,6 +1908,7 @@ void apr_controller_destroy(AprController *c)
     }
     c->recording = 0;
     c->paused    = 0;
+    if (c->idle_event) SetEvent(c->idle_event);
 
     if (c->canvas) apr_canvas_set_announce(c->canvas, NULL, NULL);
     if (c->canvas) apr_canvas_set_edit_sink(c->canvas, NULL, NULL);
@@ -1893,6 +1921,9 @@ void apr_controller_destroy(AprController *c)
 
     apr_tray_destroy(c->tray);
     apr_graph_destroy(c->graph);
+    /* Last: it is set above so that anything still waiting on it is released
+     * before the handle it is waiting on goes away. */
+    if (c->idle_event) CloseHandle(c->idle_event);
     free(c);
 }
 

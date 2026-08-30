@@ -353,13 +353,42 @@ AprErr apr_runner_run(AprRunner *r)
     AprErr   e;
 
     if (!r) return APR_ERR(APR_E_INVALID_ARG, L"apr_runner_run: runner is NULL");
-    if (InterlockedCompareExchange(&r->running, 1, 0) != 0) {
-        return APR_ERR(APR_E_STATE, L"apr_runner_run: already running");
-    }
 
+    /* THE HANDSHAKE IS ARMED BEFORE ANYTHING CAN SEE THAT A RUN HAS BEGUN,
+     * AND THIS ORDERING IS THE SAFETY apr_runner_destroy DOCUMENTS.
+     *
+     * It used to claim `running` first and arm the handshake afterwards:
+     *
+     *     CAS running 0 -> 1
+     *     ResetEvent(loop_left)        <-- a destroy arriving HERE
+     *     in_run = 1                       read in_run == 0, skipped the
+     *                                      wait, and freed the runner
+     *
+     * The gap is a handful of instructions wide and every caller that waits
+     * for apr_runner_running() before destroying walks straight into it --
+     * which is exactly what a test does, and what a front end tearing down a
+     * window does. When it hit, apr_runner_destroy returned in a millisecond
+     * with this function still on another thread's stack, and everything the
+     * loop touched afterwards -- elapsed_ms, the bus frame counts, the
+     * finalize -- was freed memory. tests/test_run_loop.c's m28 case caught it
+     * about one run in ten; the case that ran AFTER it then crashed on the
+     * freed allocation, so the suite reported a failure in a case that had
+     * nothing wrong with it.
+     *
+     * So the events are armed first; then IN_RUN is what claims the run,
+     * because in_run is what destroy tests -- by the time a destroy can see
+     * it, the event it is about to wait on is already reset; and `running`,
+     * which is what everybody else watches, is published last of all.
+     *
+     * Resetting the events BEFORE the claim is a no-op in the case the claim
+     * then refuses: a run that is already in flight reset them itself and has
+     * not set them again, which is precisely what in_run being 1 means. */
     ResetEvent(r->finished_event);
     ResetEvent(r->loop_left);
-    InterlockedExchange(&r->in_run, 1);
+    if (InterlockedCompareExchange(&r->in_run, 1, 0) != 0) {
+        return APR_ERR(APR_E_STATE, L"apr_runner_run: already running");
+    }
+    InterlockedExchange(&r->running, 1);
     /* A pause asked for before the run started is not carried into it: the
      * request is about a recording, and this is a different one. */
     InterlockedExchange(&r->pause_wanted, 0);

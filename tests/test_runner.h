@@ -46,6 +46,7 @@
 #include <stdint.h>
 #include <wchar.h>
 #include <math.h>
+#include <time.h>
 
 /* This header defines helpers that any single test file will only partly use.
  * C4505 (unreferenced static function removed) is expected and not a defect. */
@@ -319,7 +320,18 @@ static void tr_fail_mem(const char *file, int line, const char *expr,
 
 /* ------------------------------------------------------------------------
  * Driver.
+ *
+ * Every case is timed and the figure is printed beside it. A suite that takes
+ * forty seconds says nothing about WHICH case took them, and the reason the UI
+ * suites drifted into minutes unnoticed is that nobody could see the
+ * distribution without instrumenting by hand. clock() is plenty here: the
+ * numbers being read are seconds, not microseconds.
  * ------------------------------------------------------------------------ */
+
+static long tr_millis(void)
+{
+    return (long)((double)clock() * 1000.0 / (double)CLOCKS_PER_SEC);
+}
 
 int main(int argc, char **argv)
 {
@@ -346,22 +358,26 @@ int main(int argc, char **argv)
            g_tr_test_count == 1 ? "" : "s");
 
     for (i = 0; i < g_tr_test_count; i++) {
+        long ms;
+
         if (filter && strstr(g_tr_tests[i].name, filter) == NULL) continue;
         ran++;
         printf("[ RUN      ] %s\n", g_tr_tests[i].name);
         g_tr_case_failed  = 0;
         g_tr_case_asserts = 0;
         fflush(stdout);
+        ms = tr_millis();
         g_tr_tests[i].fn();
+        ms = tr_millis() - ms;
         if (g_tr_case_failed) {
             failed++;
-            printf("[   FAILED ] %s (%ld assertion%s run)\n",
+            printf("[   FAILED ] %s (%ld assertion%s run, %ld ms)\n",
                    g_tr_tests[i].name, g_tr_case_asserts,
-                   g_tr_case_asserts == 1 ? "" : "s");
+                   g_tr_case_asserts == 1 ? "" : "s", ms);
         } else {
-            printf("[       OK ] %s (%ld assertion%s)\n",
+            printf("[       OK ] %s (%ld assertion%s, %ld ms)\n",
                    g_tr_tests[i].name, g_tr_case_asserts,
-                   g_tr_case_asserts == 1 ? "" : "s");
+                   g_tr_case_asserts == 1 ? "" : "s", ms);
         }
         fflush(stdout);
     }

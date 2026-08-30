@@ -40,6 +40,7 @@
  *   carries the balloon and tray-state seams this file reads.
  */
 #include "test_runner.h"
+#include "test_wait.h"
 
 #include <windows.h>
 #include <commctrl.h>
@@ -416,7 +417,7 @@ static int ui_start(UiHost *h)
     if (!h->ready) return 0;
     h->thread = CreateThread(NULL, 0, ui_thread, h, 0, NULL);
     if (!h->thread) return 0;
-    if (WaitForSingleObject(h->ready, 30000) != WAIT_OBJECT_0) return 0;
+    if (WaitForSingleObject(h->ready, APR_TEST_WAIT_MS) != WAIT_OBJECT_0) return 0;
     return !h->failed && h->frame != NULL;
 }
 
@@ -424,7 +425,7 @@ static void ui_stop(UiHost *h)
 {
     if (h->frame && IsWindow(h->frame)) PostMessageW(h->frame, WM_CLOSE, 0, 0);
     if (h->thread) {
-        if (WaitForSingleObject(h->thread, 30000) != WAIT_OBJECT_0) {
+        if (WaitForSingleObject(h->thread, APR_TEST_WAIT_MS) != WAIT_OBJECT_0) {
             printf("      WARNING: UI thread did not exit; terminating\n");
             TerminateThread(h->thread, 1);
         }
@@ -453,17 +454,13 @@ static const wchar_t *said(UiHost *h, wchar_t *buf, size_t cch)
  * the flag is what anything watching learns the state from, and the sentence is
  * stored on the very next line. Waiting for it is what a screen reader does
  * too, so the test waits rather than assuming it can outrun a store. */
-static int wait_said(UiHost *h, AprStrId id, int ms)
+static int wait_said(UiHost *h, AprStrId id)
 {
     wchar_t buf[TXT_CCH];
-    int waited = 0;
+    int ok;
 
-    for (;;) {
-        if (wcscmp(apr_str(id), said(h, buf, TXT_CCH)) == 0) return 1;
-        if (waited >= ms) return 0;
-        Sleep(5);
-        waited += 5;
-    }
+    APR_WAIT_UNTIL(ok, wcscmp(apr_str(id), said(h, buf, TXT_CCH)) == 0);
+    return ok;
 }
 
 /* A SYNCHRONOUS ROUND TRIP TO THE WINDOW'S OWN THREAD. The state flag flips
@@ -477,35 +474,39 @@ static void sync_ui(UiHost *h)
     if (h->frame && IsWindow(h->frame)) SendMessageW(h->frame, WM_NULL, 0, 0);
 }
 
-static int wait_paused(UiHost *h, int want, int ms)
+static int wait_paused(UiHost *h, int want)
 {
-    int waited = 0;
-    while (waited < ms) {
-        if (!!apr_controller_paused(h->ctl) == !!want) { sync_ui(h); return 1; }
-        Sleep(5);
-        waited += 5;
-    }
+    int ok;
+
+    APR_WAIT_UNTIL(ok, !!apr_controller_paused(h->ctl) == !!want);
     sync_ui(h);
-    return !!apr_controller_paused(h->ctl) == !!want;
+    return ok;
 }
 
 /* Start a recording and wait until the controller says one is running. */
 static int start_recording(UiHost *h)
 {
-    int i;
+    int ok;
+
     accel(h, APR_CMD_RECORD_START);
-    for (i = 0; i < 400 && !apr_controller_recording(h->ctl); i++) Sleep(5);
+    APR_WAIT_UNTIL(ok, apr_controller_recording(h->ctl));
     sync_ui(h);
-    return apr_controller_recording(h->ctl);
+    return ok;
 }
 
+/* Waits for the FILES, on the handle the controller sets when they are closed
+ * (ui_controller.h) -- not on a poll of the flag against a ceiling. */
 static void stop_recording(UiHost *h)
 {
-    int waited = 0;
+    HANDLE idle = apr_controller_test_idle_event(h->ctl);
+
     accel(h, APR_CMD_RECORD_STOP);
-    while (apr_controller_recording(h->ctl) && waited < 25000) {
-        Sleep(10);
-        waited += 10;
+    if (idle) {
+        (void)APR_WAIT_SIGNAL(idle);
+    } else {
+        int ok;
+        APR_WAIT_UNTIL(ok, !apr_controller_recording(h->ctl));
+        (void)ok;
     }
     sync_ui(h);
 }
@@ -521,18 +522,18 @@ TEST(pausing_and_resuming_are_both_announced_and_both_change_the_state)
     ASSERT_FALSE(apr_controller_paused(h.ctl));
 
     accel(&h, APR_CMD_RECORD_PAUSE);
-    ASSERT_TRUE(wait_paused(&h, 1, 5000));
+    ASSERT_TRUE(wait_paused(&h, 1));
 
     /* STILL RECORDING. A pause is a quiet part of a take, not the end of one:
      * the files are open and the graph is still frozen. */
     ASSERT_TRUE(apr_controller_recording(h.ctl));
-    ASSERT_TRUE(wait_said(&h, APR_S_UI_ANN_RECORD_PAUSED, 5000));
+    ASSERT_TRUE(wait_said(&h, APR_S_UI_ANN_RECORD_PAUSED));
     ASSERT_WSTR_EQ(apr_str(APR_S_UI_ANN_RECORD_PAUSED), said(&h, buf, TXT_CCH));
 
     accel(&h, APR_CMD_RECORD_RESUME);
-    ASSERT_TRUE(wait_paused(&h, 0, 5000));
+    ASSERT_TRUE(wait_paused(&h, 0));
     ASSERT_TRUE(apr_controller_recording(h.ctl));
-    ASSERT_TRUE(wait_said(&h, APR_S_UI_ANN_RECORD_RESUMED, 5000));
+    ASSERT_TRUE(wait_said(&h, APR_S_UI_ANN_RECORD_RESUMED));
     ASSERT_WSTR_EQ(apr_str(APR_S_UI_ANN_RECORD_RESUMED), said(&h, buf, TXT_CCH));
 
     stop_recording(&h);
@@ -553,11 +554,11 @@ TEST(the_tray_tooltip_follows_the_recording_into_the_pause_and_out_again)
     ASSERT_EQ_INT(APR_TRAY_RECORDING, (int)apr_controller_tray_state(h.ctl));
 
     accel(&h, APR_CMD_RECORD_PAUSE);
-    ASSERT_TRUE(wait_paused(&h, 1, 5000));
+    ASSERT_TRUE(wait_paused(&h, 1));
     ASSERT_EQ_INT(APR_TRAY_PAUSED, (int)apr_controller_tray_state(h.ctl));
 
     accel(&h, APR_CMD_RECORD_RESUME);
-    ASSERT_TRUE(wait_paused(&h, 0, 5000));
+    ASSERT_TRUE(wait_paused(&h, 0));
     ASSERT_EQ_INT(APR_TRAY_RECORDING, (int)apr_controller_tray_state(h.ctl));
 
     stop_recording(&h);
@@ -582,16 +583,16 @@ TEST(a_pause_while_the_window_is_not_in_front_goes_out_as_a_balloon)
     before = apr_controller_balloon_count(h.ctl);
 
     accel(&h, APR_CMD_RECORD_PAUSE);
-    ASSERT_TRUE(wait_paused(&h, 1, 5000));
-    ASSERT_TRUE(wait_said(&h, APR_S_UI_ANN_RECORD_PAUSED, 5000));
+    ASSERT_TRUE(wait_paused(&h, 1));
+    ASSERT_TRUE(wait_said(&h, APR_S_UI_ANN_RECORD_PAUSED));
     ASSERT_GT_INT((int)before, (int)apr_controller_balloon_count(h.ctl));
     apr_controller_last_balloon(h.ctl, buf, TXT_CCH);
     ASSERT_WSTR_EQ(apr_str(APR_S_UI_TRAY_INFO_PAUSED), buf);
 
     before = apr_controller_balloon_count(h.ctl);
     accel(&h, APR_CMD_RECORD_RESUME);
-    ASSERT_TRUE(wait_paused(&h, 0, 5000));
-    ASSERT_TRUE(wait_said(&h, APR_S_UI_ANN_RECORD_RESUMED, 5000));
+    ASSERT_TRUE(wait_paused(&h, 0));
+    ASSERT_TRUE(wait_said(&h, APR_S_UI_ANN_RECORD_RESUMED));
     ASSERT_GT_INT((int)before, (int)apr_controller_balloon_count(h.ctl));
     apr_controller_last_balloon(h.ctl, buf, TXT_CCH);
     ASSERT_WSTR_EQ(apr_str(APR_S_UI_TRAY_INFO_RESUMED), buf);
@@ -615,7 +616,7 @@ TEST(a_paused_recording_still_refuses_to_be_edited_and_says_why)
 
     ASSERT_TRUE(start_recording(&h));
     accel(&h, APR_CMD_RECORD_PAUSE);
-    ASSERT_TRUE(wait_paused(&h, 1, 5000));
+    ASSERT_TRUE(wait_paused(&h, 1));
 
     buses = apr_graph_bus_count(h.graph);
     accel(&h, APR_CMD_ADD_BUS);
@@ -623,7 +624,7 @@ TEST(a_paused_recording_still_refuses_to_be_edited_and_says_why)
     ASSERT_WSTR_EQ(apr_str(APR_S_UI_ANN_BUSY_RECORDING), said(&h, buf, TXT_CCH));
 
     accel(&h, APR_CMD_RECORD_RESUME);
-    ASSERT_TRUE(wait_paused(&h, 0, 5000));
+    ASSERT_TRUE(wait_paused(&h, 0));
     stop_recording(&h);
     ui_stop(&h);
 }
@@ -646,12 +647,12 @@ TEST(the_pause_pair_is_greyed_the_right_way_round_at_every_moment)
     ASSERT_FALSE(apr_ui_app_command_enabled(h.app, APR_CMD_RECORD_RESUME));
 
     accel(&h, APR_CMD_RECORD_PAUSE);
-    ASSERT_TRUE(wait_paused(&h, 1, 5000));
+    ASSERT_TRUE(wait_paused(&h, 1));
     ASSERT_FALSE(apr_ui_app_command_enabled(h.app, APR_CMD_RECORD_PAUSE));
     ASSERT_TRUE(apr_ui_app_command_enabled(h.app, APR_CMD_RECORD_RESUME));
 
     accel(&h, APR_CMD_RECORD_RESUME);
-    ASSERT_TRUE(wait_paused(&h, 0, 5000));
+    ASSERT_TRUE(wait_paused(&h, 0));
     ASSERT_TRUE(apr_ui_app_command_enabled(h.app, APR_CMD_RECORD_PAUSE));
     ASSERT_FALSE(apr_ui_app_command_enabled(h.app, APR_CMD_RECORD_RESUME));
 
@@ -681,14 +682,14 @@ TEST(the_keys_are_answered_out_loud_even_when_there_is_nothing_to_pause)
     ASSERT_WSTR_EQ(apr_str(APR_S_UI_ANN_NOT_PAUSED), said(&h, buf, TXT_CCH));
 
     accel(&h, APR_CMD_RECORD_PAUSE);
-    ASSERT_TRUE(wait_paused(&h, 1, 5000));
+    ASSERT_TRUE(wait_paused(&h, 1));
     accel(&h, APR_CMD_RECORD_PAUSE);        /* already paused */
     ASSERT_WSTR_EQ(apr_str(APR_S_UI_ANN_ALREADY_PAUSED), said(&h, buf, TXT_CCH));
     /* And it is STILL one pause: a key pressed twice is one state. */
     ASSERT_TRUE(apr_controller_paused(h.ctl));
 
     accel(&h, APR_CMD_RECORD_RESUME);
-    ASSERT_TRUE(wait_paused(&h, 0, 5000));
+    ASSERT_TRUE(wait_paused(&h, 0));
     stop_recording(&h);
     ui_stop(&h);
 }
@@ -706,7 +707,7 @@ TEST(the_elapsed_clock_is_recorded_time_and_stops_while_paused)
     ASSERT_TRUE(start_recording(&h));
     Sleep(250);
     accel(&h, APR_CMD_RECORD_PAUSE);
-    ASSERT_TRUE(wait_paused(&h, 1, 5000));
+    ASSERT_TRUE(wait_paused(&h, 1));
 
     Sleep(50);
     at_pause = apr_controller_elapsed_ms(h.ctl);
@@ -719,7 +720,7 @@ TEST(the_elapsed_clock_is_recorded_time_and_stops_while_paused)
     ASSERT_TRUE(after - at_pause <= 40);
 
     accel(&h, APR_CMD_RECORD_RESUME);
-    ASSERT_TRUE(wait_paused(&h, 0, 5000));
+    ASSERT_TRUE(wait_paused(&h, 0));
     stop_recording(&h);
     ui_stop(&h);
 }

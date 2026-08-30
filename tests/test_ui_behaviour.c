@@ -50,6 +50,7 @@
  *   something to act on; it is finalized on teardown and the file is deleted.
  */
 #include "test_runner.h"
+#include "test_wait.h"
 
 #include <windows.h>
 #include <commctrl.h>
@@ -79,6 +80,9 @@ static const IID kIID_IUIAutomation =
     { 0x30cbe57d, 0xd9d0, 0x452a, { 0xab, 0x13, 0x7a, 0xc5, 0xac, 0x48, 0x25, 0xee } };
 
 #define IDC_NAME 2003   /* the edit field in the name prompt, src/ui/dialogs.c */
+
+/* Every ceiling and every poll step in this file is tests/test_wait.h's, and
+ * that file explains why there is only one of each. */
 
 /* ==========================================================================
  * A real frame, a real controller, on a real STA -- the apartment the product
@@ -318,6 +322,40 @@ static const wchar_t *said(UiHost *h, wchar_t *buf, size_t cch)
     return buf;
 }
 
+/* Wait until the last announcement IS this sentence.
+ *
+ * Every announcement here is made on the WINDOW's thread, in answer to
+ * something posted from this one, so "press the key and read the buffer" is a
+ * race that this file used to run a dozen separate times against a dozen
+ * separate five-second ceilings. Returns whether the sentence ever arrived;
+ * `got` holds whatever was there when it gave up, so the failure prints what
+ * was actually said. */
+static int said_becomes(UiHost *h, const wchar_t *want, wchar_t *got,
+                        size_t cch)
+{
+    int ok;
+
+    APR_WAIT_UNTIL(ok, wcscmp(want, said(h, got, cch)) == 0);
+    return ok;
+}
+
+/* THE FILES ARE CLOSED. Not "a stop was requested", and not "the flag went
+ * false": the runner finalizes every action on a thread of its own, and the
+ * controller only learns of it when APR_RUN_EV_STOPPED reaches the window.
+ *
+ * This waits on the handle the controller sets at exactly that moment
+ * (ui_controller.h) rather than polling apr_controller_recording() against a
+ * wall-clock ceiling, which is what all eight of these waits used to do at 25
+ * seconds apiece. A signalled wait ends at the transition, so it is both
+ * faster than any poll interval and immune to a busy machine. */
+static int recording_ended(UiHost *h)
+{
+    HANDLE idle = apr_controller_test_idle_event(h->ctl);
+
+    if (!idle) return !apr_controller_recording(h->ctl);
+    return APR_WAIT_SIGNAL(idle);
+}
+
 /* The catalog sentence with the catalog's own inserts -- never a literal, and
  * never a substring check where a whole sentence can be compared. */
 static const wchar_t *sentence(AprStrId id, const wchar_t *a1, const wchar_t *a2,
@@ -365,28 +403,30 @@ static HWND find_dialog(UiHost *h)
     return f.found;
 }
 
-static HWND wait_for_dialog(UiHost *h, int ms)
+/* Neither of these takes a ceiling any more, on purpose: a caller that could
+ * choose one would choose a short one, and a short one is the defect. */
+static HWND wait_for_dialog(UiHost *h)
 {
     int waited = 0;
 
     for (;;) {
         HWND d = find_dialog(h);
         if (d) return d;
-        if (waited >= ms) return NULL;
-        Sleep(10);
-        waited += 10;
+        if (waited >= APR_TEST_WAIT_MS) return NULL;
+        Sleep(APR_TEST_POLL_MS);
+        waited += APR_TEST_POLL_MS;
     }
 }
 
-static int wait_for_no_dialog(UiHost *h, int ms)
+static int wait_for_no_dialog(UiHost *h)
 {
     int waited = 0;
 
     for (;;) {
         if (!find_dialog(h)) return 1;
-        if (waited >= ms) return 0;
-        Sleep(10);
-        waited += 10;
+        if (waited >= APR_TEST_WAIT_MS) return 0;
+        Sleep(APR_TEST_POLL_MS);
+        waited += APR_TEST_POLL_MS;
     }
 }
 
@@ -504,7 +544,9 @@ static HWINEVENTHOOK watch_begin(HWND w, DWORD ev)
                            GetCurrentProcessId(), 0, WINEVENT_OUTOFCONTEXT);
 }
 
-static int watch_wait(int ms)
+/* Pumps, because an out-of-context hook is delivered as a message to the
+ * thread that installed it -- so this one cannot be a WaitForSingleObject. */
+static int watch_wait(void)
 {
     int waited = 0;
     MSG msg;
@@ -515,9 +557,9 @@ static int watch_wait(int ms)
             DispatchMessageW(&msg);
         }
         if (g_hits > 0) return 1;
-        if (waited >= ms) return 0;
-        Sleep(5);
-        waited += 5;
+        if (waited >= APR_TEST_WAIT_MS) return 0;
+        Sleep(APR_TEST_POLL_MS);
+        waited += APR_TEST_POLL_MS;
     }
 }
 
@@ -647,7 +689,7 @@ TEST(an_announcement_raises_a_live_region_event_carrying_the_sentence)
 
     announce_something(&f);
 
-    ASSERT_TRUE(watch_wait(5000));
+    ASSERT_TRUE(watch_wait());
     printf("      %ld live-region event(s); the name a reader would speak: "
            "\"%ls\"\n", (long)g_hits, g_hit_name);
 
@@ -693,12 +735,12 @@ TEST(adding_a_bus_through_its_dialog_changes_the_model_and_names_it)
     if (!fix_up(&f, 0, 0, 0, 0)) { fix_down(&f); return; }
 
     accel_async(&f.h, APR_CMD_ADD_BUS);
-    dlg = wait_for_dialog(&f.h, 10000);
+    dlg = wait_for_dialog(&f.h);
     if (!dlg) { fix_down(&f); FAIL("Ctrl+2 opened no dialog"); }
 
     ASSERT_TRUE(SetDlgItemTextW(dlg, IDC_NAME, L"Main Mix") != 0);
     PostMessageW(dlg, WM_COMMAND, MAKEWPARAM(IDOK, BN_CLICKED), 0);
-    ASSERT_TRUE(wait_for_no_dialog(&f.h, 10000));
+    ASSERT_TRUE(wait_for_no_dialog(&f.h));
 
     /* The command handler runs after EndDialog returns; one round trip through
      * the frame is enough to know it has. */
@@ -813,13 +855,19 @@ TEST(the_plus_key_raises_the_level_on_the_edge_and_says_the_new_level)
     keydown(apr_canvas_focused_node(f.h.canvas), VK_ADD);
 
     g1 = apr_bus_gain(b, SRC(&f));
-    printf("      gain %f -> %f\n", (double)g0, (double)g1);
-    ASSERT_TRUE(g1 > g0);
 
-    /* One press from unity is exactly one step up, and the sentence says so. */
+    /* One press from unity is exactly one step up, and the sentence says so.
+     * BOTH FACTS ARE PRINTED BEFORE EITHER IS ASSERTED: an assertion returns
+     * from the case, so asserting the number first threw away the sentence --
+     * which is the only thing that says WHICH refusal happened when the key
+     * did not land. */
     apr_str_number_fixed(APR_CANVAS_GAIN_STEP_DB10, 1, db, 32);
     sentence(APR_S_UI_ANN_GAIN, L"Teams", db, want, 512);
+    printf("      gain %f -> %f\n", (double)g0, (double)g1);
+    printf("      want: \"%ls\"\n", want);
     printf("      said: \"%ls\"\n", said(&f.h, got, 512));
+
+    ASSERT_TRUE(g1 > g0);
     ASSERT_WSTR_EQ(want, got);
 
     fix_down(&f);
@@ -910,6 +958,22 @@ static void sibling_take(const wchar_t *path, int take, wchar_t *out, size_t cch
                  dot ? dot : L"");
 }
 
+/* HOW LONG A TAKE HAS TO BE.
+ *
+ * 250 ms is about 96,000 bytes at 48 kHz stereo float -- more than twice the
+ * 40,000 the cases that measure a file demand, and the error only ever runs
+ * the safe way: a busy machine takes longer to reach the stop and writes more,
+ * never less. It was 400, which bought nothing and cost a fifth of a second
+ * four times over.
+ *
+ * It cannot be shorter than the audio it wants, and no seam can make it so:
+ * the mixer renders exactly the frames wall clock says are due (bus.h). */
+#define TAKE_MS 250
+
+/* And for the cases that only need a take to EXIST -- a name to collide with,
+ * a file to be playable -- rather than to be measured. */
+#define SHORT_TAKE_MS 150
+
 /* One take: press Record, let it run, press Stop, wait for the files to close.
  * Both presses are the real accelerator; the wait is on the controller's own
  * "am I recording" state rather than on a sleep, because the runner closes the
@@ -917,23 +981,18 @@ static void sibling_take(const wchar_t *path, int take, wchar_t *out, size_t cch
  * file that is not finished. */
 static int one_take(Fix *f, int ms)
 {
-    int waited = 0;
-
     accel(&f->h, APR_CMD_RECORD_START);
     if (!apr_controller_recording(f->h.ctl)) return 0;
 
+    /* THE ONE SLEEP IN THIS FILE THAT IS NOT A POLL, AND IT CANNOT BE ANYTHING
+     * ELSE. These cases assert that the take on disk is a playable file with
+     * real audio in it, and the mixer renders exactly the frames wall time
+     * says are due (bus.h) -- so the audio costs its own duration and no seam
+     * can conjure it. Every case that needs a file asks for the shortest span
+     * its assertion can be made from; nothing else here sleeps at all. */
     Sleep((DWORD)ms);
     accel(&f->h, APR_CMD_RECORD_STOP);
-
-    /* The controller clears `recording` from APR_RUN_EV_STOPPED, which arrives
-     * on the window's own thread -- so this really is "the files are closed"
-     * and not "the stop was requested". */
-    while (apr_controller_recording(f->h.ctl)) {
-        if (waited >= 20000) return 0;
-        Sleep(10);
-        waited += 10;
-    }
-    return 1;
+    return recording_ended(&f->h);
 }
 
 TEST(recording_twice_through_one_graph_leaves_two_playable_files)
@@ -956,11 +1015,11 @@ TEST(recording_twice_through_one_graph_leaves_two_playable_files)
     ASSERT_EQ_INT((int)INVALID_FILE_ATTRIBUTES,
                   (int)GetFileAttributesW(f.h.setup.out_path));
 
-    if (!one_take(&f, 400)) { fix_down(&f); DeleteFileW(second); FAIL("take one did not run"); }
+    if (!one_take(&f, TAKE_MS)) { fix_down(&f); DeleteFileW(second); FAIL("take one did not run"); }
     ASSERT_TRUE(wav_is_playable(f.h.setup.out_path, &a));
     printf("      take 1: [%ls] %u bytes\n", f.h.setup.out_path, a);
 
-    if (!one_take(&f, 400)) { fix_down(&f); DeleteFileW(second); FAIL("take two did not run"); }
+    if (!one_take(&f, TAKE_MS)) { fix_down(&f); DeleteFileW(second); FAIL("take two did not run"); }
 
     /* Two files. Take one still holds take one. */
     ASSERT_TRUE(wav_is_playable(f.h.setup.out_path, &a));
@@ -995,14 +1054,14 @@ TEST(a_take_deleted_between_recordings_comes_back)
     sibling_take(f.h.setup.out_path, 2, second, MAX_PATH);
     DeleteFileW(second);
 
-    if (!one_take(&f, 400)) { fix_down(&f); DeleteFileW(second); FAIL("take one did not run"); }
+    if (!one_take(&f, TAKE_MS)) { fix_down(&f); DeleteFileW(second); FAIL("take one did not run"); }
     ASSERT_TRUE(wav_is_playable(f.h.setup.out_path, &bytes));
 
     /* THE DELETE HAS TO SUCCEED, and before the fix it could not have: a
      * handle was still open on it. */
     ASSERT_TRUE(DeleteFileW(f.h.setup.out_path) != 0);
 
-    if (!one_take(&f, 400)) { fix_down(&f); DeleteFileW(second); FAIL("take two did not run"); }
+    if (!one_take(&f, TAKE_MS)) { fix_down(&f); DeleteFileW(second); FAIL("take two did not run"); }
     ASSERT_TRUE(wav_is_playable(f.h.setup.out_path, &bytes));
     printf("      back:   [%ls] %u bytes\n", f.h.setup.out_path, bytes);
     ASSERT_GT_INT(40000, (int)bytes);
@@ -1024,30 +1083,23 @@ TEST(a_take_that_moved_aside_is_announced_while_it_is_happening)
      * like every other announcement in this file. */
     Fix f;
     wchar_t second[MAX_PATH], want[512], got[512];
-    int waited = 0, heard = 0;
+    int heard;
 
     if (!fix_up(&f, 1, 1, 1, 1)) { fix_down(&f); return; }
     sibling_take(f.h.setup.out_path, 2, second, MAX_PATH);
     DeleteFileW(second);
 
-    if (!one_take(&f, 200)) { fix_down(&f); DeleteFileW(second); FAIL("take one did not run"); }
+    if (!one_take(&f, SHORT_TAKE_MS)) { fix_down(&f); DeleteFileW(second); FAIL("take one did not run"); }
 
     sentence(APR_S_UI_ANN_OUTPUT_RENAMED, second, NULL, want, 512);
     printf("      wanted: \"%ls\"\n", want);
 
     accel(&f.h, APR_CMD_RECORD_START);
-    while (waited < 5000) {
-        if (wcscmp(want, said(&f.h, got, 512)) == 0) { heard = 1; break; }
-        Sleep(10);
-        waited += 10;
-    }
+    heard = said_becomes(&f.h, want, got, 512);
     printf("      said:   \"%ls\"\n", got);
 
     accel(&f.h, APR_CMD_RECORD_STOP);
-    while (apr_controller_recording(f.h.ctl) && waited < 25000) {
-        Sleep(10);
-        waited += 10;
-    }
+    (void)recording_ended(&f.h);
     ASSERT_TRUE(heard);
 
     fix_down(&f);
@@ -1152,6 +1204,34 @@ static HWND focus_on_ui_thread(UiHost *h)
     return gti.hwndFocus;
 }
 
+/* HOW LONG FOCUS IS GIVEN TO SETTLE before another F6 is pressed.
+ *
+ * F6 CYCLES, so a test aiming at a particular pane may have to press it more
+ * than once -- and the press it presses next must not arrive while the last
+ * one is still moving focus. "Focus changed" is not "focus arrived": F6 hands
+ * the keyboard to a pane host, which hands it on to the control inside, so a
+ * press sent at the first sign of movement cycles straight past the pane that
+ * was being aimed for. That produced a failure that read exactly like the
+ * product losing focus by itself, in a case whose whole subject is the
+ * product losing focus by itself.
+ *
+ * So a round ends when focus has been UNCHANGED for this long, and only then
+ * is the key pressed again. Forty milliseconds is four ticks of anything in
+ * this program and nothing here needs more; the ROUND has its own generous
+ * ceiling below, and the number of rounds is bounded by the number of panes.
+ * Nothing waits for either in the ordinary case -- arriving returns at once. */
+#define FOCUS_SETTLE_MS 25
+
+/* And if the press produced NO movement at all, press again after this rather
+ * than sitting out the whole round: an F6 that was swallowed leaves focus
+ * exactly where it was, which is indistinguishable from one that has not been
+ * processed yet. */
+#define FOCUS_NUDGE_MS  250
+
+/* The outer bound on one round, so that a window which never answers fails
+ * with a message instead of hanging. Nothing reaches it. */
+#define FOCUS_ROUND_MS  3000
+
 /* Hand focus to the frame and wait for it to reach the tree, the way it does
  * for a user arriving at the window. */
 static int focus_the_tree(UiHost *h)
@@ -1170,13 +1250,24 @@ static int focus_the_tree(UiHost *h)
      * so it travels through apr_ui_app_run's pre-translate filter and reaches
      * cycle_pane on the thread that owns the windows -- a SetFocus from here
      * would do nothing, silently, and a synthetic WM_SETFOCUS does not move
-     * focus at all. F6 cycles, so a few presses reach whichever pane. */
-    for (round = 0; round < APR_PANE_COUNT + 1; ++round) {
+     * focus at all. F6 cycles, so a few presses reach whichever pane.
+     *
+     * A round ends the instant focus is on the tree, and otherwise when focus
+     * has SETTLED somewhere else -- see FOCUS_SETTLE_MS. */
+    for (round = 0; round < (APR_PANE_COUNT + 1) * 4; ++round) {
+        HWND last = focus_on_ui_thread(h);
+        int  still = 0, moved = 0;
+
+        if (last == h->tv) return 1;
         PostMessageW(h->frame, WM_KEYDOWN, VK_F6, 0);
         PostMessageW(h->frame, WM_KEYUP, VK_F6, 0);
-        for (t = 0; t < 40; ++t) {
-            if (focus_on_ui_thread(h) == h->tv) return 1;
-            Sleep(15);
+        for (t = 0; t < FOCUS_ROUND_MS; t += APR_TEST_POLL_MS) {
+            HWND now = focus_on_ui_thread(h);
+            if (now == h->tv) return 1;
+            if (now != last) { last = now; moved = 1; still = 0; }
+            else if ((still += APR_TEST_POLL_MS) >=
+                     (moved ? FOCUS_SETTLE_MS : FOCUS_NUDGE_MS)) break;
+            Sleep(APR_TEST_POLL_MS);
         }
     }
     return 0;
@@ -1230,6 +1321,18 @@ static size_t tv_texts(HWND tv, wchar_t out[][512], size_t cap)
         }
     }
     return n;
+}
+
+/* Does any row of the LIVE control say this? `live` is the caller's scratch
+ * so the failure path can print what the tree actually held. */
+static int tv_holds(HWND tv, wchar_t live[][512], const wchar_t *want)
+{
+    size_t i, n = tv_texts(tv, live, APR_TREE_MAX_ROWS);
+
+    for (i = 0; i < n; ++i) {
+        if (wcscmp(want, live[i]) == 0) return 1;
+    }
+    return 0;
 }
 
 TEST(arrowing_down_the_structure_panel_does_not_yank_focus_out_of_it)
@@ -1318,10 +1421,13 @@ TEST(the_caret_moves_the_canvas_quietly_and_only_enter_takes_the_keyboard_there)
     bus_node = node_index(&f.h, APR_NODE_BUS, BUS(&f), 0);
     ASSERT_GE_INT(0, bus_node);
 
-    /* The caret on the first row, which apr_tree_panel_rows makes the bus. */
+    /* The caret on the first row, which apr_tree_panel_rows makes the bus.
+     * The selection sink runs on the window's thread, so wait for the answer
+     * rather than guessing how long it takes. */
     SendMessageW(f.h.tv, WM_KEYDOWN, VK_HOME, 0);
     SendMessageW(f.h.tv, WM_KEYUP, VK_HOME, 0);
-    Sleep(50);
+    APR_WAIT_UNTIL(t, apr_tree_panel_get_selection(f.h.tree, &sel) == 1 &&
+                  sel.kind == APR_TREE_ROW_BUS);
 
     ASSERT_EQ_INT(1, apr_tree_panel_get_selection(f.h.tree, &sel));
     ASSERT_EQ_INT((int)APR_TREE_ROW_BUS, (int)sel.kind);
@@ -1335,13 +1441,8 @@ TEST(the_caret_moves_the_canvas_quietly_and_only_enter_takes_the_keyboard_there)
      * it, so this also proves the claim works. */
     SendMessageW(f.h.tv, WM_KEYDOWN, VK_RETURN, 0);
     SendMessageW(f.h.tv, WM_KEYUP, VK_RETURN, 0);
-    for (t = 0; t < 60; ++t) {
-        if (focus_on_ui_thread(&f.h) ==
-            apr_canvas_node_at(f.h.canvas, (size_t)bus_node)) {
-            break;
-        }
-        Sleep(15);
-    }
+    APR_WAIT_UNTIL(t, focus_on_ui_thread(&f.h) ==
+                  apr_canvas_node_at(f.h.canvas, (size_t)bus_node));
     printf("      after Enter, focus is %p (the bus node is %p)\n",
            (void *)focus_on_ui_thread(&f.h),
            (void *)apr_canvas_node_at(f.h.canvas, (size_t)bus_node));
@@ -1375,7 +1476,6 @@ TEST(an_editing_key_pressed_while_recording_says_why_it_was_refused)
      * so the modifier read is 0 and deterministic. */
     Fix f;
     wchar_t got[512], want[512];
-    int waited;
     static const struct { UINT vk; int cmd; const char *what; } keys[] = {
         { VK_F2,     APR_CMD_RENAME_BUS, "F2 (rename bus)" },
         { VK_DELETE, APR_CMD_REMOVE,     "Delete (remove node)" }
@@ -1410,19 +1510,13 @@ TEST(an_editing_key_pressed_while_recording_says_why_it_was_refused)
         PostMessageW(f.h.frame, WM_KEYDOWN, (WPARAM)keys[k].vk, 0);
         PostMessageW(f.h.frame, WM_KEYUP, (WPARAM)keys[k].vk, 0);
 
-        for (waited = 0; waited < 5000; waited += 10) {
-            if (wcscmp(want, said(&f.h, got, 512)) == 0) break;
-            Sleep(10);
-        }
+        (void)said_becomes(&f.h, want, got, 512);
         printf("      %-22s said: \"%ls\"\n", keys[k].what, got);
         ASSERT_WSTR_EQ(want, got);
     }
 
     accel(&f.h, APR_CMD_RECORD_STOP);
-    for (waited = 0; waited < 25000 && apr_controller_recording(f.h.ctl);
-         waited += 10) {
-        Sleep(10);
-    }
+    (void)recording_ended(&f.h);
 
     fix_down(&f);
 }
@@ -1440,7 +1534,7 @@ TEST(a_canvas_key_that_would_rewire_a_running_graph_is_refused_in_words)
      * exactly the function a keystroke runs, on the thread it requires. */
     Fix f;
     wchar_t got[512], want[512];
-    int si, waited;
+    int si;
 
     if (!fix_up(&f, 1, 1, 1, 1)) { fix_down(&f); return; }
     ASSERT_TRUE(apr_graph_connected(f.g, SRC(&f), BUS(&f)) != 0);
@@ -1472,10 +1566,7 @@ TEST(a_canvas_key_that_would_rewire_a_running_graph_is_refused_in_words)
     ASSERT_WSTR_EQ(want, got);
 
     accel(&f.h, APR_CMD_RECORD_STOP);
-    for (waited = 0; waited < 25000 && apr_controller_recording(f.h.ctl);
-         waited += 10) {
-        Sleep(10);
-    }
+    (void)recording_ended(&f.h);
 
     fix_down(&f);
 }
@@ -1501,7 +1592,6 @@ TEST(stop_recording_and_close_actually_ends_the_process)
     Fix f;
     HWND dlg;
     DWORD wait;
-    int waited;
 
     if (!fix_up(&f, 1, 1, 1, 1)) { fix_down(&f); return; }
 
@@ -1510,16 +1600,16 @@ TEST(stop_recording_and_close_actually_ends_the_process)
         fix_down(&f);
         FAIL("the recording did not start");
     }
-    Sleep(200);
+    /* Enough audio that "the take is still a real file" below means
+     * something. Not a poll: there is nothing to poll for -- what is wanted is
+     * that some audio exists. */
+    Sleep(SHORT_TAKE_MS);
 
     PostMessageW(f.h.frame, WM_CLOSE, 0, 0);
-    dlg = wait_for_dialog(&f.h, 15000);
+    dlg = wait_for_dialog(&f.h);
     if (!dlg) {
         accel(&f.h, APR_CMD_RECORD_STOP);
-        for (waited = 0; waited < 25000 && apr_controller_recording(f.h.ctl);
-             waited += 10) {
-            Sleep(10);
-        }
+        (void)recording_ended(&f.h);
         fix_down(&f);
         FAIL("closing while recording asked no question");
     }
@@ -1620,7 +1710,7 @@ TEST(the_tree_says_a_bus_is_recording_while_it_is_recording)
     wchar_t want[512];
     AprTreeSel bus_row;
     size_t n;
-    int waited, heard = 0;
+    int heard;
 
     if (!fix_up(&f, 1, 1, 1, 1)) { fix_down(&f); return; }
     if (!f.h.tv) { printf("      SKIPPED: no tree panel\n"); fix_down(&f); return; }
@@ -1640,14 +1730,7 @@ TEST(the_tree_says_a_bus_is_recording_while_it_is_recording)
     apr_tree_panel_label(f.g, &bus_row, want, 512);
     printf("      the model says: \"%ls\"\n", want);
 
-    for (waited = 0; waited < 5000 && !heard; waited += 20) {
-        size_t i;
-        n = tv_texts(f.h.tv, live, APR_TREE_MAX_ROWS);
-        for (i = 0; i < n; ++i) {
-            if (wcscmp(want, live[i]) == 0) { heard = 1; break; }
-        }
-        if (!heard) Sleep(20);
-    }
+    APR_WAIT_UNTIL(heard, tv_holds(f.h.tv, live, want));
     if (!heard) {
         size_t i;
         n = tv_texts(f.h.tv, live, APR_TREE_MAX_ROWS);
@@ -1655,10 +1738,7 @@ TEST(the_tree_says_a_bus_is_recording_while_it_is_recording)
     }
 
     accel(&f.h, APR_CMD_RECORD_STOP);
-    for (waited = 0; waited < 25000 && apr_controller_recording(f.h.ctl);
-         waited += 10) {
-        Sleep(10);
-    }
+    (void)recording_ended(&f.h);
 
     ASSERT_TRUE(heard);
     fix_down(&f);
@@ -1681,13 +1761,13 @@ TEST(a_take_that_moved_aside_is_told_to_a_window_that_is_not_in_front)
      * make itself foreground reliably (ui_controller.h). */
     Fix f;
     wchar_t second[MAX_PATH], want[512], got[512];
-    int waited, heard = 0;
+    int heard;
 
     if (!fix_up(&f, 1, 1, 1, 1)) { fix_down(&f); return; }
     sibling_take(f.h.setup.out_path, 2, second, MAX_PATH);
     DeleteFileW(second);
 
-    if (!one_take(&f, 200)) {
+    if (!one_take(&f, SHORT_TAKE_MS)) {
         fix_down(&f);
         DeleteFileW(second);
         FAIL("take one did not run");
@@ -1698,18 +1778,12 @@ TEST(a_take_that_moved_aside_is_told_to_a_window_that_is_not_in_front)
     printf("      wanted on the tray channel: \"%ls\"\n", want);
 
     accel(&f.h, APR_CMD_RECORD_START);
-    for (waited = 0; waited < 5000; waited += 10) {
-        apr_controller_last_balloon(f.h.ctl, got, 512);
-        if (wcscmp(want, got) == 0) { heard = 1; break; }
-        Sleep(10);
-    }
+    APR_WAIT_UNTIL(heard, (apr_controller_last_balloon(f.h.ctl, got, 512),
+                       wcscmp(want, got) == 0));
     printf("      last balloon:               \"%ls\"\n", got);
 
     accel(&f.h, APR_CMD_RECORD_STOP);
-    for (waited = 0; waited < 25000 && apr_controller_recording(f.h.ctl);
-         waited += 10) {
-        Sleep(10);
-    }
+    (void)recording_ended(&f.h);
     apr_controller_test_set_foreground(f.h.ctl, -1);
 
     ASSERT_TRUE(heard);
@@ -1734,7 +1808,7 @@ TEST(nothing_balloons_while_the_window_is_in_front)
     apr_controller_test_set_foreground(f.h.ctl, 1);   /* in front */
     before = apr_controller_balloon_count(f.h.ctl);
 
-    if (!one_take(&f, 200)) {
+    if (!one_take(&f, SHORT_TAKE_MS)) {
         fix_down(&f);
         DeleteFileW(second);
         FAIL("the take did not run");
@@ -1831,10 +1905,10 @@ TEST(a_window_that_could_not_be_created_is_announced_rather_than_logged)
 
     /* And a real cancel still says nothing, because the user meant it. */
     accel_async(&f.h, APR_CMD_ADD_BUS);
-    dlg = wait_for_dialog(&f.h, 10000);
+    dlg = wait_for_dialog(&f.h);
     if (!dlg) { fix_down(&f); FAIL("the dialog did not open after the gate"); }
     PostMessageW(dlg, WM_COMMAND, MAKEWPARAM(IDCANCEL, BN_CLICKED), 0);
-    ASSERT_TRUE(wait_for_no_dialog(&f.h, 10000));
+    ASSERT_TRUE(wait_for_no_dialog(&f.h));
     (void)SendMessageW(f.h.frame, WM_NULL, 0, 0);
     ASSERT_EQ_INT(0, apr_dlg_last_failed());
 
@@ -1853,21 +1927,21 @@ TEST(a_session_with_unsaved_changes_is_not_discarded_without_asking)
     ASSERT_EQ_INT(1, (int)apr_graph_source_count(f.g));
 
     accel_async(&f.h, APR_CMD_FILE_NEW);
-    dlg = wait_for_dialog(&f.h, 10000);
+    dlg = wait_for_dialog(&f.h);
     if (!dlg) { fix_down(&f); FAIL("File > New discarded the session silently"); }
 
     /* Say no, and nothing moves. */
     PostMessageW(dlg, WM_COMMAND, MAKEWPARAM(IDCANCEL, BN_CLICKED), 0);
-    ASSERT_TRUE(wait_for_no_dialog(&f.h, 10000));
+    ASSERT_TRUE(wait_for_no_dialog(&f.h));
     (void)SendMessageW(f.h.frame, WM_NULL, 0, 0);
     ASSERT_EQ_INT(1, (int)apr_graph_source_count(apr_controller_graph(f.h.ctl)));
 
     /* Say yes, and it does. */
     accel_async(&f.h, APR_CMD_FILE_NEW);
-    dlg = wait_for_dialog(&f.h, 10000);
+    dlg = wait_for_dialog(&f.h);
     if (!dlg) { fix_down(&f); FAIL("the prompt did not come back"); }
     PostMessageW(dlg, WM_COMMAND, MAKEWPARAM(IDOK, BN_CLICKED), 0);
-    ASSERT_TRUE(wait_for_no_dialog(&f.h, 10000));
+    ASSERT_TRUE(wait_for_no_dialog(&f.h));
     (void)SendMessageW(f.h.frame, WM_NULL, 0, 0);
     ASSERT_EQ_INT(0, (int)apr_graph_source_count(apr_controller_graph(f.h.ctl)));
 
@@ -1924,7 +1998,6 @@ TEST(cancelling_a_session_load_is_not_reported_as_a_failure)
     AprSession *s;
     AprErr e;
     DWORD n;
-    int waited;
 
     /* A session naming a program that is certainly not running, so resolve has
      * something to report and the report is shown. */
@@ -1964,7 +2037,7 @@ TEST(cancelling_a_session_load_is_not_reported_as_a_failure)
     apr_dlg_test_set_session_path(path);
     accel_async(&f.h, APR_CMD_FILE_OPEN);
 
-    dlg = wait_for_dialog(&f.h, 15000);
+    dlg = wait_for_dialog(&f.h);
     if (!dlg) {
         printf("      SKIPPED: the resolve report did not open (this session "
                "resolved cleanly on this machine)\n");
@@ -1975,15 +2048,12 @@ TEST(cancelling_a_session_load_is_not_reported_as_a_failure)
     }
     /* CANCEL. Deliberately, knowing exactly what it means. */
     PostMessageW(dlg, WM_COMMAND, MAKEWPARAM(IDCANCEL, BN_CLICKED), 0);
-    ASSERT_TRUE(wait_for_no_dialog(&f.h, 10000));
+    ASSERT_TRUE(wait_for_no_dialog(&f.h));
     (void)SendMessageW(f.h.frame, WM_NULL, 0, 0);
 
     apr_str_format(APR_S_UI_DLG_SESSION_CANCELLED, want, 512, NULL, 0);
-    for (waited = 0; waited < 5000; waited += 10) {
-        if (wcscmp(want, said(&f.h, got, 512)) == 0) break;
-        Sleep(10);
-    }
-    printf("      said: \"%ls\"\n", said(&f.h, got, 512));
+    (void)said_becomes(&f.h, want, got, 512);
+    printf("      said: \"%ls\"\n", got);
     ASSERT_WSTR_EQ(want, got);
 
     /* And nothing was adopted: the session the user had is untouched. */
@@ -2036,12 +2106,21 @@ TEST(ctrl_t_with_focus_on_the_divider_does_not_strand_it_in_a_hidden_window)
     for (t = 0; t < 12 && focus_on_ui_thread(&f.h) != split; ++t) {
         /* Posted to the window that actually HAS focus, which is what the
          * keyboard does: IsDialogMessage navigates from the focused control,
-         * and a Tab addressed to the frame is not the same message. */
+         * and a Tab addressed to the frame is not the same message.
+         *
+         * Then wait for the Tab to LAND rather than for sixty milliseconds to
+         * pass -- which is the same choice focus_the_tree makes, and for the
+         * same two reasons. */
         HWND ff = focus_on_ui_thread(&f.h);
+        int moved;
         if (!ff) break;
         PostMessageW(ff, WM_KEYDOWN, VK_TAB, 0);
         PostMessageW(ff, WM_KEYUP, VK_TAB, 0);
-        Sleep(60);
+        /* BOUNDED: a Tab that moves nothing ends the walk, and the case SKIPS
+         * rather than fails when the splitter is never reached -- so this must
+         * not spend the whole ceiling on the way out. */
+        APR_WAIT_UNTIL_MS(moved, focus_on_ui_thread(&f.h) != ff, 1000);
+        if (!moved) break;
     }
     if (focus_on_ui_thread(&f.h) != split) {
         printf("      SKIPPED: Tab never landed on the splitter\n");
@@ -2051,11 +2130,8 @@ TEST(ctrl_t_with_focus_on_the_divider_does_not_strand_it_in_a_hidden_window)
 
     accel(&f.h, APR_CMD_VIEW_TREE);   /* hide the structure panel */
 
-    for (t = 0; t < 60; ++t) {
-        HWND ff = focus_on_ui_thread(&f.h);
-        if (ff && IsWindowVisible(ff)) break;
-        Sleep(15);
-    }
+    APR_WAIT_UNTIL(t, focus_on_ui_thread(&f.h) != NULL &&
+                  IsWindowVisible(focus_on_ui_thread(&f.h)));
     {
         HWND ff = focus_on_ui_thread(&f.h);
         printf("      splitter visible after Ctrl+T: %s; focus is on %p "
@@ -2082,7 +2158,6 @@ TEST(a_close_that_runs_out_of_patience_says_that_rather_than_repeating_itself)
     Fix f;
     HWND dlg;
     wchar_t got[512], want[512];
-    int waited;
 
     if (!fix_up(&f, 1, 1, 1, 1)) { fix_down(&f); return; }
 
@@ -2096,24 +2171,18 @@ TEST(a_close_that_runs_out_of_patience_says_that_rather_than_repeating_itself)
     }
 
     PostMessageW(f.h.frame, WM_CLOSE, 0, 0);
-    dlg = wait_for_dialog(&f.h, 15000);
+    dlg = wait_for_dialog(&f.h);
     if (!dlg) {
         accel(&f.h, APR_CMD_RECORD_STOP);
-        for (waited = 0; waited < 25000 && apr_controller_recording(f.h.ctl);
-             waited += 10) {
-            Sleep(10);
-        }
+        (void)recording_ended(&f.h);
         fix_down(&f);
         FAIL("closing while recording asked no question");
     }
     PostMessageW(dlg, WM_COMMAND, MAKEWPARAM(IDOK, BN_CLICKED), 0);
 
     apr_str_format(APR_S_UI_ANN_CLOSE_TIMEOUT, want, 512, NULL, 0);
-    for (waited = 0; waited < 10000; waited += 10) {
-        if (wcscmp(want, said(&f.h, got, 512)) == 0) break;
-        Sleep(10);
-    }
-    printf("      said: \"%ls\"\n", said(&f.h, got, 512));
+    (void)said_becomes(&f.h, want, got, 512);
+    printf("      said: \"%ls\"\n", got);
     ASSERT_WSTR_EQ(want, got);
 
     /* And the window is still there to be closed again, which is the other
@@ -2122,10 +2191,7 @@ TEST(a_close_that_runs_out_of_patience_says_that_rather_than_repeating_itself)
 
     apr_controller_test_set_close_wait_ms(f.h.ctl, -1);
     accel(&f.h, APR_CMD_RECORD_STOP);
-    for (waited = 0; waited < 25000 && apr_controller_recording(f.h.ctl);
-         waited += 10) {
-        Sleep(10);
-    }
+    (void)recording_ended(&f.h);
     fix_down(&f);
 }
 
@@ -2239,11 +2305,34 @@ TEST(a_refusal_from_the_controller_is_a_catalog_sentence_end_to_end)
     cfg.fake.tone_hz   = 440;
     cfg.fake.amplitude = 0.25f;
 
-    for (i = 0; i < APR_MAX_SOURCES + 1; ++i) {
+    /* FILLING THE GRAPH IS NOT THE THING UNDER TEST, so it is done to the
+     * MODEL and published once, instead of through sixty-four round trips
+     * that each rebuild two views.
+     *
+     * That was not merely slow. apr_controller_add_source publishes on the
+     * CALLING thread, and this is not the window's thread -- so sixty-four of
+     * them built two thousand child windows belonging to a thread that then
+     * stopped pumping, and the frame's own thread could not destroy them at
+     * teardown. The close deadlocked, ui_stop hit its thirty-second timeout
+     * and called TerminateThread, and this ONE case was thirty-four of the
+     * suite's forty-eight seconds -- with a terminated UI thread left behind
+     * for every case that ran after it. The file's own header says every model
+     * call happens on the window's thread; this is that rule, applied.
+     *
+     * The refusal itself still goes through apr_controller_add_source, which
+     * is the entire point of the case, and it never reaches a view: it fails
+     * inside the model and returns. */
+    for (i = 0; i < APR_MAX_SOURCES; ++i) {
+        AprSourceId id = 0;
         wchar_t name[APR_NAME_CCH];
         _snwprintf_s(name, APR_NAME_CCH, _TRUNCATE, L"Source %d", (int)i);
-        e = apr_controller_add_source(f.h.ctl, name, &cfg);
+        e = apr_graph_add_source(f.g, name, &cfg, &id);
         if (apr_failed(&e)) break;
+    }
+    apr_controller_model_changed(f.h.ctl);   /* marshals; publishes once */
+
+    if (!apr_failed(&e)) {
+        e = apr_controller_add_source(f.h.ctl, L"One Too Many", &cfg);
     }
     if (!apr_failed(&e)) {
         printf("      SKIPPED: this build accepts more than %d sources\n",
@@ -2259,7 +2348,8 @@ TEST(a_refusal_from_the_controller_is_a_catalog_sentence_end_to_end)
     args[0] = reason;
     apr_str_format(APR_S_UI_DLG_ADD_FAILED, want, 512, args, 1);
 
-    printf("      said:   \"%ls\"\n", said(&f.h, got, 512));
+    (void)said_becomes(&f.h, want, got, 512);
+    printf("      said:   \"%ls\"\n", got);
     ASSERT_WSTR_EQ(want, got);
 
     /* Not the raise site, not the internal count, not the enum name. */
@@ -2322,15 +2412,22 @@ TEST(focus_arriving_at_the_canvas_lands_on_a_node_and_not_on_the_pane)
         return;
     }
 
-    /* F6 until the canvas pane has been entered. */
-    for (t = 0; t < 8 && !got; ++t) {
-        int w;
+    /* F6 until the canvas pane has been entered. Same shape as
+     * focus_the_tree, and settling for the same reason. */
+    for (t = 0; t < (APR_PANE_COUNT + 1) * 4 && !got; ++t) {
+        HWND last = focus_on_ui_thread(&f.h);
+        int  still = 0, moved = 0, w;
+
+        if (last && IsChild(f.h.canvas, last)) { got = last; break; }
         PostMessageW(f.h.frame, WM_KEYDOWN, VK_F6, 0);
         PostMessageW(f.h.frame, WM_KEYUP, VK_F6, 0);
-        for (w = 0; w < 30; ++w) {
+        for (w = 0; w < FOCUS_ROUND_MS; w += APR_TEST_POLL_MS) {
             HWND ff = focus_on_ui_thread(&f.h);
             if (ff && IsChild(f.h.canvas, ff)) { got = ff; break; }
-            Sleep(15);
+            if (ff != last) { last = ff; moved = 1; still = 0; }
+            else if ((still += APR_TEST_POLL_MS) >=
+                     (moved ? FOCUS_SETTLE_MS : FOCUS_NUDGE_MS)) break;
+            Sleep(APR_TEST_POLL_MS);
         }
     }
 
@@ -2423,7 +2520,7 @@ TEST(add_output_with_no_bus_to_put_it_on_says_so_instead_of_opening_empty)
     if (!fix_up(&f, 1, 0, 0, 0)) { fix_down(&f); return; }
 
     accel_async(&f.h, APR_CMD_ADD_ACTION);
-    dlg = wait_for_dialog(&f.h, 15000);
+    dlg = wait_for_dialog(&f.h);
     if (!dlg) { fix_down(&f); FAIL("Add Output said nothing and opened nothing"); }
 
     body[0] = 0;
@@ -2432,7 +2529,7 @@ TEST(add_output_with_no_bus_to_put_it_on_says_so_instead_of_opening_empty)
     ASSERT_WSTR_EQ(apr_str(APR_S_UI_DLG_NO_BUSES), body);
 
     PostMessageW(dlg, WM_COMMAND, MAKEWPARAM(IDCANCEL, BN_CLICKED), 0);
-    ASSERT_TRUE(wait_for_no_dialog(&f.h, 10000));
+    ASSERT_TRUE(wait_for_no_dialog(&f.h));
     (void)SendMessageW(f.h.frame, WM_NULL, 0, 0);
 
     /* And nothing was created out of a choice that could not be made. */
@@ -2449,7 +2546,7 @@ TEST(the_close_dialogs_buttons_are_wide_enough_for_their_own_captions)
      * so the Arabic pass would have shipped three unreadable buttons. */
     Fix f;
     HWND dlg;
-    int waited, checked = 0;
+    int checked = 0;
     static const int ids[] = { IDOK, IDCANCEL };
     size_t k;
 
@@ -2462,13 +2559,10 @@ TEST(the_close_dialogs_buttons_are_wide_enough_for_their_own_captions)
     }
 
     PostMessageW(f.h.frame, WM_CLOSE, 0, 0);
-    dlg = wait_for_dialog(&f.h, 15000);
+    dlg = wait_for_dialog(&f.h);
     if (!dlg) {
         accel(&f.h, APR_CMD_RECORD_STOP);
-        for (waited = 0; waited < 25000 && apr_controller_recording(f.h.ctl);
-             waited += 10) {
-            Sleep(10);
-        }
+        (void)recording_ended(&f.h);
         fix_down(&f);
         FAIL("closing while recording asked no question");
     }
@@ -2504,13 +2598,10 @@ TEST(the_close_dialogs_buttons_are_wide_enough_for_their_own_captions)
 
     /* "Keep recording" -- the answer that changes nothing. */
     PostMessageW(dlg, WM_COMMAND, MAKEWPARAM(IDCANCEL, BN_CLICKED), 0);
-    (void)wait_for_no_dialog(&f.h, 10000);
+    (void)wait_for_no_dialog(&f.h);
 
     accel(&f.h, APR_CMD_RECORD_STOP);
-    for (waited = 0; waited < 25000 && apr_controller_recording(f.h.ctl);
-         waited += 10) {
-        Sleep(10);
-    }
+    (void)recording_ended(&f.h);
     fix_down(&f);
 }
 
@@ -2548,7 +2639,7 @@ TEST(every_dialog_opens_and_cancels_and_leaves_the_model_alone)
         wchar_t title[256];
 
         accel_async(&f.h, cases[i].cmd);
-        dlg = wait_for_dialog(&f.h, 15000);
+        dlg = wait_for_dialog(&f.h);
         if (!dlg) {
             printf("      %-20s -> NOTHING OPENED\n", cases[i].what);
             fix_down(&f);
@@ -2562,7 +2653,7 @@ TEST(every_dialog_opens_and_cancels_and_leaves_the_model_alone)
         ASSERT_TRUE(title[0] != 0);
 
         PostMessageW(dlg, WM_COMMAND, MAKEWPARAM(IDCANCEL, BN_CLICKED), 0);
-        if (!wait_for_no_dialog(&f.h, 10000)) {
+        if (!wait_for_no_dialog(&f.h)) {
             fix_down(&f);
             FAIL("a cancelled dialog did not close");
         }

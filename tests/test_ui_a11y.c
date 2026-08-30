@@ -50,6 +50,7 @@
  *   run, because they need no window.
  */
 #include "test_runner.h"
+#include "test_wait.h"
 
 #include <windows.h>
 #include <commctrl.h>
@@ -128,7 +129,7 @@ static int ui_start(UiHost *h)
     if (!h->ready) return 0;
     h->thread = CreateThread(NULL, 0, ui_thread, h, 0, NULL);
     if (!h->thread) { CloseHandle(h->ready); h->ready = NULL; return 0; }
-    if (WaitForSingleObject(h->ready, 15000) != WAIT_OBJECT_0) return 0;
+    if (WaitForSingleObject(h->ready, APR_TEST_WAIT_MS) != WAIT_OBJECT_0) return 0;
     return h->failed ? 0 : (h->frame != NULL);
 }
 
@@ -136,7 +137,7 @@ static void ui_stop(UiHost *h)
 {
     if (h->frame && IsWindow(h->frame)) PostMessageW(h->frame, WM_CLOSE, 0, 0);
     if (h->thread) {
-        if (WaitForSingleObject(h->thread, 15000) != WAIT_OBJECT_0) {
+        if (WaitForSingleObject(h->thread, APR_TEST_WAIT_MS) != WAIT_OBJECT_0) {
             printf("      WARNING: UI thread did not exit; terminating\n");
             TerminateThread(h->thread, 1);
         }
@@ -520,11 +521,12 @@ TEST(f6_really_moves_focus_between_panes)
      * to the first pane, which is the behaviour a user gets on Alt+Tab. */
     SendMessageTimeoutW(h.frame, WM_SETFOCUS, 0, 0, SMTO_ABORTIFHUNG, 3000, NULL);
 
-    before = NULL;
-    for (tries = 0; tries < 40 && before == NULL; ++tries) {
-        Sleep(25);
-        before = thread_focus(h.thread);
-    }
+    /* BOUNDED, because "the UI thread never took focus" is an outcome this
+     * case SKIPS on rather than fails on -- so it must not spend the whole
+     * ceiling reaching it. Three seconds is three times what it used to allow
+     * and a thousand times what it needs. */
+    APR_WAIT_UNTIL_MS(tries, (before = thread_focus(h.thread)) != NULL, 3000);
+    (void)tries;
     printf("      focus before F6: %p (tree %p, canvas %p)\n",
            (void *)before, (void *)tree, (void *)canvas);
 
@@ -540,11 +542,10 @@ TEST(f6_really_moves_focus_between_panes)
      * that ordering is ever broken, this test is what notices. */
     PostMessageW(h.frame, WM_KEYDOWN, VK_F6, 0);
 
-    after = before;
-    for (tries = 0; tries < 60 && after == before; ++tries) {
-        Sleep(25);
-        after = thread_focus(h.thread);
-    }
+    /* NOT bounded: focus moving is ASSERTED below, so reaching a ceiling here
+     * is a failure and the ceiling is the one nothing can reach. */
+    APR_WAIT_UNTIL(tries, (after = thread_focus(h.thread)) != before);
+    (void)tries;
     printf("      focus after F6:  %p\n", (void *)after);
 
     ASSERT_TRUE(after != before);

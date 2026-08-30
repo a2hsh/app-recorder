@@ -39,6 +39,7 @@
  *   rather than faked. The pure cases need neither and always run.
  */
 #include "test_runner.h"
+#include "test_wait.h"
 
 #include <windows.h>
 #include <commctrl.h>
@@ -539,7 +540,7 @@ static int ui_start(UiHost *h)
     if (!h->ready) return 0;
     h->thread = CreateThread(NULL, 0, ui_thread, h, 0, NULL);
     if (!h->thread) { CloseHandle(h->ready); h->ready = NULL; return 0; }
-    if (WaitForSingleObject(h->ready, 15000) != WAIT_OBJECT_0) return 0;
+    if (WaitForSingleObject(h->ready, APR_TEST_WAIT_MS) != WAIT_OBJECT_0) return 0;
     return h->failed ? 0 : (h->frame != NULL);
 }
 
@@ -547,7 +548,7 @@ static void ui_stop(UiHost *h)
 {
     if (h->frame && IsWindow(h->frame)) PostMessageW(h->frame, WM_CLOSE, 0, 0);
     if (h->thread) {
-        if (WaitForSingleObject(h->thread, 15000) != WAIT_OBJECT_0) {
+        if (WaitForSingleObject(h->thread, APR_TEST_WAIT_MS) != WAIT_OBJECT_0) {
             printf("      WARNING: UI thread did not exit; terminating\n");
             TerminateThread(h->thread, 1);
         }
@@ -877,6 +878,31 @@ TEST(custom_draw_ran_and_the_accessibility_tree_is_still_intact)
     live_stop(&L);
 }
 
+/* A SETTLE, NOT A CEILING, and the difference matters.
+ *
+ * The walk below presses Down more times than there are rows on purpose, so at
+ * the bottom the caret is SUPPOSED to stop moving -- which means "wait until it
+ * moves" is the wrong wait: it would spend its bound on every press past the
+ * end, and it would also read the caret before a posted key had been processed
+ * and miss the row that key selected. What each iteration needs is simply time
+ * for one posted keystroke to be handled, and fifteen milliseconds is what this
+ * has always given it. */
+#define KEY_SETTLE_MS 15
+
+/* Which window the UI thread's own queue believes has the keyboard.
+ * GetGUIThreadInfo rather than UIA's GetFocusedElement: the latter is
+ * per-desktop and needs the window to be foreground, which a test launched by
+ * a build system is not. */
+static HWND thread_focus_hwnd(HANDLE thread)
+{
+    GUITHREADINFO gti;
+
+    memset(&gti, 0, sizeof gti);
+    gti.cbSize = sizeof gti;
+    if (!GetGUIThreadInfo(GetThreadId(thread), &gti)) return NULL;
+    return gti.hwndFocus;
+}
+
 TEST(the_keyboard_alone_reaches_every_row)
 {
     Live L;
@@ -898,18 +924,17 @@ TEST(the_keyboard_alone_reaches_every_row)
      * would have to guess that there is a tree inside it. */
     SendMessageTimeoutW(L.h.frame, WM_SETFOCUS, 0, 0, SMTO_ABORTIFHUNG, 3000, NULL);
     {
-        GUITHREADINFO gti;
-        int t;
         HWND f = NULL;
-        for (t = 0; t < 40 && f != L.tv; ++t) {
-            Sleep(15);
-            memset(&gti, 0, sizeof gti);
-            gti.cbSize = sizeof gti;
-            /* GetGUIThreadInfo, not UIA's GetFocusedElement: the latter is
-             * per-desktop and needs the window to be foreground, which a test
-             * launched by a build system is not. */
-            if (GetGUIThreadInfo(GetThreadId(L.h.thread), &gti)) f = gti.hwndFocus;
-        }
+        int arrived;
+
+        /* GetGUIThreadInfo, not UIA's GetFocusedElement: the latter is
+         * per-desktop and needs the window to be foreground, which a test
+         * launched by a build system is not.
+         *
+         * Not bounded: focus reaching the tree is ASSERTED, so a ceiling here
+         * would be a coin toss. */
+        APR_WAIT_UNTIL(arrived, (f = thread_focus_hwnd(L.h.thread)) == L.tv);
+        (void)arrived;
         printf("      focus after the frame handed it on: %p (tree %p, pane %p)\n",
                (void *)f, (void *)L.tv, (void *)L.pane);
         ASSERT_TRUE(f == L.tv);
@@ -922,7 +947,7 @@ TEST(the_keyboard_alone_reaches_every_row)
         HTREEITEM cur;
         int row;
 
-        Sleep(15);
+        Sleep(KEY_SETTLE_MS);          /* see KEY_SETTLE_MS: a settle, not a bound */
         cur = tv_next(L.tv, TVGN_CARET, NULL);
         row = tv_row(L.tv, cur);
         if (row >= 0 && row < MAXROWS && !visited[row]) {
@@ -960,7 +985,6 @@ TEST(selection_is_a_model_identity_and_does_not_echo)
     Live L;
     AprTreeSel want, got;
     LONG before;
-    int tries;
 
     if (!live_start(&L)) { printf("      SKIPPED: no window\n"); live_stop(&L); return; }
 
@@ -1001,7 +1025,11 @@ TEST(selection_is_a_model_identity_and_does_not_echo)
      * the tree. */
     PostMessageW(L.tv, WM_KEYDOWN, VK_DOWN, 0);
     PostMessageW(L.tv, WM_KEYUP, VK_DOWN, 0);
-    for (tries = 0; tries < 60 && g_sink_calls == before; ++tries) Sleep(15);
+    {
+        int fired;
+        APR_WAIT_UNTIL(fired, g_sink_calls != before);
+        (void)fired;
+    }
     ASSERT_GT_INT((int)before, (int)g_sink_calls);
     ASSERT_TRUE(g_sink_last.kind != APR_TREE_ROW_NONE);
 

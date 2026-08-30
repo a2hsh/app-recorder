@@ -189,6 +189,26 @@ void apr_controller_test_set_close_wait_ms(AprController *c, int ms);
 size_t apr_controller_last_announcement(const AprController *c,
                                         wchar_t *buf, size_t cch);
 
+/* TEST ONLY. SIGNALLED WHENEVER NO RECORDING IS IN FLIGHT: cleared the moment
+ * one starts, set again once the loop has ended, every action has been
+ * finalized and the files are closed. Manual reset; owned by the controller,
+ * never closed by a caller, and never NULL for a live controller.
+ *
+ * WHY A HANDLE AND NOT A FLAG. apr_controller_recording() already answers the
+ * question, and every suite in this tree used to answer it the same way --
+ * poll it every ten milliseconds against a wall-clock ceiling and fail the
+ * case if the ceiling arrived first. That is not a test of anything; it is a
+ * bet that the machine is not busy, and on a loaded machine the suite lost it.
+ * The stop path is genuinely a thread handshake -- the runner closes the files
+ * on a thread of its own and the controller only learns of it when
+ * APR_RUN_EV_STOPPED reaches the window -- so the honest way to wait for it is
+ * to wait for it. A signalled wait is also faster than any poll interval,
+ * because it ends at the transition rather than at the next tick.
+ *
+ * A recording that never started leaves this set, so a test that waits on it
+ * after a failed start is told the truth immediately rather than hanging. */
+HANDLE apr_controller_test_idle_event(const AprController *c);
+
 /* TEST ONLY. The last sentence sent to the notification area, and how many
  * have been sent.
  *

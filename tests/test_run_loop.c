@@ -27,6 +27,7 @@
  *   file that each case deletes.
  */
 #include "test_runner.h"
+#include "test_wait.h"
 
 #include <windows.h>
 #include <stdio.h>
@@ -274,7 +275,6 @@ TEST(a_recording_runs_on_its_own_thread_and_stops_from_another)
     AprRunnerConfig cfg;
     AprRunner *r = NULL;
     AprErr e;
-    int i;
 
     ASSERT_TRUE(fixture_up(&f, L"async", NULL));
     memset(&cfg, 0, sizeof cfg);
@@ -288,12 +288,15 @@ TEST(a_recording_runs_on_its_own_thread_and_stops_from_another)
     /* The call returned immediately -- that is the whole point. Wait for the
      * loop to genuinely be running before stopping it, so this is not testing
      * a race. */
-    for (i = 0; i < 200 && !apr_runner_running(r); i++) Sleep(5);
-    ASSERT_TRUE(apr_runner_running(r));
+    {
+        int up;
+        APR_WAIT_UNTIL(up, apr_runner_running(r));
+        ASSERT_TRUE(up);
+    }
     Sleep(150);
 
     apr_runner_request_stop(r);
-    ASSERT_TRUE(apr_runner_wait(r, 15000));
+    ASSERT_TRUE(apr_runner_wait(r, APR_TEST_WAIT_MS));
     ASSERT_FALSE(apr_runner_running(r));
 
     ASSERT_TRUE(wav_is_playable(f.path, NULL));
@@ -311,7 +314,6 @@ TEST(destroying_a_running_recorder_finalizes_rather_than_abandoning)
     Fixture f;
     AprRunnerConfig cfg;
     AprRunner *r = NULL;
-    int i;
     AprErr e;
 
     ASSERT_TRUE(fixture_up(&f, L"destroy", NULL));
@@ -322,8 +324,11 @@ TEST(destroying_a_running_recorder_finalizes_rather_than_abandoning)
     ASSERT_FALSE(apr_failed(&e));
     e = apr_runner_run_async(r);
     ASSERT_FALSE(apr_failed(&e));
-    for (i = 0; i < 200 && !apr_runner_running(r); i++) Sleep(5);
-    ASSERT_TRUE(apr_runner_running(r));
+    {
+        int up;
+        APR_WAIT_UNTIL(up, apr_runner_running(r));
+        ASSERT_TRUE(up);
+    }
     Sleep(120);
 
     apr_runner_destroy(r);          /* no explicit stop, no explicit wait */
@@ -533,7 +538,23 @@ typedef struct SyncRun {
     AprRunner *r;
     HANDLE     started;      /* set once the loop is definitely in flight */
     volatile LONG finished;  /* 1 once apr_runner_run() has RETURNED */
+
+    /* 1 once the loop has fired APR_RUN_EV_STOPPED, which it does after
+     * apr_graph_stop and therefore after every file is closed -- and, more to
+     * the point here, BEFORE it releases the event apr_runner_destroy waits
+     * on. That makes it the exact thing destroy promises to have waited for,
+     * with no scheduling window between the two. `finished` is raised by the
+     * line AFTER apr_runner_run() returns, which is a few instructions later
+     * still, so it is asserted below where it is settled rather than where it
+     * is racing. */
+    volatile LONG stopped;
 } SyncRun;
+
+static void sync_observer(void *user, const AprRunNotice *n)
+{
+    SyncRun *sr = (SyncRun *)user;
+    if (n->ev == APR_RUN_EV_STOPPED) InterlockedExchange(&sr->stopped, 1);
+}
 
 static DWORD WINAPI sync_run_thread(void *param)
 {
@@ -558,20 +579,23 @@ TEST(destroy_waits_for_a_run_on_someone_elses_thread)
 
     ASSERT_TRUE(fixture_up(&f, L"m28sync", NULL));
 
+    memset(&sr, 0, sizeof sr);
+
     memset(&cfg, 0, sizeof cfg);
     cfg.graph       = f.g;
     cfg.duration_ms = 400;          /* long enough to still be running below */
     cfg.tick_ms     = 10;
+    cfg.observer    = sync_observer;
+    cfg.user        = &sr;
     ASSERT_OK(apr_runner_create(&cfg, &r));
 
-    memset(&sr, 0, sizeof sr);
     sr.r       = r;
     sr.started = CreateEventW(NULL, TRUE, FALSE, NULL);
     ASSERT_NOT_NULL(sr.started);
 
     th = CreateThread(NULL, 0, sync_run_thread, &sr, 0, NULL);
     ASSERT_NOT_NULL(th);
-    ASSERT_EQ_INT(WAIT_OBJECT_0, (long long)WaitForSingleObject(sr.started, 5000));
+    ASSERT_EQ_INT(WAIT_OBJECT_0, (long long)WaitForSingleObject(sr.started, APR_TEST_WAIT_MS));
 
     /* Wait until the loop is genuinely inside itself, so that destroy really
      * has something to wait for rather than arriving before or after. */
@@ -582,12 +606,19 @@ TEST(destroy_waits_for_a_run_on_someone_elses_thread)
     e = apr_runner_destroy(r);
     ASSERT_FALSE(apr_failed(&e));
 
-    /* The ordering assertion. If destroy returned while the loop was still
+    /* THE ORDERING ASSERTION. If destroy returned while the loop was still
      * running, this is 0 -- and everything the loop touched afterwards was
-     * freed memory. */
-    ASSERT_EQ_INT(1, (long long)sr.finished);
+     * freed memory. RED against the ordering defect in apr_runner_run: destroy
+     * came back in a millisecond, long before the loop had stopped anything.
+     *
+     * The loop raises this before it releases destroy, so there is no window
+     * here to lose; `finished`, which the calling thread raises a few
+     * instructions after the loop lets go, is asserted once the thread has
+     * been joined. */
+    ASSERT_EQ_INT(1, (long long)sr.stopped);
 
     WaitForSingleObject(th, INFINITE);
+    ASSERT_EQ_INT(1, (long long)sr.finished);
     CloseHandle(th);
     CloseHandle(sr.started);
     fixture_down(&f);

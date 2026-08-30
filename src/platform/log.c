@@ -54,6 +54,9 @@ static volatile LONG g_running;
  * answer is to leave the log alone, not to free out from under it. */
 #define APR_LOG_JOIN_MS 2000u
 
+/* 0 = APR_LOG_JOIN_MS. See apr_log_test_set_join_ms in log.h. */
+static volatile LONG g_join_ms_override;
+
 static AprLogSink g_sink;
 static void      *g_sink_user;
 static HANDLE     g_file   = INVALID_HANDLE_VALUE;
@@ -343,6 +346,17 @@ AprErr apr_log_init(const AprLogConfig *cfg)
     return err;
 }
 
+void apr_log_test_set_join_ms(unsigned ms)
+{
+    InterlockedExchange(&g_join_ms_override, (LONG)ms);
+}
+
+static DWORD log_join_ms(void)
+{
+    LONG ms = InterlockedCompareExchange(&g_join_ms_override, 0, 0);
+    return ms > 0 ? (DWORD)ms : APR_LOG_JOIN_MS;
+}
+
 AprErr apr_log_shutdown(void)
 {
     HANDLE thread = g_thread;
@@ -362,7 +376,7 @@ AprErr apr_log_shutdown(void)
      * second leak. */
     if (thread) {
         if (g_wake) SetEvent(g_wake);
-        if (apr_join_wait(thread, APR_LOG_JOIN_MS) == APR_JOIN_ABANDONED)
+        if (apr_join_wait(thread, log_join_ms()) == APR_JOIN_ABANDONED)
             return APR_ERR_ABANDONED(L"the log drain thread");
         CloseHandle(thread);
         g_thread = NULL;

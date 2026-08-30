@@ -13,6 +13,7 @@
  * exercised only through --dry-run, never run.
  */
 #include "test_runner.h"
+#include "test_wait.h"
 
 #include <windows.h>
 #include <stdio.h>
@@ -144,6 +145,25 @@ static int wav_is_playable(const wchar_t *path, uint32_t *out_data_bytes)
 #define ARGC(...) \
     (int)(sizeof((const wchar_t *const[]){ L"apprecorder", __VA_ARGS__ }) / \
           sizeof(const wchar_t *))
+
+/* THE SHORTEST TAKE A CASE CAN BE MADE FROM.
+ *
+ * Audio costs its own duration and nothing can change that: the mixer renders
+ * exactly the frames wall clock says are due (bus.h), so a case that wants a
+ * file on disk pays for it in real seconds. What CAN be changed is asking for
+ * more than the assertion needs, and most of these cases asked for four
+ * hundred milliseconds in order to assert "the file opens and has audio in
+ * it".
+ *
+ * 0.25 s is about 96,000 bytes at 48 kHz stereo float -- more than twice the
+ * 40,000 the one case that MEASURES the file demands -- and the error only
+ * ever runs the safe way: a busy machine takes longer to reach the duration
+ * and writes more, never less.
+ *
+ * The cases with a health SCHEDULE keep their own, longer durations, because
+ * the schedule is written in frame indices that have to fall inside the run.
+ * They say so where they stand. */
+#define TAKE_S L"0.25"
 
 #define RUN(cap, ...) apr_cli_run(ARGC(__VA_ARGS__), ARGV(__VA_ARGS__), io_of(cap))
 #define PARSE(cap, plan, ...) \
@@ -709,7 +729,7 @@ TEST(a_short_recording_writes_a_playable_file)
 
     tmp_path(path, MAX_PATH, L"rec", L"wav");
     ASSERT_EQ_INT(APR_CLI_OK, RUN(&c, L"--fake", L"440,0,0.25", L"--out", path,
-                                  L"--duration", L"0.4", L"--quiet"));
+                                  L"--duration", TAKE_S, L"--quiet"));
     ASSERT_TRUE(file_exists(path));
     ASSERT_TRUE(wav_is_playable(path, &data));
     /* 0.4 s at 48 kHz stereo float32 is 153,600 bytes; allow the lookbehind. */
@@ -729,7 +749,7 @@ TEST(several_buses_in_one_invocation_each_get_their_own_file)
     ASSERT_EQ_INT(APR_CLI_OK, RUN(&c,
         L"--bus", L"One", L"--fake", L"440,0,0.25", L"--out", a,
         L"--bus", L"Two", L"--fake", L"220,0,0.25", L"--out", b,
-        L"--duration", L"0.4", L"--quiet"));
+        L"--duration", TAKE_S, L"--quiet"));
 
     ASSERT_TRUE(wav_is_playable(a, NULL));
     ASSERT_TRUE(wav_is_playable(b, NULL));
@@ -747,7 +767,7 @@ TEST(one_bus_can_be_written_to_two_formats_at_once)
 
     ASSERT_EQ_INT(APR_CLI_OK, RUN(&c, L"--fake", L"440,0,0.25",
                                   L"--out", wav, L"--out", mp3,
-                                  L"--duration", L"0.4", L"--quiet"));
+                                  L"--duration", TAKE_S, L"--quiet"));
     ASSERT_TRUE(wav_is_playable(wav, NULL));
     ASSERT_TRUE(file_exists(mp3));
     ASSERT_GT_INT(500, (int)file_size(mp3));
@@ -790,7 +810,7 @@ TEST(one_bus_can_be_written_to_two_formats_at_once)
 static AprCliExit record_once(Cap *c, const wchar_t *path)
 {
     return RUN(c, L"--fake", L"440,0,0.25", L"--out", path,
-               L"--duration", L"0.4", L"--quiet");
+               L"--duration", TAKE_S, L"--quiet");
 }
 
 /* "mix.wav" -> "mix-2.wav": what the collision policy does with a name that
@@ -884,7 +904,7 @@ TEST(the_take_that_moved_aside_is_named_out_loud)
     ASSERT_EQ_INT(APR_CLI_OK, record_once(&c, path));
 
     ASSERT_EQ_INT(APR_CLI_OK, RUN(&c, L"--fake", L"440,0,0.25", L"--out", path,
-                                  L"--duration", L"0.4"));
+                                  L"--duration", TAKE_S));
     printf("      said: %ls", c.out);
     printf("      err:  %ls", c.err);
     /* The warning names the file the audio really went to, and so does the
@@ -915,7 +935,7 @@ TEST(an_output_name_may_be_a_template_and_the_file_is_the_expansion)
     DeleteFileW(want);
 
     ASSERT_EQ_INT(APR_CLI_OK, RUN(&c, L"--bus", L"Voice", L"--fake", L"440,0,0.25",
-                                  L"--out", tmpl, L"--duration", L"0.4", L"--quiet"));
+                                  L"--out", tmpl, L"--duration", TAKE_S, L"--quiet"));
     printf("      template: [%ls]\n", tmpl);
     printf("      file:     [%ls]\n", want);
     ASSERT_TRUE(wav_is_playable(want, NULL));
@@ -946,7 +966,7 @@ TEST(two_buses_may_share_one_template_because_it_names_two_files)
     ASSERT_EQ_INT(APR_CLI_OK, RUN(&c,
         L"--bus", L"One", L"--fake", L"440,0,0.25", L"--out", tmpl,
         L"--bus", L"Two", L"--fake", L"220,0,0.25", L"--out", tmpl,
-        L"--duration", L"0.4", L"--quiet"));
+        L"--duration", TAKE_S, L"--quiet"));
 
     ASSERT_TRUE(wav_is_playable(a, NULL));
     ASSERT_TRUE(wav_is_playable(b, NULL));
@@ -1109,8 +1129,10 @@ TEST(a_dead_source_is_not_also_described_as_muted)
     warn_line(APR_S_WARN_SOURCE_MUTED,  L"440,0,0.25,muted,dead", muted,  512);
     warn_line(APR_S_WARN_SOURCE_EXITED, L"440,0,0.25,muted,dead", exited, 512);
 
+    /* Both states are true from the first frame, so this one needs no
+     * schedule and no room for one. */
     ASSERT_EQ_INT(APR_CLI_INCOMPLETE, RUN(&c, L"--fake", L"440,0,0.25,muted,dead",
-                                          L"--out", path, L"--duration", L"0.4"));
+                                          L"--out", path, L"--duration", TAKE_S));
     ASSERT_EQ_INT(1, said_times(&c, exited));
     ASSERT_EQ_INT(0, said_times(&c, muted));
     ASSERT_TRUE(wav_is_playable(path, NULL));
@@ -1151,7 +1173,7 @@ TEST(one_source_failing_does_not_take_the_other_down)
     ASSERT_EQ_INT(APR_CLI_INCOMPLETE, RUN(&c,
         L"--bus", L"Good", L"--fake", L"440,0,0.25",      L"--out", good,
         L"--bus", L"Bad",  L"--fake", L"220,0,0.25,dead", L"--out", bad,
-        L"--duration", L"0.4"));
+        L"--duration", TAKE_S));
     ASSERT_TRUE(wav_is_playable(good, NULL));
     ASSERT_TRUE(wav_is_playable(bad, NULL));
     DeleteFileW(good);
@@ -1212,7 +1234,6 @@ TEST(a_stop_request_finalizes_every_file_rather_than_abandoning_it)
     RecThread r;
     HANDLE    th;
     int       saw_handler = 0;
-    int       i;
 
     memset(&r, 0, sizeof r);
     tmp_path(r.path, MAX_PATH, L"stop", L"wav");
@@ -1228,18 +1249,18 @@ TEST(a_stop_request_finalizes_every_file_rather_than_abandoning_it)
     /* Wait for the recording to be genuinely under way: the console control
      * handler is installed for exactly as long as the record loop runs, so it
      * is also the signal that we are inside it. */
-    WaitForSingleObject(r.started, 5000);
-    for (i = 0; i < 500 && !saw_handler; i++) {
-        saw_handler = apr_cli_test_ctrl_handler_installed();
-        if (!saw_handler) Sleep(10);
-    }
+    WaitForSingleObject(r.started, APR_TEST_WAIT_MS);
+    APR_WAIT_UNTIL(saw_handler, apr_cli_test_ctrl_handler_installed());
     ASSERT_TRUE(saw_handler);
-    Sleep(200);
+    /* Long enough that the take has audio in it -- the assertion below is that
+     * an INTERRUPTED recording is a playable file, so there has to be
+     * something to have interrupted. */
+    Sleep(150);
 
     /* Exactly what the Ctrl+C handler does. */
     apr_cli_request_stop();
 
-    ASSERT_EQ_INT(WAIT_OBJECT_0, (int)WaitForSingleObject(th, 15000));
+    ASSERT_EQ_INT(WAIT_OBJECT_0, (int)WaitForSingleObject(th, APR_TEST_WAIT_MS));
     CloseHandle(th);
     CloseHandle(r.started);
 
@@ -1287,7 +1308,7 @@ TEST(a_pause_request_before_anything_starts_is_harmless)
 
     tmp_path(path, MAX_PATH, L"prepause", L"wav");
     ASSERT_EQ_INT(APR_CLI_OK, RUN(&c, L"--fake", L"440,0,0.25", L"--out", path,
-                                  L"--duration", L"0.4", L"--quiet"));
+                                  L"--duration", TAKE_S, L"--quiet"));
     ASSERT_TRUE(wav_is_playable(path, NULL));
     DeleteFileW(path);
 }
@@ -1299,16 +1320,19 @@ TEST(a_paused_recording_leaves_the_pause_out_of_the_file)
     Cap       control;
     wchar_t   ctlpath[MAX_PATH];
     uint32_t  paused_bytes = 0, control_bytes = 0;
-    int       i, saw_handler = 0;
+    int       saw_handler = 0;
 
-    /* The control: 700 ms of wall clock, none of it paused. */
+    /* The control: 500 ms of wall clock, none of it paused. */
     tmp_path(ctlpath, MAX_PATH, L"pausectl", L"wav");
     ASSERT_EQ_INT(APR_CLI_OK, RUN(&control, L"--fake", L"440,0,0.25",
-                                  L"--out", ctlpath, L"--duration", L"0.7",
+                                  L"--out", ctlpath, L"--duration", L"0.5",
                                   L"--quiet"));
     ASSERT_TRUE(wav_is_playable(ctlpath, &control_bytes));
 
-    /* The take: the same 700 ms, with 400 ms of it paused. */
+    /* The take: the same 500 ms, with 300 ms of it paused -- so it holds
+     * about 200 ms of audio against the control's 500, and the assertion that
+     * it is under three quarters of the control has the same margin the
+     * seven-hundred-millisecond version had. */
     memset(&r, 0, sizeof r);
     tmp_path(r.path, MAX_PATH, L"pause", L"wav");
     r.io.write = cap_write;
@@ -1319,28 +1343,25 @@ TEST(a_paused_recording_leaves_the_pause_out_of_the_file)
 
     th = CreateThread(NULL, 0, record_until_stopped, &r, 0, NULL);
     ASSERT_NOT_NULL(th);
-    WaitForSingleObject(r.started, 5000);
-    for (i = 0; i < 500 && !saw_handler; i++) {
-        saw_handler = apr_cli_test_ctrl_handler_installed();
-        if (!saw_handler) Sleep(10);
-    }
+    WaitForSingleObject(r.started, APR_TEST_WAIT_MS);
+    APR_WAIT_UNTIL(saw_handler, apr_cli_test_ctrl_handler_installed());
     ASSERT_TRUE(saw_handler);
 
-    Sleep(150);
+    Sleep(100);
     apr_cli_request_pause();
-    Sleep(400);
+    Sleep(300);
     apr_cli_request_resume();
-    Sleep(150);
+    Sleep(100);
     apr_cli_request_stop();
 
-    ASSERT_EQ_INT(WAIT_OBJECT_0, (int)WaitForSingleObject(th, 15000));
+    ASSERT_EQ_INT(WAIT_OBJECT_0, (int)WaitForSingleObject(th, APR_TEST_WAIT_MS));
     CloseHandle(th);
     CloseHandle(r.started);
 
     ASSERT_EQ_INT(APR_CLI_OK, r.rc);
     ASSERT_TRUE(wav_is_playable(r.path, &paused_bytes));
 
-    printf("      control %lu bytes for 700 ms; paused take %lu bytes for the "
+    printf("      control %lu bytes for 500 ms; paused take %lu bytes for the "
            "same wall clock\n",
            (unsigned long)control_bytes, (unsigned long)paused_bytes);
 
@@ -1360,7 +1381,7 @@ TEST(both_transitions_appear_in_the_transcript)
      * to prevent. Not --quiet, because the transcript IS the assertion. */
     RecThread r;
     HANDLE    th;
-    int       i, saw_handler = 0;
+    int       saw_handler = 0;
 
     memset(&r, 0, sizeof r);
     tmp_path(r.path, MAX_PATH, L"pausesay", L"wav");
@@ -1373,21 +1394,21 @@ TEST(both_transitions_appear_in_the_transcript)
 
     th = CreateThread(NULL, 0, record_until_stopped, &r, 0, NULL);
     ASSERT_NOT_NULL(th);
-    WaitForSingleObject(r.started, 5000);
-    for (i = 0; i < 500 && !saw_handler; i++) {
-        saw_handler = apr_cli_test_ctrl_handler_installed();
-        if (!saw_handler) Sleep(10);
-    }
+    WaitForSingleObject(r.started, APR_TEST_WAIT_MS);
+    APR_WAIT_UNTIL(saw_handler, apr_cli_test_ctrl_handler_installed());
     ASSERT_TRUE(saw_handler);
 
-    Sleep(150);
+    /* Both transitions have to have HAPPENED; how long each state lasted is
+     * not part of the assertion. A tick is 10 ms, so these are ten of them
+     * each side and thirty in the middle. */
+    Sleep(100);
     apr_cli_request_pause();
-    Sleep(250);
+    Sleep(200);
     apr_cli_request_resume();
-    Sleep(150);
+    Sleep(100);
     apr_cli_request_stop();
 
-    ASSERT_EQ_INT(WAIT_OBJECT_0, (int)WaitForSingleObject(th, 15000));
+    ASSERT_EQ_INT(WAIT_OBJECT_0, (int)WaitForSingleObject(th, APR_TEST_WAIT_MS));
     CloseHandle(th);
     CloseHandle(r.started);
 
@@ -1414,7 +1435,7 @@ TEST(the_console_key_reader_stays_out_of_a_redirected_run)
 
     tmp_path(path, MAX_PATH, L"nokeys", L"wav");
     ASSERT_EQ_INT(APR_CLI_OK, RUN(&c, L"--fake", L"440,0,0.25", L"--out", path,
-                                  L"--duration", L"0.3"));
+                                  L"--duration", TAKE_S));
     /* And with no reader, the hint that names the key is not printed either. */
     ASSERT_FALSE(said(&c, apr_str(APR_S_CLI_PAUSE_HINT)));
     ASSERT_FALSE(apr_cli_test_console_keys());
@@ -1431,7 +1452,7 @@ TEST(a_stop_request_before_anything_starts_is_harmless)
 
     /* and it must not leak into the next recording */
     ASSERT_EQ_INT(APR_CLI_OK, RUN(&c, L"--fake", L"440,0,0.25", L"--out", path,
-                                  L"--duration", L"0.3", L"--quiet"));
+                                  L"--duration", TAKE_S, L"--quiet"));
     ASSERT_TRUE(wav_is_playable(path, NULL));
     DeleteFileW(path);
 }
@@ -1533,7 +1554,7 @@ TEST(a_run_whose_every_output_failed_to_open_is_not_a_success)
      * header pages and the output never opens. */
     apr_ogg_test_fail_after_bytes = 1;
     ASSERT_EQ_INT(APR_CLI_OUTPUT, RUN(&c, L"--fake", L"440", L"--out", opus,
-                                      L"--duration", L"0.3", L"--json"));
+                                      L"--duration", TAKE_S, L"--json"));
     apr_ogg_test_fail_after_bytes = 0;
 
     /* Exit 4 -- "a file could not be created" -- and the document says so
@@ -1559,7 +1580,7 @@ TEST(one_output_failing_while_another_records_is_still_incomplete_not_a_failure)
     apr_ogg_test_fail_after_bytes = 1;
     ASSERT_EQ_INT(APR_CLI_INCOMPLETE, RUN(&c, L"--fake", L"440",
                                           L"--out", wav, L"--out", opus,
-                                          L"--duration", L"0.3", L"--json"));
+                                          L"--duration", TAKE_S, L"--json"));
     apr_ogg_test_fail_after_bytes = 0;
 
     ASSERT_TRUE(said(&c, L"\"exitCode\": 6"));

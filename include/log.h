@@ -132,6 +132,19 @@ AprErr apr_log_shutdown(void);
  * loggers; do not race it against the drain. */
 void apr_log_set_sink(AprLogSink sink, void *user);
 
+/* TEST ONLY. How long apr_log_shutdown waits for the drain thread before it
+ * gives up and reports the abandonment above. 0 restores the shipped two
+ * seconds.
+ *
+ * The give-up path is only reachable with a wedged sink, and what it PROVES --
+ * that the failure is reported, that nothing is freed, and that a later call
+ * finishes the job -- has nothing to do with how long the wait was. Without
+ * this seam the one case that reaches it pays four real seconds (two waits of
+ * two), which was four per cent of the whole suite for a constant nobody
+ * asserts. Same shape as action_wav.c's write gate and the controller's close
+ * wait: the timeout is a knob, the behaviour at the end of it is the test. */
+void apr_log_test_set_join_ms(unsigned ms);
+
 /* ---------------------------------------------------------------------------
  * Level. Both are thread-safe and allocation-free; the getter is a relaxed
  * load, cheap enough for the hot path.

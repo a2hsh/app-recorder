@@ -397,6 +397,12 @@ TEST(a_shutdown_that_cannot_join_its_drain_thread_says_so_and_frees_nothing)
     }
     ASSERT_NE_INT(0, (long long)g_block_calls);
 
+    /* The bound is a knob and the behaviour at the end of it is the test
+     * (log.h), so it is turned right down: this case is the only one that
+     * reaches the give-up path, and it used to pay four real seconds -- two
+     * waits of two -- to assert nothing about the number. */
+    apr_log_test_set_join_ms(50);
+
     /* RED before the fix: this returned void, waited 2 s, and then tore the
      * log down around a thread still inside emit_line(). */
     e = apr_log_shutdown();
@@ -411,7 +417,10 @@ TEST(a_shutdown_that_cannot_join_its_drain_thread_says_so_and_frees_nothing)
 
     /* Release the sink, then retry. The retry joins the thread, so everything
      * asserted after it is settled rather than slept for -- and the retry
-     * succeeding is what makes the deliberate leak recoverable. */
+     * succeeding is what makes the deliberate leak recoverable. The shipped
+     * bound goes back first: this one has to SUCCEED, so it must be allowed to
+     * wait as long as the product does. */
+    apr_log_test_set_join_ms(0);
     SetEvent(g_block_ev);
     ASSERT_OK(apr_log_shutdown());
 

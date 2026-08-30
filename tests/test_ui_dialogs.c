@@ -44,6 +44,7 @@
  *   more than it tests the dialog.
  */
 #include "test_runner.h"
+#include "test_wait.h"
 
 #include <windows.h>
 #include <commctrl.h>
@@ -410,7 +411,7 @@ static int ui_start(UiHost *h)
     if (!h->ready) return 0;
     h->thread = CreateThread(NULL, 0, ui_thread, h, 0, NULL);
     if (!h->thread) return 0;
-    WaitForSingleObject(h->ready, 20000);
+    WaitForSingleObject(h->ready, APR_TEST_WAIT_MS);
     return !h->failed && h->frame != NULL;
 }
 
@@ -418,7 +419,7 @@ static void ui_stop(UiHost *h)
 {
     if (h->frame) PostMessageW(h->frame, WM_CLOSE, 0, 0);
     if (h->thread) {
-        if (WaitForSingleObject(h->thread, 30000) != WAIT_OBJECT_0) {
+        if (WaitForSingleObject(h->thread, APR_TEST_WAIT_MS) != WAIT_OBJECT_0) {
             printf("      WARNING: UI thread did not exit\n");
             TerminateThread(h->thread, 1);
         }
@@ -436,15 +437,14 @@ static void command(UiHost *h, int cmd)
     PostMessageW(h->frame, WM_COMMAND, (WPARAM)cmd, 0);
 }
 
-static int wait_until(int (*pred)(UiHost *), UiHost *h, int ms)
+/* No ceiling argument: see tests/test_wait.h for why there is one number
+ * and it is not tuned per site. */
+static int wait_until(int (*pred)(UiHost *), UiHost *h)
 {
-    int waited = 0;
-    while (waited < ms) {
-        if (pred(h)) return 1;
-        Sleep(10);
-        waited += 10;
-    }
-    return pred(h);
+    int ok;
+
+    APR_WAIT_UNTIL(ok, pred(h));
+    return ok;
 }
 
 static int is_recording(UiHost *h) { return apr_controller_recording(h->ctl); }
@@ -458,18 +458,14 @@ static int not_recording(UiHost *h) { return !apr_controller_recording(h->ctl); 
  * state and then reading the sentence is a race the test loses about one run
  * in three, and losing it would have looked like a defect in the
  * announcement rather than in the test. */
-static int wait_for_said(UiHost *h, const wchar_t *needle, int ms)
+static int wait_for_said(UiHost *h, const wchar_t *needle)
 {
     wchar_t said[1024];
-    int waited = 0;
+    int ok;
 
-    for (;;) {
-        apr_controller_last_announcement(h->ctl, said, 1024);
-        if (wcsstr(said, needle)) return 1;
-        if (waited >= ms) return 0;
-        Sleep(10);
-        waited += 10;
-    }
+    APR_WAIT_UNTIL(ok, (apr_controller_last_announcement(h->ctl, said, 1024),
+                        wcsstr(said, needle) != NULL));
+    return ok;
 }
 
 /* ==========================================================================
@@ -491,7 +487,7 @@ TEST(a_new_window_starts_with_an_empty_graph_and_nothing_to_record)
      * menu item says nothing at all to someone who cannot see it, so the
      * refusal is a sentence, and this is what asserts it exists. */
     command(&h, APR_CMD_RECORD_START);
-    Sleep(200);
+    (void)wait_for_said(&h, apr_str(APR_S_UI_ANN_NOTHING_TO_RECORD));
     apr_controller_last_announcement(h.ctl, said, 1024);
     printf("      \"%ls\"\n", said);
     ASSERT_WSTR_EQ(apr_str(APR_S_UI_ANN_NOTHING_TO_RECORD), said);
@@ -543,7 +539,7 @@ TEST(recording_starts_stops_and_announces_both)
     ASSERT_FALSE(apr_failed(&e));
 
     command(&h, APR_CMD_RECORD_START);
-    ASSERT_TRUE(wait_until(is_recording, &h, 8000));
+    ASSERT_TRUE(wait_until(is_recording, &h));
 
     /* wait_for_said, for the reason its own comment gives about the STOP case:
      * the flag and the sentence are published a few instructions apart, so
@@ -551,20 +547,26 @@ TEST(recording_starts_stops_and_announces_both)
      * loses -- and losing it looks exactly like a defect in the announcement.
      * The controller publishes the two adjacently now; this is still the
      * honest way to ask. */
-    ASSERT_TRUE(wait_for_said(&h, apr_str(APR_S_UI_ANN_RECORD_STARTED), 5000));
+    ASSERT_TRUE(wait_for_said(&h, apr_str(APR_S_UI_ANN_RECORD_STARTED)));
     apr_controller_last_announcement(h.ctl, said, 1024);
     printf("      start: \"%ls\"\n", said);
     ASSERT_WSTR_EQ(apr_str(APR_S_UI_ANN_RECORD_STARTED), said);
 
-    Sleep(400);
+    /* The clock is sampled by the loop every tick, so wait for it to move
+     * rather than for four hundred milliseconds to pass. */
+    {
+        int ticked;
+        APR_WAIT_UNTIL(ticked, apr_controller_elapsed_ms(h.ctl) > 0);
+        ASSERT_TRUE(ticked);
+    }
     ASSERT_GT_INT(0, (int)apr_controller_elapsed_ms(h.ctl));
 
     command(&h, APR_CMD_RECORD_STOP);
-    ASSERT_TRUE(wait_until(not_recording, &h, 15000));
+    ASSERT_TRUE(wait_until(not_recording, &h));
 
     /* The stop sentence carries the duration, so it is a whole sentence with
      * an insert rather than a bare "Stopped." */
-    ASSERT_TRUE(wait_for_said(&h, L"00:00:0", 5000));
+    ASSERT_TRUE(wait_for_said(&h, L"00:00:0"));
     apr_controller_last_announcement(h.ctl, said, 1024);
     printf("      stop:  \"%ls\"\n", said);
 
@@ -615,21 +617,21 @@ TEST(editing_is_refused_out_loud_while_a_recording_runs)
     ASSERT_FALSE(apr_failed(&e));
 
     command(&h, APR_CMD_RECORD_START);
-    ASSERT_TRUE(wait_until(is_recording, &h, 8000));
+    ASSERT_TRUE(wait_until(is_recording, &h));
 
     /* graph.h: the shape must not change while a tick is in flight. The menu
      * items are greyed, and the command STILL says why when it arrives by
      * accelerator -- because grey is not a message this application's first
      * user receives. */
     command(&h, APR_CMD_ADD_BUS);
-    Sleep(250);
+    (void)wait_for_said(&h, apr_str(APR_S_UI_ANN_BUSY_RECORDING));
     apr_controller_last_announcement(h.ctl, said, 1024);
     printf("      \"%ls\"\n", said);
     ASSERT_WSTR_EQ(apr_str(APR_S_UI_ANN_BUSY_RECORDING), said);
     ASSERT_EQ_INT(1, (int)apr_graph_bus_count(g));
 
     command(&h, APR_CMD_RECORD_STOP);
-    ASSERT_TRUE(wait_until(not_recording, &h, 15000));
+    ASSERT_TRUE(wait_until(not_recording, &h));
     ui_stop(&h);
     DeleteFileW(path);
 }
@@ -646,7 +648,7 @@ TEST(closing_an_idle_window_is_not_questioned)
     if (!ui_start(&h)) { printf("      SKIPPED: no window\n"); ui_stop(&h); return; }
     ASSERT_FALSE(apr_controller_recording(h.ctl));
     PostMessageW(h.frame, WM_CLOSE, 0, 0);
-    ASSERT_EQ_INT(WAIT_OBJECT_0, (int)WaitForSingleObject(h.thread, 20000));
+    ASSERT_EQ_INT(WAIT_OBJECT_0, (int)WaitForSingleObject(h.thread, APR_TEST_WAIT_MS));
     CloseHandle(h.thread);
     h.thread = NULL;
     h.frame = NULL;

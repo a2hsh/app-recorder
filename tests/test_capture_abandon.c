@@ -28,6 +28,7 @@
  * is a process tap on this test's own PID, whose tree renders nothing.
  */
 #include "test_runner.h"
+#include "test_wait.h"
 
 #include "capture/capture_fake.h"
 #include "capture/capture_process.h"
@@ -338,9 +339,23 @@ TEST(mute_polling_does_not_run_on_the_pump_thread)
         return;
     }
 
-    /* Two mute periods, so the poller has certainly run whether or not it got
-     * a session on the first try. */
-    Sleep(1200);
+    /* Two mute polls, so the poller has certainly run whether or not it got a
+     * session on the first try -- WAITED FOR rather than slept through. It
+     * used to be a flat 1.2 s, which is both longer than the healthy case
+     * needs and, on a machine where the session takes longer to appear,
+     * shorter than the unhealthy one does. */
+    {
+        int polled;
+        /* BOUNDED: on a machine with no session to find this never becomes
+         * true, and the assertions below are what report that -- so it must
+         * not spend a minute getting there. Five seconds is four times the
+         * flat 1.2 s this replaced. */
+        APR_WAIT_UNTIL_MS(polled,
+                          apr_capture_process_probe(c, &probe) != 0 &&
+                          probe.mute_polls >= 2 && probe.mute_thread_id != 0,
+                          5000);
+        (void)polled;
+    }
 
     ASSERT_TRUE(apr_capture_process_probe(c, &probe) != 0);
     ASSERT_NE_INT(0, (long long)probe.pump_thread_id);

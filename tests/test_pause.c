@@ -57,6 +57,7 @@
  *   tick value, so a three-second pause costs microseconds.
  */
 #include "test_runner.h"
+#include "test_wait.h"
 
 #include <windows.h>
 #include <math.h>
@@ -1203,16 +1204,14 @@ static void fixture_down(Fixture *f)
     DeleteFileW(f->path);
 }
 
-/* Wait for a condition the recording thread will make true, bounded. */
-static int wait_until(int (*pred)(AprRunner *), AprRunner *r, int ms)
+/* Wait for a condition the recording thread will make true. One ceiling and
+ * one step, both tests/test_wait.h's. */
+static int wait_until(int (*pred)(AprRunner *), AprRunner *r)
 {
-    int waited = 0;
-    while (waited < ms) {
-        if (pred(r)) return 1;
-        Sleep(5);
-        waited += 5;
-    }
-    return pred(r);
+    int ok;
+
+    APR_WAIT_UNTIL(ok, pred(r));
+    return ok;
 }
 
 static int is_running(AprRunner *r) { return apr_runner_running(r); }
@@ -1240,23 +1239,29 @@ TEST(the_runner_announces_the_pause_and_the_resume_in_that_order)
     ASSERT_OK(apr_runner_create(&cfg, &r));
     ASSERT_FALSE(apr_runner_paused(r));
     ASSERT_OK(apr_runner_run_async(r));
-    ASSERT_TRUE(wait_until(is_running, r, 5000));
-    Sleep(120);
+    /* WHAT IS ASSERTED HERE IS AN EVENT COUNT AND AN ORDER, not a duration:
+     * one PAUSED, one RESUMED, in that order, however long each state lasted.
+     * So each span is a handful of the loop's ten-millisecond ticks rather
+     * than a fifth of a second, and the transitions themselves are waited for
+     * rather than slept through. */
+    ASSERT_TRUE(wait_until(is_running, r));
+    Sleep(50);
 
     apr_runner_request_pause(r);
-    ASSERT_TRUE(wait_until(is_paused, r, 5000));
-    Sleep(200);
+    ASSERT_TRUE(wait_until(is_paused, r));
+    Sleep(60);
 
-    /* Asked for twice is one state and one sentence. */
+    /* Asked for twice is one state and one sentence. Six ticks is long enough
+     * for a second notice to have arrived if one were ever going to. */
     apr_runner_request_pause(r);
     Sleep(60);
 
     apr_runner_request_resume(r);
-    ASSERT_TRUE(wait_until(not_paused, r, 5000));
-    Sleep(120);
+    ASSERT_TRUE(wait_until(not_paused, r));
+    Sleep(50);
 
     apr_runner_request_stop(r);
-    ASSERT_TRUE(apr_runner_wait(r, 20000));
+    ASSERT_TRUE(apr_runner_wait(r, APR_TEST_WAIT_MS));
 
     ASSERT_EQ_INT(1, t.count[APR_RUN_EV_PAUSED]);
     ASSERT_EQ_INT(1, t.count[APR_RUN_EV_RESUMED]);
@@ -1294,11 +1299,11 @@ TEST(elapsed_time_is_recorded_time_and_stops_while_paused)
     ASSERT_OK(apr_runner_create(&cfg, &r));
     t0 = GetTickCount();
     ASSERT_OK(apr_runner_run_async(r));
-    ASSERT_TRUE(wait_until(is_running, r, 5000));
+    ASSERT_TRUE(wait_until(is_running, r));
     Sleep(300);
 
     apr_runner_request_pause(r);
-    ASSERT_TRUE(wait_until(is_paused, r, 5000));
+    ASSERT_TRUE(wait_until(is_paused, r));
     Sleep(50);
     at_pause = apr_runner_elapsed_ms(r);
 
@@ -1306,11 +1311,11 @@ TEST(elapsed_time_is_recorded_time_and_stops_while_paused)
     after_pause = apr_runner_elapsed_ms(r);
 
     apr_runner_request_resume(r);
-    ASSERT_TRUE(wait_until(not_paused, r, 5000));
+    ASSERT_TRUE(wait_until(not_paused, r));
     Sleep(300);
 
     apr_runner_request_stop(r);
-    ASSERT_TRUE(apr_runner_wait(r, 20000));
+    ASSERT_TRUE(apr_runner_wait(r, APR_TEST_WAIT_MS));
     wall = GetTickCount() - t0;
 
     final_ms  = apr_runner_elapsed_ms(r);
@@ -1342,10 +1347,14 @@ TEST(a_paused_recording_still_produces_one_playable_file_of_recorded_length)
     AprRunner *r = NULL;
     uint32_t plain_bytes, held_bytes;
 
+    /* TWO RUNS OF THE SAME WALL CLOCK, one of them paused for half of it.
+     * The numbers are halved from the six-hundred-millisecond version they
+     * were written at; every ratio below is unchanged, because both sides
+     * moved together. */
     ASSERT_TRUE(fixture_up(&plain, L"plain"));
     memset(&cfg, 0, sizeof cfg);
     cfg.graph       = plain.g;
-    cfg.duration_ms = 600;
+    cfg.duration_ms = 300;
     ASSERT_OK(apr_runner_create(&cfg, &r));
     ASSERT_OK(apr_runner_run(r));
     apr_runner_destroy(r);
@@ -1358,20 +1367,20 @@ TEST(a_paused_recording_still_produces_one_playable_file_of_recorded_length)
     cfg.graph = held.g;               /* stopped by hand, not by duration */
     ASSERT_OK(apr_runner_create(&cfg, &r));
     ASSERT_OK(apr_runner_run_async(r));
-    ASSERT_TRUE(wait_until(is_running, r, 5000));
-    Sleep(300);
+    ASSERT_TRUE(wait_until(is_running, r));
+    Sleep(150);
     apr_runner_request_pause(r);
-    ASSERT_TRUE(wait_until(is_paused, r, 5000));
-    Sleep(600);
-    apr_runner_request_resume(r);
-    ASSERT_TRUE(wait_until(not_paused, r, 5000));
+    ASSERT_TRUE(wait_until(is_paused, r));
     Sleep(300);
+    apr_runner_request_resume(r);
+    ASSERT_TRUE(wait_until(not_paused, r));
+    Sleep(150);
     apr_runner_request_stop(r);
-    ASSERT_TRUE(apr_runner_wait(r, 20000));
+    ASSERT_TRUE(apr_runner_wait(r, APR_TEST_WAIT_MS));
     apr_runner_destroy(r);
 
     held_bytes = wav_data_bytes(held.path);
-    printf("      600 ms unpaused: %lu bytes; 1200 ms with a 600 ms pause: "
+    printf("      300 ms unpaused: %lu bytes; 600 ms with a 300 ms pause: "
            "%lu bytes\n", (unsigned long)plain_bytes, (unsigned long)held_bytes);
 
     /* Playable, non-empty, and NOT the length of the wall clock: a mute would
@@ -1403,13 +1412,13 @@ TEST(stopping_while_paused_still_closes_the_files)
 
     ASSERT_OK(apr_runner_create(&cfg, &r));
     ASSERT_OK(apr_runner_run_async(r));
-    ASSERT_TRUE(wait_until(is_running, r, 5000));
-    Sleep(250);
+    ASSERT_TRUE(wait_until(is_running, r));
+    Sleep(150);   /* enough audio that "the file is not empty" means something */
     apr_runner_request_pause(r);
-    ASSERT_TRUE(wait_until(is_paused, r, 5000));
+    ASSERT_TRUE(wait_until(is_paused, r));
 
     apr_runner_request_stop(r);
-    ASSERT_TRUE(apr_runner_wait(r, 20000));
+    ASSERT_TRUE(apr_runner_wait(r, APR_TEST_WAIT_MS));
 
     ASSERT_EQ_INT(1, t.count[APR_RUN_EV_STOPPED]);
     ASSERT_FALSE(apr_runner_paused(r));
