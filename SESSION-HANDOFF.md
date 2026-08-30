@@ -5835,3 +5835,206 @@ same key. See the comment above it in `res/strings.rc`.
   key is another thing the reader can swallow, and Ctrl+C already stops.
 - **No pause button on the canvas.** Pause is a frame command like start and
   stop; the canvas's table is about navigating and editing a graph.
+
+---
+
+## 2026-08-30 — One executable instead of two
+
+### What changed, in one line
+
+`apprecorder.exe` and `apprecorder_ui_app.exe` are now a single
+**WINDOWS-subsystem `apprecorder.exe`**: a command line when it is given a
+command, a window when it is not.
+
+### Sizes (Release, clean build both sides)
+
+| | bytes | KB |
+|---|---:|---:|
+| before: `apprecorder.exe` | 859,136 | 839 |
+| before: `apprecorder_ui_app.exe` | 936,960 | 915 |
+| **before, total** | **1,796,096** | **1,754** |
+| **after: `apprecorder.exe`** | **984,064** | **961** |
+| **saved** | **812,032** | **793 (45%)** |
+
+Back under the 1 MB the design was built around, without spending any of the
+10 MB VST ceiling. (Debug is 3,414,528 bytes; Debug size is not a shipping
+number.) `apprecorder-wait.cmd` is 3,421 bytes and is copied beside the exe by
+a POST_BUILD step.
+
+### The dispatch rule, and why it is not "any argument means CLI"
+
+In `include/frontend.h`; implemented as a pure function in
+`src/app/frontend.c`; every row is a case in `tests/test_frontend.c`.
+
+| argv[1] | front end |
+|---|---|
+| (nothing) | the window, empty |
+| a CLI command — `record`, `list-apps`, `list-devices`, `help`, `version`, `save-session` | the command line |
+| starts with `-` | the command line |
+| a lone `*.json` | the window, **opened on that session** |
+| anything else | **UNKNOWN — refused and named back** |
+
+**Why not "any argument".** Explorer passes a double-clicked file as `argv[1]`,
+so "any argument means CLI" sends a double-clicked session to a command line
+that has never heard of it. The question asked instead is *does argv[1] name a
+command this program has* — asked of `cli.c` through the new
+`apr_cli_command_from_name()`, so there is **one** list of command names in the
+program and adding a command cannot silently make it a filename the window
+opens.
+
+**An unrecognised first argument fails rather than guessing.** `apprecorder
+recrod --out x.wav` used to be a plausible way to open an empty window and lose
+the rest of the line. It now prints the catalog's own `ERR_UNKNOWN_COMMAND` —
+"recrod is not a command apprecorder has" — and exits `APR_CLI_USAGE`. So does
+`apprecorder notes.txt`, and so does `apprecorder my.json --bus X` (a session
+path with more arguments after it is a typed command line, not a double-click).
+
+A double-clicked session goes through the controller's own
+`apr_controller_open_session_and_report()` — split out of `do_open_session()`
+so the announcement (loaded / declined / this file's fault) is word for word
+what File > Open says, rather than a second copy that drifts. It runs **after**
+`apr_ui_app_show`, so the resolve report and the system-capture consent dialog
+have a real parent and a real place in the accessibility tree.
+
+### The apartment
+
+**Decided after the dispatch, from its answer** — `apr_frontend_apartment()`:
+GUI to `CoInitializeEx(COINIT_APARTMENTTHREADED)`, CLI and UNKNOWN to nothing at
+all. It cannot be decided at the top of `main()` now that one entry point serves
+both: STA on the command line's thread changes what the command line is, and MTA
+on the window's thread silently loses every accessible name (`IAccPropServices`
+is valid only on its creating thread). `capture.h`'s apartment section is the
+record of the first time this bit. `test_frontend.c` pins the pairing, and
+`main.c` calls the function rather than hard-coding it, so the test is
+load-bearing.
+
+### The console, and having nowhere to print
+
+`console_attach()` in `src/app/main.c`:
+
+1. `AttachConsole(ATTACH_PARENT_PROCESS)`.
+2. For each standard handle **that is not already live**, open `CONOUT$` /
+   `CONIN$` and `SetStdHandle`. The guard is the whole point: a parent binds a
+   child's handles through `STARTUPINFO` whatever the subsystem, so
+   `apprecorder record ... > out.txt` arrives with `STD_OUTPUT` already on the
+   file. Reopening `CONOUT$` over it would send the output to the screen and
+   leave the file empty.
+3. `GENERIC_READ | GENERIC_WRITE` on `CONOUT$`, not write-only: `cli.c` chooses
+   `WriteConsoleW` vs UTF-8 bytes by whether `GetConsoleMode` succeeds, and
+   `GetConsoleMode` needs read access. Write-only would make every console line
+   take the pipe path and arrive as mojibake. Measured, and asserted in
+   `getconsolemode_needs_a_readable_conout`.
+4. `_wfreopen_s` on the CRT `stdout`/`stderr` we created — and only those — for
+   `log.h`'s `to_stderr` sink and asserts.
+5. `SetConsoleOutputCP(CP_UTF8)` here rather than only inside `apr_cli_main`,
+   because the Windows-floor refusal prints before the command line is entered.
+
+Only the CLI/UNKNOWN paths attach. The windowed path deliberately does not:
+attaching would put the process into the terminal's console group, and a Ctrl+C
+typed at that prompt afterwards would reach a window with no handler for it.
+
+**No console at all** (Explorer, a shortcut, the task scheduler): **no
+`AllocConsole`**. A run with nowhere to print is allowed to *succeed* in silence
+— a scheduled `record --duration 3600` must not pop a black window every night —
+and is never allowed to *fail* in silence. `apr_frontend_should_explain()` is
+that rule; a non-zero exit with no output channel raises a `MessageBoxW` naming
+the exit code and saying where to run it to see what it said
+(`APR_S_ERR_NO_CONSOLE`, new, id **1180**). The Windows floor uses the same
+`report()` helper, so it still reports on both paths and before any window
+exists.
+
+### The scripting cost, and the shim
+
+A PE's subsystem is fixed in its header and `cmd.exe` reads that flag to decide
+whether to wait. A WINDOWS-subsystem process therefore returns to the prompt
+immediately: `apprecorder record ... && upload.ps1` stops sequencing. Accepted
+knowingly; `apprecorder-wait.cmd` restores it with
+`start /wait "" "%~dp0apprecorder.exe" %*` then `exit /b %errorlevel%`.
+
+- **The name is not `apprecorder.cmd` on purpose.** `PATHEXT` puts `.EXE` before
+  `.CMD`, so a `.cmd` beside the `.exe` would never be found by typing
+  `apprecorder` — it would look installed and do nothing.
+- **Measured limitation, documented at the top of the shim:** `start` does not
+  hand its own standard handles to the process it launches, so
+  `apprecorder-wait ... > log.txt` leaves the file empty (the output still
+  appears on the console, via our `AttachConsole`). Redirect the **exe**
+  directly for output, use the shim for sequencing, or use `--log-file`.
+
+### Build-system changes
+
+- `apprecorder_ui_app` target: **gone, not kept as an alias.** An alias would be
+  a second ~990 KB file, which is the whole thing this removes; a tiny launcher
+  shim would be new code and a new process boundary for a name nobody needs —
+  `apprecorder.exe` double-clicked already opens the window.
+- `src/cli/main.c` and `src/uiapp/main.c` deleted; `src/app/main.c` replaces
+  both. `src/app/frontend.c` joins `apprecorder_core` alongside `cli.c`, for the
+  same reason: a rule no test can reach is a rule that drifts.
+- The merged exe links `apprecorder_ui`, which brings `apprecorder_core`, the
+  manifest and `/MANIFEST:NO` with it. `test_ui_*` still link `apprecorder_ui`
+  through the by-name loop — untouched, and all seven pass.
+- `apr_cli_main` is unchanged and still reachable in-process; `tests/test_cli.c`
+  needed no edit.
+- `APR_SESSION_EXT` added to `session.h` — the format owns its extension, and
+  `dialogs.c`'s filter, its default extension and the dispatcher now read one
+  constant instead of three literals.
+
+### Tests
+
+`tests/test_frontend.c`, 22 cases. The rule is asserted in-process; everything
+about the *image* runs the real `apprecorder.exe` with **bounded** waits and
+`TerminateProcess` on overrun, because the bug this file exists to catch — a
+command line that opens a window — is otherwise a hang. Two cases skip
+gracefully when the run has no console of its own (`GetConsoleWindow()`), so a
+failing child can never leave a modal dialog on the author's screen; both were
+verified green in a hidden console.
+
+`the_shipped_image_is_windows_subsystem` reads the subsystem word out of the PE
+header, so a well-meaning revert to CONSOLE fails the suite rather than the
+double-click.
+
+**Red runs watched** (each reverted):
+
+- Guard removed from `adopt_std` (reopen `CONOUT$` over an inherited
+  redirection) gives **4 failing cases**: the pipe is empty for `version`,
+  `--help`, the unknown-command message and the non-ASCII path.
+- `.json` branch disabled in `apr_frontend_choose` gives **2 failing cases**: a
+  lone session file, and the case-insensitive extension.
+- A deadlock found and fixed while writing this: `run_capture` originally waited
+  then read, which hung on `--help` (several KB, more than one pipe buffer) and
+  looked exactly like the hang the file is for. It now drains while the child
+  runs.
+
+### Build and test
+
+Clean `build.cmd Release test` and `build.cmd Debug test` from a wiped `build/`:
+**38 of 38 suites, 100%**, no warnings under `/W4 /WX`. (37 before;
+`test_frontend` is new.)
+
+**Flakiness note, not caused by this change.** While iterating, single ctest runs
+occasionally lost one timing-sensitive suite (`test_ui_behaviour` line 817/1418,
+`test_run_loop`, `test_pause` line 1271) — always a poll loop timing out, a
+different suite each time, and each passed on its own immediately afterwards. It
+was reproduced with `ctest -E test_frontend` too, so it is a machine-load
+property of the announcement-poll suites rather than anything the merge
+introduced. Both final clean runs above were 38/38.
+
+**Safety (AGENTS.md rule 1):** nothing was rendered to any audio device. The only
+recording command any test issues is `--dry-run`, which opens no device and
+writes no file, and the only source named is `--fake`. Tray registration stays
+suppressed by `APPRECORDER_NO_TRAY` in CMake. No Arabic was written — the one new
+catalog entry has English text and an explicit "not translated yet" on the
+Arabic side.
+
+### Left undone, deliberately
+
+- **The window does not yet take a session on the command line as an option.**
+  Only a bare `*.json` opens it. A `--session` for the GUI is a different feature
+  and belongs with whatever asks for it.
+- **No file-type registration.** Nothing writes a ProgID or associates `.json`;
+  the dispatcher is ready for a double-click, but associating an extension is an
+  installer's business and this project has no installer.
+- **The console path's rendering is not asserted end to end.** The pipe path is
+  (UTF-8, including a non-ASCII path); for the console the mechanism is pinned
+  instead — `GetConsoleMode` needs a readable `CONOUT$` — because reading a live
+  console's screen buffer needs a second console, and a console window flashing
+  on this author's screen is not an acceptable test artefact.

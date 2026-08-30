@@ -210,18 +210,10 @@ if(UI_SRC)
     endif()
   endforeach()
 
-  # ---------------------------------------------------------------------------
-  # The windowed front end.
-  #
-  # WIN32_EXECUTABLE so it starts with no console window attached.
-  # src/uiapp/main.c is the only translation unit that decides which front end
-  # owns the process -- which is exactly why apprecorder_ui itself still has no
-  # entry point (see the note above, and the comment at the top of that file).
-  # ---------------------------------------------------------------------------
-  if(EXISTS ${CMAKE_SOURCE_DIR}/src/uiapp/main.c)
-    add_executable(apprecorder_ui_app WIN32 ${CMAKE_SOURCE_DIR}/src/uiapp/main.c)
-    target_link_libraries(apprecorder_ui_app PRIVATE apprecorder_ui)
-  endif()
+  # The windowed front end no longer has an executable of its own. There is one
+  # image, src/app/main.c, built at the bottom of this file -- see the block
+  # named "The one executable". apprecorder_ui still has no entry point of its
+  # own, for the reason at the top of this section.
 endif()
 
 # ---------------------------------------------------------------------------
@@ -230,18 +222,73 @@ endif()
 # cli.c goes into apprecorder_core rather than into the executable, so that
 # tests/test_cli.c can drive the parser, the resolver, the dry run and the
 # record loop directly -- there is no process boundary between the suite and
-# the command line, and no output to scrape. src/cli/main.c is the only thing
-# the executable adds, and it is four lines.
+# the command line, and no output to scrape.
+#
+# src/app/frontend.c is here for the same reason one level up: which front end
+# a command line asks for is a rule, the rule has a table of cases, and a rule
+# that lives in an executable is a rule no test can reach. In the library, it
+# is one pure function tests/test_frontend.c drives directly.
 #
 # It is a separate glob for the same reason src/i18n is: the CORE_SRC list
 # above is shared, and appending here rather than editing it keeps this change
 # additive while other agents are in that file.
 # ---------------------------------------------------------------------------
 if(TARGET apprecorder_core)
-  target_sources(apprecorder_core PRIVATE ${CMAKE_SOURCE_DIR}/src/cli/cli.c)
+  target_sources(apprecorder_core PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/cli/cli.c
+    ${CMAKE_SOURCE_DIR}/src/app/frontend.c)
+endif()
 
-  add_executable(apprecorder ${CMAKE_SOURCE_DIR}/src/cli/main.c)
-  target_link_libraries(apprecorder PRIVATE apprecorder_core)
+# ---------------------------------------------------------------------------
+# THE ONE EXECUTABLE.
+#
+# apprecorder.exe (839 KB) and apprecorder_ui_app.exe (915 KB) were 1.75 MB of
+# mostly identical bytes: each statically linked the whole core -- capture, the
+# graph, the mixer, the resampler, the drift controller, three encoders, LAME,
+# libogg and libopus -- and the command line's own code is a rounding error
+# next to that. One image is ~990 KB, one file to hand to a friend, one name on
+# PATH.
+#
+# WIN32 is not a preference. A CONSOLE image flashes a black window on every
+# double-click, which is not a thing to ship; the subsystem is fixed in the PE
+# header, so it has to be decided here, once, for both front ends. The cost is
+# real and is documented at the top of include/frontend.h: cmd.exe reads that
+# same flag to decide whether to wait, so it does not wait for us, and
+# apprecorder-wait.cmd exists to restore `&&` sequencing for scripts.
+# tests/test_frontend.c reads the subsystem byte out of the built image, so a
+# well-meaning revert to CONSOLE fails the suite rather than the double-click.
+#
+# It links apprecorder_ui, which brings apprecorder_core, the manifest and
+# /MANIFEST:NO with it. Without the UI layer there is no windowed front end to
+# dispatch to, so there is no merged image either -- the same presence test the
+# old windowed target used, moved down here with it.
+# ---------------------------------------------------------------------------
+if(TARGET apprecorder_ui AND EXISTS ${CMAKE_SOURCE_DIR}/src/app/main.c)
+  add_executable(apprecorder WIN32 ${CMAKE_SOURCE_DIR}/src/app/main.c)
+  target_link_libraries(apprecorder PRIVATE apprecorder_ui)
+
+  # The scripting shim, beside the executable it wraps -- it finds the exe
+  # through %~dp0, so the two have to travel together.
+  add_custom_command(TARGET apprecorder POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_SOURCE_DIR}/apprecorder-wait.cmd
+            $<TARGET_FILE_DIR:apprecorder>/apprecorder-wait.cmd
+    VERBATIM)
+
+  # tests/test_frontend.c runs the real image: its subsystem byte, its exit
+  # codes, and whether its output reaches a redirected pipe with a non-ASCII
+  # path intact. None of that can be asserted from inside the process, so the
+  # path is handed to the suite rather than guessed at.
+  if(TARGET test_frontend)
+    add_dependencies(test_frontend apprecorder)
+    target_compile_definitions(test_frontend PRIVATE
+      APR_APP_EXE=L"$<TARGET_FILE:apprecorder>"
+      APR_APP_SHIM=L"$<TARGET_FILE_DIR:apprecorder>/apprecorder-wait.cmd")
+    # A dispatch bug that opened a window instead of running a command line
+    # would otherwise hang here forever. The suite bounds every wait itself;
+    # this is the second net.
+    set_tests_properties(test_frontend PROPERTIES TIMEOUT 120)
+  endif()
 endif()
 
 # ---------------------------------------------------------------------------

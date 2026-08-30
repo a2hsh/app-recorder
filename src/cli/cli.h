@@ -216,6 +216,17 @@ typedef struct AprCliIo {
     void         *user;
 } AprCliIo;
 
+/* Is `name` one of the commands above, and which?  Nonzero when it is; `out`
+ * may be NULL when only the yes/no is wanted.
+ *
+ * PUBLIC BECAUSE THE PROCESS ASKS IT TOO. apprecorder is one executable with
+ * two front ends (frontend.h), and which one a command line wants is decided
+ * by exactly this question -- `apprecorder record ...` is the command line,
+ * `apprecorder` on its own is the window. A second list of command names in
+ * the dispatcher would be a list that drifts: adding a command here would
+ * quietly make it a name the window opened on. One owner, asked twice. */
+int apr_cli_command_from_name(const wchar_t *name, AprCliCommand *out);
+
 /* ---------------------------------------------------------------------------
  * The stages, separately callable so each can be tested on its own
  * ------------------------------------------------------------------------- */
@@ -237,6 +248,15 @@ AprCliExit apr_cli_run(int argc, const wchar_t *const *argv, const AprCliIo *io)
 
 /* The real entry point: installs a console writer over apr_cli_run. */
 int apr_cli_main(int argc, wchar_t **argv);
+
+/* THE console writer -- an AprCliWriteFn, so it plugs into AprCliIo unchanged.
+ * Public because apprecorder is one executable with two front ends now
+ * (frontend.h), and its entry point has two sentences of its own to say before
+ * apr_cli_main is reached: the Windows floor, and an argument that names
+ * nothing. Both must reach the terminal in the same way every other line does
+ * -- wide straight to a console, UTF-8 to a pipe or a file -- and a second
+ * writer beside this one would be a second answer to the encoding question. */
+void apr_cli_console_write(void *user, int stream, const wchar_t *line);
 
 /* Ask the recording to stop and finalize. This is precisely what the console
  * control handler calls, so a test driving it drives the shipped stop path.

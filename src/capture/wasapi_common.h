@@ -15,7 +15,7 @@
  *   wants it for the same reason. The windowed front end's thread is an STA and
  *   has to be -- IAccPropServices, which supplies every control's accessible
  *   name, is created in that apartment and is valid only on the thread that
- *   created it (src/uiapp/main.c). Both requirements are correct and they
+ *   created it (src/app/main.c). Both requirements are correct and they
  *   cannot both hold on one thread.
  *
  *   An earlier arrangement resolved that by calling CoInitializeEx(MTA) on

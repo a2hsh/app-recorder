@@ -47,6 +47,7 @@
 
 #include "log.h"
 #include "outpath.h"
+#include "session.h"   /* APR_SESSION_EXT -- the format owns its extension */
 #include "ui_app.h"
 
 #pragma comment(lib, "comdlg32.lib")
@@ -1639,7 +1640,7 @@ int apr_dlg_choose_session(HWND owner, int for_saving, wchar_t *path, size_t cch
         filter[used++] = 0;                                                     \
     } while (0)
     PUSHF(apr_str(APR_S_UI_DLG_FILTER_SESSION));
-    PUSHF(L"*.json");
+    PUSHF(L"*." APR_SESSION_EXT);
     PUSHF(apr_str(APR_S_UI_DLG_FILTER_ALL));
     PUSHF(L"*.*");
 #undef PUSHF
@@ -1652,7 +1653,7 @@ int apr_dlg_choose_session(HWND owner, int for_saving, wchar_t *path, size_t cch
     ofn.nMaxFile    = (DWORD)cch;
     ofn.lpstrTitle  = apr_str(for_saving ? APR_S_UI_DLG_SAVE_SESSION_TITLE
                                          : APR_S_UI_DLG_OPEN_SESSION_TITLE);
-    ofn.lpstrDefExt = L"json";
+    ofn.lpstrDefExt = APR_SESSION_EXT;
     ofn.Flags = OFN_NOCHANGEDIR | OFN_EXPLORER |
                 (for_saving ? (OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST)
                             : (OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST));

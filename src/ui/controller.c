@@ -886,16 +886,21 @@ AprErr apr_controller_open_session(AprController *c, const wchar_t *path,
     return apr_ok();
 }
 
-static int do_open_session(AprController *c)
+/* THE VERB PLUS WHAT IT SAYS OUT LOUD, WITHOUT THE CHOOSER.
+ *
+ * Split out of do_open_session below because the process now has a second way
+ * in: `apprecorder my.json` -- a session double-clicked in Explorer -- opens
+ * the window on that file (frontend.h), and it must be told about a decline, a
+ * malformed file or a missing source in exactly the words File > Open uses.
+ * The announcement is the accessibility-critical half of this command, and a
+ * second copy of it would be a second copy that drifts. */
+int apr_controller_open_session_and_report(AprController *c,
+                                           const wchar_t *path)
 {
-    wchar_t path[APR_DISC_PATH_CCH];
     const wchar_t *args[1];
     AprErr e;
 
-    if (busy(c)) return 1;
-    if (!may_discard(c)) return 1;
-    path[0] = 0;
-    if (!apr_dlg_choose_session(c->frame, 0, path, APR_DISC_PATH_CCH)) return 1;
+    if (!c || !path) return 1;
 
     e = apr_controller_open_session(c, path, 1);
     if (apr_failed(&e)) {
@@ -920,6 +925,18 @@ static int do_open_session(AprController *c)
     args[0] = path;
     say(c, APR_S_UI_DLG_SESSION_LOADED, args, 1);
     return 1;
+}
+
+static int do_open_session(AprController *c)
+{
+    wchar_t path[APR_DISC_PATH_CCH];
+
+    if (busy(c)) return 1;
+    if (!may_discard(c)) return 1;
+    path[0] = 0;
+    if (!apr_dlg_choose_session(c->frame, 0, path, APR_DISC_PATH_CCH)) return 1;
+
+    return apr_controller_open_session_and_report(c, path);
 }
 
 /* The inverse: the live graph written down. Identity capture goes through

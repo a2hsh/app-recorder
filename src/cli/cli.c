@@ -371,6 +371,27 @@ static int ieq(const wchar_t *a, const wchar_t *b)
     return a && b && _wcsicmp(a, b) == 0;
 }
 
+/* THE ONLY PLACE A COMMAND NAME IS SPELLED. parse() below reads argv[1]
+ * through this, and so does the process's front-end dispatch (frontend.c),
+ * which has to know whether argv[1] is a command before it decides whether
+ * this run is a command line at all. Case-sensitive, like the rest of the
+ * grammar: `Record` is not a command, and saying so is kinder than guessing. */
+int apr_cli_command_from_name(const wchar_t *name, AprCliCommand *out)
+{
+    AprCliCommand c;
+
+    if      (eq(name, L"record"))       c = APR_CLI_CMD_RECORD;
+    else if (eq(name, L"list-apps"))    c = APR_CLI_CMD_LIST_APPS;
+    else if (eq(name, L"list-devices")) c = APR_CLI_CMD_LIST_DEVICES;
+    else if (eq(name, L"help"))         c = APR_CLI_CMD_HELP;
+    else if (eq(name, L"version"))      c = APR_CLI_CMD_VERSION;
+    else if (eq(name, L"save-session")) c = APR_CLI_CMD_SAVE_SESSION;
+    else return 0;
+
+    if (out) *out = c;
+    return 1;
+}
+
 static int icontains(const wchar_t *hay, const wchar_t *needle)
 {
     size_t nl;
@@ -837,13 +858,7 @@ AprCliExit apr_cli_parse(int argc, const wchar_t *const *argv,
 
     if (argc > 1 && argv[1] && argv[1][0] != L'-') {
         const wchar_t *c = argv[1];
-        if      (eq(c, L"record"))       plan->cmd = APR_CLI_CMD_RECORD;
-        else if (eq(c, L"list-apps"))    plan->cmd = APR_CLI_CMD_LIST_APPS;
-        else if (eq(c, L"list-devices")) plan->cmd = APR_CLI_CMD_LIST_DEVICES;
-        else if (eq(c, L"help"))         plan->cmd = APR_CLI_CMD_HELP;
-        else if (eq(c, L"version"))      plan->cmd = APR_CLI_CMD_VERSION;
-        else if (eq(c, L"save-session")) plan->cmd = APR_CLI_CMD_SAVE_SESSION;
-        else {
+        if (!apr_cli_command_from_name(c, &plan->cmd)) {
             const wchar_t *args[1];
             args[0] = c;
             return fail(&cx, APR_CLI_USAGE, APR_S_ERR_UNKNOWN_COMMAND, args, 1);
@@ -3085,7 +3100,7 @@ static void console_line(int stream, const wchar_t *text)
     }
 }
 
-static void console_write(void *user, int stream, const wchar_t *line)
+void apr_cli_console_write(void *user, int stream, const wchar_t *line)
 {
     (void)user;
     console_line(stream, line);
@@ -3097,7 +3112,7 @@ int apr_cli_main(int argc, wchar_t **argv)
     AprCliExit rc;
 
     SetConsoleOutputCP(CP_UTF8);
-    io.write = console_write;
+    io.write = apr_cli_console_write;
     io.user  = NULL;
 
     /* The outer handler exists so that the __finally in do_record actually

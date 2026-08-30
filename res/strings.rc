@@ -193,6 +193,13 @@
 /* Names BOTH numbers on purpose. "Your Windows is too old" leaves a person with
    nowhere to go; "you have 18363, you need 19041" tells them what to check. */
 #define APR_EN_ERR_WINDOWS_TOO_OLD              "apprecorder needs Windows 10 version 2004 (build %1!s!) or newer, because recording one application's audio separately is not possible on earlier versions. This computer is running build %2!s!."
+/* Shown ONLY when a command line failed and there was no console and no
+   redirection to write to -- started from Explorer, a shortcut or a scheduler.
+   A run that succeeds that way stays silent, because a scheduled recording
+   should not raise a dialog every night; a run that fails never does, because
+   "nothing happened and nothing was said" is the failure this program is least
+   allowed to have. */
+#define APR_EN_ERR_NO_CONSOLE                   "apprecorder was given a command line but had no console to write to, and it stopped with exit code %1!s!. Run the same command from a Command Prompt or PowerShell window to see what it said."
 #define APR_EN_ERR_TOO_MANY_BUSES               "This build records %1!s! buses at once and the command line asks for more."
 #define APR_EN_ERR_TOO_MANY_SOURCES             "The bus %1!s! takes %2!s! sources and the command line gives it more."
 #define APR_EN_ERR_TOO_MANY_OUTPUTS             "The bus %1!s! takes %2!s! outputs and the command line gives it more."
@@ -1054,6 +1061,7 @@ END
 #define APR_AR_ERR_NO_EXTENSION(id)             /* not translated yet */
 #define APR_AR_ERR_OUTPUT_NOT_WRITABLE(id)      /* not translated yet */
 #define APR_AR_ERR_WINDOWS_TOO_OLD(id)          /* not translated yet */
+#define APR_AR_ERR_NO_CONSOLE(id)               /* not translated yet */
 #define APR_AR_ERR_TOO_MANY_BUSES(id)           /* not translated yet */
 #define APR_AR_ERR_TOO_MANY_SOURCES(id)         /* not translated yet */
 #define APR_AR_ERR_TOO_MANY_OUTPUTS(id)         /* not translated yet */

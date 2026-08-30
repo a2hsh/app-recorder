@@ -136,6 +136,15 @@ extern "C" {
  * MISREAD rather than merely ignore. */
 #define APR_SESSION_MIN_READER 1
 
+/* The extension a session file is written with and recognised by, WITHOUT the
+ * dot. It is a named constant because three unrelated places have to agree on
+ * it: the save dialog's default extension, that dialog's filter, and the
+ * process's front-end dispatch (frontend.h), which reads a bare
+ * `apprecorder my.json` as "open the window on this session" rather than as a
+ * mistyped command. Three literals that must agree is the shape AGENTS.md
+ * rule 3 refuses. This header owns the format, so it owns the extension. */
+#define APR_SESSION_EXT L"json"
+
 /* ---------------------------------------------------------------------------
  * Sizes
  * ------------------------------------------------------------------------- */

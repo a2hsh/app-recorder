@@ -83,7 +83,7 @@ static const IID kIID_IUIAutomation =
 /* ==========================================================================
  * A real frame, a real controller, on a real STA -- the apartment the product
  * runs in, because IAccPropServices supplies every accessible name and is
- * valid only on the thread that created it (src/uiapp/main.c).
+ * valid only on the thread that created it (src/app/main.c).
  * ======================================================================== */
 
 typedef struct Setup {

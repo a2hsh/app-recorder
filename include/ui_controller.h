@@ -144,6 +144,16 @@ AprErr apr_controller_add_bus(AprController *c, const wchar_t *name);
 AprErr apr_controller_open_session(AprController *c, const wchar_t *path,
                                    int interactive);
 
+/* Load `path` and SAY what happened -- loaded, declined, or the file's own
+ * fault -- in the same words File > Open uses. This is the whole of that
+ * command minus the chooser, and it exists because the process has a second
+ * way in: `apprecorder my.json` opens the window on a double-clicked session
+ * (frontend.h), and a startup path that reported nothing would be a window
+ * that came up empty with no explanation. Returns 1 always, like every other
+ * command handler. */
+int apr_controller_open_session_and_report(AprController *c,
+                                           const wchar_t *path);
+
 /* Write the live graph to `path` and remember it as the current session. */
 AprErr apr_controller_save_session(AprController *c, const wchar_t *path);
 

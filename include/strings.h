@@ -181,7 +181,7 @@
     X(ACTION_NAME_MP3,           1056)                                         \
     X(ACTION_NAME_OGG,           1057)                                         \
     X(ACTION_NAME_NONE,          1058)                                         \
-    X(ERR_WINDOWS_TOO_OLD,       1059)
+    X(ERR_WINDOWS_TOO_OLD,       1059)                                             X(ERR_NO_CONSOLE,            1180)
 
 /* ---- the command line: usage text, one entry per printed line. ---- */
 #define APR_STR_LIST_CLI(X)                                                    \

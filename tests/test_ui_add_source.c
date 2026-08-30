@@ -8,7 +8,7 @@
  *   controller, a real graph, and a source added on the window's OWN thread --
  *   which is an STA and must stay one, because IAccPropServices supplies every
  *   control's accessible name and is valid only on the thread that created it
- *   (src/uiapp/main.c). That combination is what failed with "process loopback
+ *   (src/app/main.c). That combination is what failed with "process loopback
  *   requires the MTA; this thread is an STA" while all 26 suites passed.
  *
  *   apr_dlg_add_source() itself is modal and cannot be answered from the thread
@@ -95,7 +95,7 @@ static DWORD WINAPI ui_thread(LPVOID param)
     UiHost *h = (UiHost *)param;
     HRESULT hr;
 
-    /* Apartment-threaded, exactly as src/uiapp/main.c does it and for exactly
+    /* Apartment-threaded, exactly as src/app/main.c does it and for exactly
      * the reason given there. This is the apartment the bug lived in. */
     hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     h->sta = SUCCEEDED(hr);
@@ -127,7 +127,7 @@ static DWORD WINAPI ui_thread(LPVOID param)
     apr_ui_app_run(h->app);
 
     /* Controller first: it stops the recording and finalizes every action
-     * before anything it depends on is torn down (src/uiapp/main.c). */
+     * before anything it depends on is torn down (src/app/main.c). */
     apr_controller_destroy(h->ctl);
     h->ctl = NULL;
     apr_ui_app_destroy(h->app);
