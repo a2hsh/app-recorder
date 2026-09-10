@@ -196,7 +196,7 @@ extern "C" {
 
 /* The stable redirect. Not the API -- see section 3. */
 #define APR_UPDATE_BASE_URL \
-    L"https://github.com/rockstorm/apprecorder/releases/latest/download/"
+    L"https://github.com/a2hsh/app-recorder/releases/latest/download/"
 
 #define APR_UPDATE_MANIFEST_NAME  L"release.json"
 #define APR_UPDATE_SIG_NAME       L"release.json.sig"
