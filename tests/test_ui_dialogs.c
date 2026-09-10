@@ -482,7 +482,7 @@ TEST(a_new_window_starts_with_an_empty_graph_and_nothing_to_record)
     UiHost h;
     wchar_t said[1024];
 
-    if (!ui_start(&h)) { printf("      SKIPPED: no window\n"); ui_stop(&h); return; }
+    if (!ui_start(&h)) { SKIP("no window"); ui_stop(&h); return; }
 
     ASSERT_NOT_NULL(apr_controller_graph(h.ctl));
     ASSERT_EQ_INT(0, (int)apr_graph_bus_count(apr_controller_graph(h.ctl)));
@@ -515,7 +515,7 @@ TEST(recording_starts_stops_and_announces_both)
     AprErr e;
     DWORD n;
 
-    if (!ui_start(&h)) { printf("      SKIPPED: no window\n"); ui_stop(&h); return; }
+    if (!ui_start(&h)) { SKIP("no window"); ui_stop(&h); return; }
 
     n = GetTempPathW(MAX_PATH, dir);
     if (n == 0 || n >= MAX_PATH) wcscpy_s(dir, MAX_PATH, L".\\");
@@ -597,7 +597,7 @@ TEST(editing_is_refused_out_loud_while_a_recording_runs)
     AprErr e;
     DWORD n;
 
-    if (!ui_start(&h)) { printf("      SKIPPED: no window\n"); ui_stop(&h); return; }
+    if (!ui_start(&h)) { SKIP("no window"); ui_stop(&h); return; }
 
     n = GetTempPathW(MAX_PATH, dir);
     if (n == 0 || n >= MAX_PATH) wcscpy_s(dir, MAX_PATH, L".\\");
@@ -650,7 +650,7 @@ TEST(closing_an_idle_window_is_not_questioned)
 {
     UiHost h;
 
-    if (!ui_start(&h)) { printf("      SKIPPED: no window\n"); ui_stop(&h); return; }
+    if (!ui_start(&h)) { SKIP("no window"); ui_stop(&h); return; }
     ASSERT_FALSE(apr_controller_recording(h.ctl));
     PostMessageW(h.frame, WM_CLOSE, 0, 0);
     ASSERT_EQ_INT(WAIT_OBJECT_0, (int)WaitForSingleObject(h.thread, APR_TEST_WAIT_MS));
@@ -673,7 +673,7 @@ TEST(the_controller_enables_recording_only_once_there_is_an_output)
     AprErr e;
     DWORD n;
 
-    if (!ui_start(&h)) { printf("      SKIPPED: no window\n"); ui_stop(&h); return; }
+    if (!ui_start(&h)) { SKIP("no window"); ui_stop(&h); return; }
 
     bar = GetMenu(h.frame);
     ASSERT_NOT_NULL(bar);
@@ -767,7 +767,7 @@ TEST(the_tray_tooltip_is_a_status_readout_and_changes_with_the_state)
     TrayHost t;
     wchar_t tip[256];
 
-    if (!tray_up(&t)) { printf("      SKIPPED: no window station\n"); return; }
+    if (!tray_up(&t)) { SKIP("no window station"); return; }
 
     /* Windows+B then the arrow keys reaches this text, and a screen reader
      * reads it. That is why it is a sentence and why it has to be right in
@@ -802,7 +802,7 @@ TEST(the_tray_menu_is_named_mnemonic_and_has_no_duplicate_keys)
     int i, n, used_n = 0;
     wchar_t used[32];
 
-    if (!tray_up(&t)) { printf("      SKIPPED: no window station\n"); return; }
+    if (!tray_up(&t)) { SKIP("no window station"); return; }
 
     apr_tray_set_can_record(t.tray, 1, 0);
     m = apr_tray_build_menu(t.tray);
@@ -856,7 +856,7 @@ TEST(the_tray_menu_offers_stop_once_something_is_running)
     TrayHost t;
     HMENU m;
 
-    if (!tray_up(&t)) { printf("      SKIPPED: no window station\n"); return; }
+    if (!tray_up(&t)) { SKIP("no window station"); return; }
 
     apr_tray_set_can_record(t.tray, 0, 1);
     m = apr_tray_build_menu(t.tray);
@@ -875,7 +875,7 @@ TEST(every_tray_menu_command_is_one_the_frame_already_answers)
     HMENU m;
     int i, n;
 
-    if (!tray_up(&t)) { printf("      SKIPPED: no window station\n"); return; }
+    if (!tray_up(&t)) { SKIP("no window station"); return; }
 
     m = apr_tray_build_menu(t.tray);
     ASSERT_NOT_NULL(m);
@@ -946,7 +946,7 @@ TEST(a_session_saved_from_the_window_reopens_as_the_same_graph)
     AprErr e;
     DWORD n;
 
-    if (!ui_start(&h)) { printf("      SKIPPED: no window\n"); ui_stop(&h); return; }
+    if (!ui_start(&h)) { SKIP("no window"); ui_stop(&h); return; }
 
     n = GetTempPathW(MAX_PATH, dir);
     if (n == 0 || n >= MAX_PATH) wcscpy_s(dir, MAX_PATH, L".\\");
@@ -1033,7 +1033,7 @@ TEST(a_session_that_is_not_there_fails_with_something_to_say)
     UiHost h;
     AprErr e;
 
-    if (!ui_start(&h)) { printf("      SKIPPED: no window\n"); ui_stop(&h); return; }
+    if (!ui_start(&h)) { SKIP("no window"); ui_stop(&h); return; }
 
     e = apr_controller_open_session(h.ctl, L"Z:\\nope\\missing.json", 0);
     ASSERT_TRUE(apr_failed(&e));
@@ -1070,7 +1070,7 @@ TEST(a_session_asking_for_system_wide_capture_is_refused_with_nobody_to_ask)
         "\"sources\":[{\"key\":\"s0\",\"gainDb\":0.0}],"
         "\"outputs\":[{\"format\":\"wav\",\"path\":\"x.wav\"}]}]}";
 
-    if (!ui_start(&h)) { printf("      SKIPPED: no window\n"); ui_stop(&h); return; }
+    if (!ui_start(&h)) { SKIP("no window"); ui_stop(&h); return; }
 
     n = GetTempPathW(MAX_PATH, dir);
     if (n == 0 || n >= MAX_PATH) wcscpy_s(dir, MAX_PATH, L".\\");

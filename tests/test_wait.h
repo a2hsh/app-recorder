@@ -50,6 +50,36 @@
 
 #include <windows.h>
 
+/* ===========================================================================
+ * A STEP IS NOT A DURATION, AND COUNTING STEPS IS NOT A CLOCK.
+ *
+ *   These macros used to add APR_TEST_POLL_MS to a counter per iteration and
+ *   call the result "milliseconds waited". It is not. Sleep(1) does not sleep
+ *   one millisecond: it sleeps until the next system timer interrupt, and the
+ *   default period is 15.625 ms. MEASURED, by asking the OS directly:
+ *
+ *       this workstation, as it is:            Sleep(1) = 13.05 ms
+ *       this workstation, timeBeginPeriod(1):  Sleep(1) =  1.45 ms
+ *
+ *   So "ONE ceiling, and it is a minute" was a minute nowhere. 60000 counted
+ *   steps at 13 ms is THIRTEEN MINUTES, and that is the whole explanation for
+ *   the two numbers this tree could not account for: a case that "took 890 s
+ *   under -j 8" locally, and a CI run whose 662 s were 648 s of one case
+ *   burning one backstop. Neither was load; both were arithmetic.
+ *
+ *   Two changes, and they are separate:
+ *
+ *   1. THE BOUND IS READ FROM A CLOCK. GetTickCount64 across the wait, so the
+ *      ceiling is the number written here whatever the timer period is and
+ *      whatever else the machine is doing.
+ *
+ *   2. THE STEP IS MADE REAL. tests/test_runner.h raises this process's timer
+ *      resolution to 1 ms for the life of the run, so a wait now ends about
+ *      when the work does rather than up to 15 ms later. With hundreds of
+ *      these per UI suite, that is seconds a run, and it is why the step was
+ *      written as a millisecond in the first place.
+ * ======================================================================== */
+
 /* The one ceiling, and the one step. See above. */
 #define APR_TEST_WAIT_MS 60000
 #define APR_TEST_POLL_MS 1
@@ -59,17 +89,7 @@
  * A macro rather than a predicate function because every condition in these
  * suites is a couple of field reads and a comparison, and a callback plus a
  * context struct per site would bury the one line that matters. */
-#define APR_WAIT_UNTIL(ok, cond)                                              \
-    do {                                                                      \
-        int apr_waited_ = 0;                                                  \
-        (ok) = 0;                                                             \
-        for (;;) {                                                            \
-            if (cond) { (ok) = 1; break; }                                    \
-            if (apr_waited_ >= APR_TEST_WAIT_MS) break;                       \
-            Sleep(APR_TEST_POLL_MS);                                          \
-            apr_waited_ += APR_TEST_POLL_MS;                                  \
-        }                                                                     \
-    } while (0)
+#define APR_WAIT_UNTIL(ok, cond) APR_WAIT_UNTIL_MS(ok, cond, APR_TEST_WAIT_MS)
 
 /* THE BOUNDED FORM, and it exists for exactly one shape of wait: the ones
  * where the condition NOT holding is a legitimate outcome the case goes on to
@@ -86,16 +106,19 @@
  * the ceiling to the step, so making the step finer silently made the ceiling
  * shorter -- which is how a one-second wait became a forty-millisecond one and
  * a case that had never flaked started failing. Bounds are in milliseconds
- * here, and the step is nobody else's business. */
+ * here, and the step is nobody else's business.
+ *
+ * AND A COUNT OF STEPS IS NOT A BOUND EITHER, for the reason at the top of
+ * this file. The elapsed time comes off a clock. */
 #define APR_WAIT_UNTIL_MS(ok, cond, ms)                                       \
     do {                                                                      \
-        int apr_waited_ = 0;                                                  \
+        ULONGLONG apr_t0_ = GetTickCount64();                                 \
+        ULONGLONG apr_lim_ = (ULONGLONG)(ms);                                 \
         (ok) = 0;                                                             \
         for (;;) {                                                            \
             if (cond) { (ok) = 1; break; }                                    \
-            if (apr_waited_ >= (ms)) break;                                   \
+            if (GetTickCount64() - apr_t0_ >= apr_lim_) break;                \
             Sleep(APR_TEST_POLL_MS);                                          \
-            apr_waited_ += APR_TEST_POLL_MS;                                  \
         }                                                                     \
     } while (0)
 

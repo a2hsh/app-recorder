@@ -35,6 +35,8 @@
  * all: WASAPI hands over nothing until Start.
  */
 #include "test_runner.h"
+#include "test_wait.h"
+#include "test_engine.h"
 
 #include "capture.h"
 #include "ringbuf.h"
@@ -90,13 +92,20 @@ static DWORD WINAPI attempt_thread(LPVOID param)
         a->start_err = c->vt->start(c);
         if (!apr_failed(&a->start_err)) {
             a->started = 1;
-            Sleep(120);
+            /* WAIT for the engine's first packet; do not sleep a guess at how
+             * long it takes. This used to be Sleep(120) and it is the whole
+             * reason this file failed on its first CI runner: a cold engine
+             * took about a second to deliver the first frame there, while the
+             * NEXT case in this file -- by then warm -- passed the identical
+             * assertion. See test_engine.h. */
+            a->frames = apr_test_wait_for_frames(c,
+                                                 APR_TEST_ENGINE_FIRST_FRAME_MS);
             c->vt->stop(c);
         }
     }
 
     c->vt->status(c, &st);
-    a->frames = st.frames_written;
+    if (st.frames_written > a->frames) a->frames = st.frames_written;
 
 done:
     if (c)  apr_capture_destroy(c);
@@ -146,6 +155,60 @@ static void show(const char *what, const AprErr *e)
     wchar_t buf[512];
     apr_err_format(e, buf, 512);
     printf("      %s: %ls\n", what, buf);
+}
+
+/* ==========================================================================
+ * "Can this machine tap a process at all?" -- ASKED WITHOUT AN STA IN THE
+ * PICTURE, and asked all the way to a frame.
+ *
+ * TWO WAYS THIS PREDICATE CAN BE WRONG, and this file has now met both.
+ *
+ *   ASK IT FROM AN STA and an apartment refusal -- the exact regression these
+ *   cases exist to catch -- comes back as "no engine here", the case skips,
+ *   and the bug ships behind a green suite. That is how the original defect
+ *   survived in the first place, so the reference attempt runs with NO_COM:
+ *   the apartment the old code was already happy with.
+ *
+ *   STOP AT open() and the predicate answers a question nobody asked.
+ *   Activation succeeding says the virtual loopback device exists; it does not
+ *   say an engine will ever feed it. On the GitHub runner that failed this
+ *   file, open() succeeded and there is no capture endpoint on the machine at
+ *   all. So the reference runs the whole way -- open, start, first frame --
+ *   and only then is "this machine can do it" a claim worth resting an
+ *   assertion on.
+ *
+ * Returns 1 if the reference tap produced audio; 0 after having SKIPPED,
+ * naming which of the three steps failed.
+ * ======================================================================== */
+static int process_loopback_works_here(void)
+{
+    Attempt ref;
+
+    memset(&ref, 0, sizeof ref);
+    ref.co_init  = NO_COM;      /* NOT an STA. See above. */
+    ref.do_start = 1;
+    process_config(&ref.cfg);
+
+    if (!run_attempt(&ref)) {
+        SKIP("the reference capture thread did not finish");
+        return 0;
+    }
+    if (apr_failed(&ref.open_err)) {
+        apr_test_skip_capture("no process-loopback activation on this machine",
+                              &ref.open_err);
+        return 0;
+    }
+    if (apr_failed(&ref.start_err)) {
+        apr_test_skip_capture("process loopback would not start on this machine",
+                              &ref.start_err);
+        return 0;
+    }
+    if (ref.frames == 0) {
+        apr_test_skip_capture("process loopback activates here but no audio "
+                              "engine ever feeds it", NULL);
+        return 0;
+    }
+    return 1;
 }
 
 /* ==========================================================================
@@ -206,20 +269,12 @@ TEST(a_fake_source_opens_and_runs_with_no_apartment_at_all)
 
 TEST(a_process_tap_opens_and_runs_from_an_sta_thread)
 {
-    Attempt sta, ref;
+    Attempt sta;
 
-    /* First establish that this machine can activate process loopback at all,
-     * from a thread the old code was happy with. If it cannot, there is no
-     * audio engine here and the STA result would prove nothing. */
-    memset(&ref, 0, sizeof ref);
-    ref.co_init = NO_COM;
-    process_config(&ref.cfg);
-    ASSERT_TRUE(run_attempt(&ref));
-    if (apr_failed(&ref.open_err)) {
-        printf("      SKIPPED: no process-loopback activation on this machine\n");
-        show("reason", &ref.open_err);
-        return;
-    }
+    /* First establish that this machine can tap a process at all, all the way
+     * to a frame, from a thread the old code was happy with. If it cannot,
+     * there is no engine here and the STA result would prove nothing. */
+    if (!process_loopback_works_here()) return;
 
     memset(&sta, 0, sizeof sta);
     sta.co_init  = COINIT_APARTMENTTHREADED;
@@ -251,21 +306,13 @@ TEST(a_process_tap_stopped_and_closed_from_an_sta_thread_leaves_nothing_behind)
      * balanced a CoInitializeEx; that requirement is gone, and running the
      * whole cycle twice in a row is the cheap proof the apartment is being
      * torn down cleanly each time rather than leaked. */
-    Attempt ref, a, b;
+    Attempt a, b;
 
     /* "No audio engine here" must be established WITHOUT an STA in the
      * picture, or an apartment refusal -- the very regression under test --
      * would present itself as a skip and pass silently. That is precisely how
      * this defect survived a green suite in the first place. */
-    memset(&ref, 0, sizeof ref);
-    ref.co_init = NO_COM;
-    process_config(&ref.cfg);
-    ASSERT_TRUE(run_attempt(&ref));
-    if (apr_failed(&ref.open_err)) {
-        printf("      SKIPPED: no process-loopback activation on this machine\n");
-        show("reason", &ref.open_err);
-        return;
-    }
+    if (!process_loopback_works_here()) return;
 
     memset(&a, 0, sizeof a);
     a.co_init  = COINIT_APARTMENTTHREADED;
@@ -305,8 +352,11 @@ TEST(a_device_source_opens_from_an_sta_thread)
     ref.cfg.device.endpoint_id = NULL;   /* the default */
     ASSERT_TRUE(run_attempt(&ref));
     if (apr_failed(&ref.open_err)) {
-        printf("      SKIPPED: no capture endpoint on this machine\n");
-        show("reason", &ref.open_err);
+        /* Open is as far as this case ever goes -- starting a device capture
+         * records the author's microphone -- so open succeeding IS the whole
+         * capability here, and there is nothing further to establish. */
+        apr_test_skip_capture("no capture endpoint on this machine",
+                              &ref.open_err);
         return;
     }
 

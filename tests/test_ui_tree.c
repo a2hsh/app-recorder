@@ -734,7 +734,7 @@ TEST(the_panel_is_a_real_treeview_and_not_a_picture_of_one)
     wchar_t cls[64];
 
     if (!live_start(&L)) {
-        printf("      SKIPPED: no window\n");
+        SKIP("no window");
         live_stop(&L);
         return;
     }
@@ -764,7 +764,7 @@ TEST(the_live_tree_exposes_the_model_hierarchy_with_every_item_named)
     Uia c;
     Seen st;
 
-    if (!live_start(&L)) { printf("      SKIPPED: no window\n"); live_stop(&L); return; }
+    if (!live_start(&L)) { SKIP("no window"); live_stop(&L); return; }
 
     n = apr_tree_panel_rows(L.m.g, r, MAXROWS);
     ASSERT_EQ_INT(8, (int)n);
@@ -807,7 +807,7 @@ TEST(the_live_tree_exposes_the_model_hierarchy_with_every_item_named)
     /* NAMES, asked of UI Automation, because that is what a screen reader
      * reads -- not our TVITEMW, not our row array. */
     if (!uia_open(&c)) {
-        printf("      SKIPPED (names): UI Automation unavailable here\n");
+        SKIP("the names half: UI Automation unavailable here");
         uia_close(&c);
         live_stop(&L);
         return;
@@ -840,7 +840,7 @@ TEST(custom_draw_ran_and_the_accessibility_tree_is_still_intact)
     Uia c;
     Seen st;
 
-    if (!live_start(&L)) { printf("      SKIPPED: no window\n"); live_stop(&L); return; }
+    if (!live_start(&L)) { SKIP("no window"); live_stop(&L); return; }
 
     /* RDW_UPDATENOW sends WM_PAINT to the owning thread synchronously, so the
      * control really repaints before the counter is read rather than at some
@@ -860,7 +860,7 @@ TEST(custom_draw_ran_and_the_accessibility_tree_is_still_intact)
      * control's semantics: the type would stop being Tree, or the items would
      * lose their names, or both -- and the pixels would look fine. */
     if (!uia_open(&c)) {
-        printf("      SKIPPED (a11y half): UI Automation unavailable here\n");
+        SKIP("the a11y half: UI Automation unavailable here");
         uia_close(&c);
         live_stop(&L);
         return;
@@ -921,11 +921,13 @@ TEST(the_keyboard_alone_reaches_every_row)
 {
     Live L;
     int visited[MAXROWS];
+    int trail[MAXROWS * 3 + 8];
+    HTREEITEM caret[MAXROWS * 3 + 8];
     int i, tries, count = 0;
     size_t n;
     AprTreeRow r[MAXROWS];
 
-    if (!live_start(&L)) { printf("      SKIPPED: no window\n"); live_stop(&L); return; }
+    if (!live_start(&L)) { SKIP("no window"); live_stop(&L); return; }
 
     n = apr_tree_panel_rows(L.m.g, r, MAXROWS);
     memset(visited, 0, sizeof visited);
@@ -964,12 +966,32 @@ TEST(the_keyboard_alone_reaches_every_row)
 
         cur = tv_next(L.tv, TVGN_CARET, NULL);
         row = tv_row(L.tv, cur);
+        caret[tries] = cur;
+        trail[tries] = row;
         if (row >= 0 && row < MAXROWS && !visited[row]) {
             visited[row] = 1;
             count++;
         }
         SendMessageW(L.tv, WM_KEYDOWN, VK_DOWN, 0);
         SendMessageW(L.tv, WM_KEYUP, VK_DOWN, 0);
+    }
+    printf("      Down Arrow reached %d of %d rows\n", count, (int)n);
+
+    /* THE CARET TRAIL, on failure only -- the same diagnostic
+     * tests/test_ui_behaviour.c carries, and for the reason recorded there:
+     * "expected 1, actual 0" reads exactly like the BUGS.md C2 focus-steal
+     * regression coming back, which is the worst thing a guard can do. Whether
+     * the caret stayed on one handle, went NULL, or moved while reporting the
+     * same lParam separates "comctl32 ignored the key" from "the tree was
+     * rebuilt under the walk" from "the model changed". */
+    if (count != (int)n) {
+        printf("      TRAIL (caret item -> row) over %d presses:\n", tries);
+        for (i = 0; i < tries; ++i)
+            printf("        %2d: %p -> %d\n", i, (void *)caret[i], trail[i]);
+        printf("      live item count now %d, model rows %d\n",
+               (int)SendMessageW(L.tv, TVM_GETCOUNT, 0, 0),
+               (int)apr_tree_panel_rows(L.m.g, NULL, 0));
+        fflush(stdout);
     }
 
     for (i = 0; i < (int)n; ++i) {
@@ -978,9 +1000,8 @@ TEST(the_keyboard_alone_reaches_every_row)
          * parent. Down walks visible items, so a collapsed ancestor hides a
          * whole subtree without touching focus. Say which. */
         if (!visited[i]) apr_test_tv_explain_unreached(L.tv, i);
-        ASSERT_TRUE(visited[i]);
     }
-    printf("      Down Arrow reached %d of %d rows\n", count, (int)n);
+    for (i = 0; i < (int)n; ++i) ASSERT_TRUE(visited[i]);
 
     live_stop(&L);
 }
@@ -1004,7 +1025,7 @@ TEST(selection_is_a_model_identity_and_does_not_echo)
     AprTreeSel want, got;
     LONG before;
 
-    if (!live_start(&L)) { printf("      SKIPPED: no window\n"); live_stop(&L); return; }
+    if (!live_start(&L)) { SKIP("no window"); live_stop(&L); return; }
 
     g_sink_calls = 0;
     memset(&g_sink_last, 0, sizeof g_sink_last);
@@ -1040,10 +1061,28 @@ TEST(selection_is_a_model_identity_and_does_not_echo)
     ASSERT_EQ_INT((int)before, (int)g_sink_calls);
 
     /* But a move the USER makes is reported, or the canvas could never follow
-     * the tree. */
-    PostMessageW(L.tv, WM_KEYDOWN, VK_DOWN, 0);
-    PostMessageW(L.tv, WM_KEYUP, VK_DOWN, 0);
+     * the tree.
+     *
+     * SENT, NOT POSTED, and this case is the last one in the tree that was
+     * still posting. A posted key goes through the frame's message loop, where
+     * IsDialogMessage sees an arrow key addressed to a child of the frame and
+     * may treat it as dialog navigation instead of handing it to the control
+     * -- so whether this key reaches the TreeView at all depends on where
+     * focus happens to be, and this case never focuses anything. It failed
+     * that way once under a full parallel run: sixty seconds waiting for a
+     * selection notice from a keystroke the tree never saw.
+     *
+     * A cross-thread SendMessageW does not return until the window's own
+     * thread has finished handling the message, so the sink has already been
+     * called by the time the next line runs. Nothing about an arrow key in a
+     * TreeView needs the pre-translate filter, which is the only thing posting
+     * bought -- the same conclusion the walk above reached, for the same
+     * reason. */
+    SendMessageW(L.tv, WM_KEYDOWN, VK_DOWN, 0);
+    SendMessageW(L.tv, WM_KEYUP, VK_DOWN, 0);
     {
+        /* Kept as a backstop: the notice is raised inside the SendMessage, so
+         * this normally does not wait at all. */
         int fired;
         APR_WAIT_UNTIL(fired, g_sink_calls != before);
         (void)fired;
@@ -1075,7 +1114,7 @@ TEST(the_treeview_mirrors_but_the_row_order_does_not)
 
     e = apr_str_set_language(MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US));
     ASSERT_FALSE(apr_failed(&e));
-    if (!live_start(&L)) { printf("      SKIPPED: no window\n"); live_stop(&L); return; }
+    if (!live_start(&L)) { SKIP("no window"); live_stop(&L); return; }
     n_ltr = tv_visible_rows(L.tv, ltr_rows, MAXROWS);
     ASSERT_TRUE((GetWindowLongPtrW(L.tv, GWL_EXSTYLE) & WS_EX_LAYOUTRTL) == 0);
     live_stop(&L);
@@ -1084,7 +1123,7 @@ TEST(the_treeview_mirrors_but_the_row_order_does_not)
     ASSERT_FALSE(apr_failed(&e));
     ASSERT_EQ_INT(1, apr_str_is_rtl());
     if (!live_start(&L)) {
-        printf("      SKIPPED: no window\n");
+        SKIP("no window");
         live_stop(&L);
         (void)apr_str_set_language(MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US));
         return;

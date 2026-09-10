@@ -21,7 +21,9 @@
  * tree renders nothing.
  */
 #include "test_runner.h"
+#include "test_wait.h"
 #include "test_window.h"
+#include "test_engine.h"
 
 #include <windows.h>
 #include <objbase.h>
@@ -220,8 +222,8 @@ TEST(a_process_source_can_be_added_from_the_window_thread)
             ui_stop(&h);
             FAIL("the capture layer refused the window's own apartment");
         }
-        show("add process source", &h.proc_err);
-        printf("      SKIPPED: no process-loopback activation on this machine\n");
+        apr_test_skip_capture("no process-loopback activation on this machine",
+                              &h.proc_err);
         ui_stop(&h);
         return;
     }

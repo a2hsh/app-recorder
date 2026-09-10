@@ -551,12 +551,11 @@ static int fixture_up_lang(Fixture *f, LANGID lang)
     (void)apr_str_set_language(lang);
 
     if (!build_model(&f->m)) {
-        printf("      SKIPPED: could not build the model\n");
+        SKIP("could not build the model");
         return 0;
     }
     if (!ui_start(&f->h)) {
-        printf("      SKIPPED: could not create a window (no interactive "
-               "window station?)\n");
+        SKIP("could not create a window (no interactive window station?)");
         return 0;
     }
     f->have_ui = 1;
@@ -600,7 +599,7 @@ TEST(every_node_is_a_real_window_with_a_name_and_the_control_type_we_meant)
     ASSERT_EQ_INT(5, (int)n);
 
     if (!f.have_uia) {
-        printf("      SKIPPED the UIA half: no UI Automation here\n");
+        SKIP("the UIA half: no UI Automation here");
         fixture_down(&f);
         return;
     }
@@ -637,7 +636,7 @@ TEST(a_node_says_what_kind_of_thing_it_is_not_only_what_colour_it_is)
     int i;
 
     if (!fixture_up(&f)) { fixture_down(&f); return; }
-    if (!f.have_uia) { printf("      SKIPPED: no UIA\n"); fixture_down(&f); return; }
+    if (!f.have_uia) { SKIP("no UIA"); fixture_down(&f); return; }
 
     i = find_node_index(&f.h, APR_NODE_SOURCE, f.m.teams, 0);
     ASSERT_GE_INT(0, i);
@@ -671,7 +670,7 @@ TEST(an_edge_is_in_the_nodes_description_because_it_has_no_element_of_its_own)
     int si, bi;
 
     if (!fixture_up(&f)) { fixture_down(&f); return; }
-    if (!f.have_uia) { printf("      SKIPPED: no UIA\n"); fixture_down(&f); return; }
+    if (!f.have_uia) { SKIP("no UIA"); fixture_down(&f); return; }
 
     si = find_node_index(&f.h, APR_NODE_SOURCE, f.m.teams, 0);
     bi = find_node_index(&f.h, APR_NODE_BUS, f.m.mix, 0);
@@ -680,7 +679,7 @@ TEST(an_edge_is_in_the_nodes_description_because_it_has_no_element_of_its_own)
 
     if (!uia_description(&f.c, apr_canvas_node_at(f.h.canvas, (size_t)si),
                          before, 512)) {
-        printf("      SKIPPED: LegacyIAccessible description not available\n");
+        SKIP("LegacyIAccessible description not available");
         fixture_down(&f);
         return;
     }

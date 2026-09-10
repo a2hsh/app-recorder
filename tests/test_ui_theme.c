@@ -657,7 +657,7 @@ TEST(design_6_2_is_wrong_segoe_ui_variable_does_not_cover_arabic)
     ASSERT_NOT_NULL(f);
 
     dc = GetDC(NULL);
-    if (!dc) { DeleteObject(f); printf("      SKIPPED: no screen DC\n"); return; }
+    if (!dc) { DeleteObject(f); SKIP("no screen DC"); return; }
     old = (HFONT)SelectObject(dc, f);
     if (GetGlyphIndicesW(dc, arabic, n, idx, GGI_MARK_NONEXISTING_GLYPHS) != GDI_ERROR) {
         for (i = 0; i < n; ++i) {

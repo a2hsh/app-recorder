@@ -109,8 +109,51 @@ foreach(test_file ${TEST_SRC})
   # NO_UPDATE for the same reason: a controller with a real signing key
   # compiled in starts a genuine HTTPS request and rewrites HKCU on the
   # machine running the suite.
+  #
+  # SKIP_LOG is where a skipped case says so somewhere ctest cannot throw
+  # away. ctest keeps the output of a suite that FAILED and discards the rest,
+  # so "SKIPPED: no audio engine on this machine" -- the one line that explains
+  # why a green run proved less than it looks -- was invisible on CI. Every
+  # suite appends to this one file and build.cmd prints it after the run. See
+  # tests/test_runner.h.
   set_tests_properties(${test_name} PROPERTIES
-    ENVIRONMENT "APPRECORDER_NO_TRAY=1;APPRECORDER_NO_UPDATE=1")
+    ENVIRONMENT "APPRECORDER_NO_TRAY=1;APPRECORDER_NO_UPDATE=1;APPRECORDER_SKIP_LOG=${CMAKE_BINARY_DIR}/test-skips.log")
+
+  # ------------------------------------------------------------------------
+  # ONE DESKTOP, ONE WINDOWED SUITE AT A TIME.
+  #
+  # There are 41 suites and most of them are pure computation: a ring buffer, a
+  # resampler, a clock. Those are why the run is parallel at all, and they do
+  # not interfere with anything.
+  #
+  # Nine of them are not like that. They create REAL top-level windows on the
+  # REAL interactive desktop and then assert about focus, activation, z-order,
+  # visibility and what UI Automation says -- and every one of those is a
+  # property of the DESKTOP, which is a single shared resource that ctest
+  # otherwise knows nothing about. Running eight of them at once is eight
+  # processes taking turns at one input queue; the previous pass measured that
+  # directly (91 failures in 360 concurrent runs of one walk, every one with
+  # focus reading NULL) and fixed the worst of it structurally with
+  # WS_EX_NOACTIVATE. This is the other half: RESOURCE_LOCK tells ctest these
+  # suites are mutually exclusive, so it schedules them one at a time while
+  # everything else keeps running alongside them.
+  #
+  # Matched by NAME, exactly as the UI link rule below is and for the same
+  # reason: a suite that creates a window has to be called test_ui_* or named
+  # here, and a new one cannot forget to opt in. test_discover is named because
+  # it creates a window without being a UI suite.
+  #
+  # AND THEY GO FIRST. A lock turns those nine into one chain, and a chain is
+  # the critical path: nothing else in the run is anywhere near as long. Left
+  # to ctest's default order the chain started a few seconds in and the whole
+  # run finished when the chain did, with the machine idle at the end.
+  # A high COST makes ctest schedule them first, so the chain runs UNDER the
+  # rest of the suite instead of after it. Measured, Release, this machine,
+  # same 41 suites and the same lock: 19.7 s without the COST, 13.6 s with it
+  # -- and 14.4-16.4 s was the figure before there was a lock at all.
+  if(test_name MATCHES "^test_ui_" OR test_name STREQUAL "test_discover")
+    set_tests_properties(${test_name} PROPERTIES RESOURCE_LOCK desktop COST 1000)
+  endif()
 endforeach()
 
 # ---------------------------------------------------------------------------

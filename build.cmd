@@ -88,19 +88,49 @@ call "%VCVARS%" >nul || exit /b 1
 "%CMAKE%" --build "%BUILDDIR%" || exit /b 1
 
 if "%RUNTESTS%"=="1" (
-  pushd "%BUILDDIR%"
-  REM RUN THE SUITES IN PARALLEL. ctest is serial by default, which meant 41
-  REM binaries queueing one at a time on a many-core machine for no reason:
-  REM 60s serial against 24s at -j 8, with identical results. Most suites are
-  REM pure computation and finish in hundredths of a second; they were simply
-  REM waiting their turn.
+  REM -------------------------------------------------------------------------
+  REM HOW MANY WORKERS: ASK THE MACHINE, DO NOT ASSUME THE AUTHOR'S.
   REM
-  REM 8 rather than the core count: beyond that the wall clock is set by the
-  REM single longest suite (test_cli, ~10s), so more workers buy nothing and
-  REM only add contention to the windowed suites, which each create a real
-  REM frame. Measured at 24.2s for -j 8 and 23.4s for -j 16.
-  "%CTEST%" --output-on-failure -j 8
+  REM ctest is serial by default, which meant 41 binaries queueing one at a time
+  REM on a many-core machine for no reason: 60s serial against 24s in parallel,
+  REM with identical results. Most suites are pure computation and finish in
+  REM hundredths of a second; they were simply waiting their turn.
+  REM
+  REM But the count was then hardcoded at 8, and 8 is a property of THIS
+  REM workstation (24 cores), not of the job. A GitHub runner has 4, so 8 was
+  REM two processes per core, several of them holding real windows, and every
+  REM timing assumption in the tree got to absorb the difference.
+  REM
+  REM So: one worker per core, capped at 8 and floored at 2. The cap is measured
+  REM -- beyond 8 the wall clock is set by the single longest suite and more
+  REM workers buy nothing (24.2s at -j 8 against 23.4s at -j 16 here) -- and the
+  REM floor keeps a single-core VM from running serially by accident.
+  REM
+  REM The windowed suites additionally hold a RESOURCE_LOCK (CMakeLists.txt), so
+  REM raising this number never puts two real frames on the desktop at once.
+  REM -------------------------------------------------------------------------
+  set "JOBS=%NUMBER_OF_PROCESSORS%"
+  if not defined JOBS set "JOBS=4"
+  set /a JOBS=JOBS+0
+  if !JOBS! GTR 8 set "JOBS=8"
+  if !JOBS! LSS 2 set "JOBS=2"
+
+  pushd "%BUILDDIR%"
+  REM A skipped case appends a line here (tests/test_runner.h). Start each run
+  REM from an empty file so what is printed below is THIS run's skips.
+  if exist "test-skips.log" del /q "test-skips.log"
+  echo Running ctest with !JOBS! workers ^(this machine reports %NUMBER_OF_PROCESSORS% processors^)
+  "%CTEST%" --output-on-failure -j !JOBS!
   set "RC=!ERRORLEVEL!"
+  REM SAY WHAT DID NOT RUN. ctest keeps the output of a suite that failed and
+  REM discards the rest, so a case that skipped for want of hardware -- an audio
+  REM engine, a window station, UI Automation -- was invisible in a green run,
+  REM which is precisely the shape of "passed" that means nothing.
+  if exist "test-skips.log" (
+    echo.
+    echo Cases SKIPPED in this run -- these did NOT test anything:
+    type "test-skips.log"
+  )
   popd
   exit /b !RC!
 )

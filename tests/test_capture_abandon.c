@@ -29,6 +29,7 @@
  */
 #include "test_runner.h"
 #include "test_wait.h"
+#include "test_engine.h"
 
 #include "capture/capture_fake.h"
 #include "capture/capture_process.h"
@@ -322,10 +323,7 @@ TEST(mute_polling_does_not_run_on_the_pump_thread)
 
     e = apr_capture_create(&cfg, rb, &c);
     if (apr_failed(&e)) {
-        wchar_t buf[512];
-        apr_err_format(&e, buf, 512);
-        printf("      SKIPPED: no process-loopback capture here\n");
-        printf("      reason: %ls\n", buf);
+        apr_test_skip_capture("no process-loopback capture here", &e);
         if (c) (void)apr_capture_destroy(c);
         rb_destroy(rb);
         return;
@@ -333,7 +331,7 @@ TEST(mute_polling_does_not_run_on_the_pump_thread)
 
     e = c->vt->start(c);
     if (apr_failed(&e)) {
-        printf("      SKIPPED: the tap would not start\n");
+        apr_test_skip_capture("the tap would not start", &e);
         (void)apr_capture_destroy(c);
         rb_destroy(rb);
         return;

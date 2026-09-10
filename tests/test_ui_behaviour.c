@@ -595,8 +595,7 @@ static int fix_up(Fix *f, int source, int bus, int edge, int output)
     f->h.setup.want_output = output;
 
     if (!ui_start(&f->h)) {
-        printf("      SKIPPED: could not create a window (no interactive "
-               "window station?)\n");
+        SKIP("could not create a window (no interactive window station?)");
         return 0;
     }
     f->up = 1;
@@ -653,7 +652,7 @@ TEST(the_status_bar_carries_the_last_announcement_as_its_accessible_name)
     if (!fix_up(&f, 1, 0, 0, 0)) { fix_down(&f); return; }
 
     if (!uia_open(&c)) {
-        printf("      SKIPPED: no UI Automation on this machine\n");
+        SKIP("no UI Automation on this machine");
         fix_down(&f);
         return;
     }
@@ -688,7 +687,7 @@ TEST(an_announcement_raises_a_live_region_event_carrying_the_sentence)
 
     hook = watch_begin(f.h.status, EVENT_OBJECT_LIVEREGIONCHANGED);
     if (!hook) {
-        printf("      SKIPPED: SetWinEventHook refused\n");
+        SKIP("SetWinEventHook refused");
         fix_down(&f);
         return;
     }
@@ -1380,7 +1379,7 @@ TEST(arrowing_down_the_structure_panel_does_not_yank_focus_out_of_it)
 
     if (!fix_up(&f, 1, 1, 1, 1)) { fix_down(&f); return; }
     if (!f.h.tv) {
-        printf("      SKIPPED: no tree panel in this build\n");
+        SKIP("no tree panel in this build");
         fix_down(&f);
         return;
     }
@@ -1390,7 +1389,7 @@ TEST(arrowing_down_the_structure_panel_does_not_yank_focus_out_of_it)
     memset(visited, 0, sizeof visited);
 
     if (!focus_the_tree(&f.h)) {
-        printf("      SKIPPED: focus never reached the tree control\n");
+        SKIP("focus never reached the tree control");
         fix_down(&f);
         return;
     }
@@ -1464,9 +1463,9 @@ TEST(the_caret_moves_the_canvas_quietly_and_only_enter_takes_the_keyboard_there)
     int bus_node, t;
 
     if (!fix_up(&f, 1, 1, 1, 1)) { fix_down(&f); return; }
-    if (!f.h.tv) { printf("      SKIPPED: no tree panel\n"); fix_down(&f); return; }
+    if (!f.h.tv) { SKIP("no tree panel"); fix_down(&f); return; }
     if (!focus_the_tree(&f.h)) {
-        printf("      SKIPPED: focus never reached the tree control\n");
+        SKIP("focus never reached the tree control");
         fix_down(&f);
         return;
     }
@@ -1730,7 +1729,7 @@ TEST(an_edit_the_canvas_makes_by_itself_reaches_the_tree_panel)
     int si, bi;
 
     if (!fix_up(&f, 1, 1, 1, 1)) { fix_down(&f); return; }
-    if (!f.h.tv) { printf("      SKIPPED: no tree panel\n"); fix_down(&f); return; }
+    if (!f.h.tv) { SKIP("no tree panel"); fix_down(&f); return; }
 
     ASSERT_TRUE(tree_agrees_with_model(&f.h, f.g));
 
@@ -1766,7 +1765,7 @@ TEST(the_tree_says_a_bus_is_recording_while_it_is_recording)
     int heard;
 
     if (!fix_up(&f, 1, 1, 1, 1)) { fix_down(&f); return; }
-    if (!f.h.tv) { printf("      SKIPPED: no tree panel\n"); fix_down(&f); return; }
+    if (!f.h.tv) { SKIP("no tree panel"); fix_down(&f); return; }
 
     memset(&bus_row, 0, sizeof bus_row);
     bus_row.kind = APR_TREE_ROW_BUS;
@@ -1896,7 +1895,7 @@ TEST(hiding_the_window_is_refused_when_there_is_no_icon_to_hide_into)
      * does not take the foreground away from whoever is at the machine. */
     ShowWindow(f.h.frame, SW_SHOWNOACTIVATE);
     if (!IsWindowVisible(f.h.frame)) {
-        printf("      SKIPPED: the frame would not become visible\n");
+        SKIP("the frame would not become visible");
         fix_down(&f);
         return;
     }
@@ -2077,7 +2076,7 @@ TEST(cancelling_a_session_load_is_not_reported_as_a_failure)
     free(s);
     if (apr_failed(&e)) {
         wchar_t why[512];
-        printf("      SKIPPED: could not write the session: %ls\n",
+        SKIPF("could not write the session: %ls",
                apr_err_format(&e, why, 512));
         DeleteFileW(path);
         return;
@@ -2092,8 +2091,7 @@ TEST(cancelling_a_session_load_is_not_reported_as_a_failure)
 
     dlg = wait_for_dialog(&f.h);
     if (!dlg) {
-        printf("      SKIPPED: the resolve report did not open (this session "
-               "resolved cleanly on this machine)\n");
+        SKIP("the resolve report did not open (this session resolved cleanly on this machine)");
         apr_dlg_test_set_session_path(NULL);
         fix_down(&f);
         DeleteFileW(path);
@@ -2143,7 +2141,7 @@ TEST(ctrl_t_with_focus_on_the_divider_does_not_strand_it_in_a_hidden_window)
         }
     }
     if (!split) {
-        printf("      SKIPPED: no splitter window in this build\n");
+        SKIP("no splitter window in this build");
         fix_down(&f);
         return;
     }
@@ -2152,7 +2150,7 @@ TEST(ctrl_t_with_focus_on_the_divider_does_not_strand_it_in_a_hidden_window)
      * then Tab until the divider has it. A SetFocus from this thread would do
      * nothing at all, silently. */
     if (!focus_the_tree(&f.h)) {
-        printf("      SKIPPED: focus never reached the tree control\n");
+        SKIP("focus never reached the tree control");
         fix_down(&f);
         return;
     }
@@ -2176,7 +2174,7 @@ TEST(ctrl_t_with_focus_on_the_divider_does_not_strand_it_in_a_hidden_window)
         if (!moved) break;
     }
     if (focus_on_ui_thread(&f.h) != split) {
-        printf("      SKIPPED: Tab never landed on the splitter\n");
+        SKIP("Tab never landed on the splitter");
         fix_down(&f);
         return;
     }
@@ -2292,8 +2290,7 @@ TEST(an_edit_the_model_refuses_is_announced_with_the_reason_the_model_gave)
      * the model, never guessed, and never written down here as prose. */
     e = apr_graph_connect(f.g, extra, BUS(&f), 1.0f);
     if (!apr_failed(&e)) {
-        printf("      SKIPPED: this build accepts more than %d sources on a "
-               "bus\n", (int)APR_MAX_SOURCES_PER_BUS);
+        SKIPF("this build accepts more than %d sources on a bus", (int)APR_MAX_SOURCES_PER_BUS);
         fix_down(&f);
         return;
     }
@@ -2388,7 +2385,7 @@ TEST(a_refusal_from_the_controller_is_a_catalog_sentence_end_to_end)
         e = apr_controller_add_source(f.h.ctl, L"One Too Many", &cfg);
     }
     if (!apr_failed(&e)) {
-        printf("      SKIPPED: this build accepts more than %d sources\n",
+        SKIPF("this build accepts more than %d sources",
                (int)APR_MAX_SOURCES);
         fix_down(&f);
         return;
@@ -2460,7 +2457,7 @@ TEST(focus_arriving_at_the_canvas_lands_on_a_node_and_not_on_the_pane)
 
     ShowWindow(f.h.frame, SW_SHOWNOACTIVATE);
     if (!IsWindowVisible(f.h.frame)) {
-        printf("      SKIPPED: the frame would not become visible\n");
+        SKIP("the frame would not become visible");
         fix_down(&f);
         return;
     }
@@ -2528,7 +2525,7 @@ TEST(a_session_opened_with_nobody_to_ask_reports_the_sources_it_dropped)
     e = apr_session_save(s, path);
     free(s);
     if (apr_failed(&e)) {
-        printf("      SKIPPED: could not write the session\n");
+        SKIP("could not write the session");
         DeleteFileW(path);
         return;
     }

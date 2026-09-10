@@ -1505,6 +1505,30 @@ static int wait_for_files(AprController *c, DWORD limit_ms)
         MSG msg;
 
         if (!c->recording || !c->runner) return 1;
+
+        /* THE DEADLINE IS CHECKED BEFORE THE WAIT, NOT AFTER IT.
+         *
+         * It used to be the last line of the loop, which meant every call
+         * spent one unconditional MsgWaitForMultipleObjects -- up to 50 ms of
+         * pumping -- no matter what limit_ms said. A budget of zero therefore
+         * did not mean "do not wait"; it meant "wait 50 ms", and 50 ms is
+         * ample for the posted STOPPED notice to be dispatched right here, run
+         * recording_finished(), and clear c->recording. The caller then took
+         * the success path with the timeout path never reached.
+         *
+         * That is a bound that is not a bound, and it is why
+         * a_close_that_runs_out_of_patience_says_that_rather_than_repeating_-
+         * itself failed about one run in eight: it sets the budget to 0,
+         * expects the give-up sentence, and got "Recording stopped" whenever
+         * the encoders happened to finish inside that 50 ms window. The
+         * machine deciding which sentence the user hears is not a test defect
+         * to be widened away.
+         *
+         * The recording having ALREADY finished is checked above and returns
+         * success, so an expired budget here always means what it says: the
+         * files were still being written when the time ran out. */
+        if (GetTickCount() - start >= limit_ms) return 0;
+
         (void)MsgWaitForMultipleObjects(0, NULL, FALSE, 50, QS_ALLINPUT);
         while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
             /* WM_QUIT IS NOT OURS TO SWALLOW, AND SWALLOWING IT LEFT A ZOMBIE.
@@ -1528,7 +1552,6 @@ static int wait_for_files(AprController *c, DWORD limit_ms)
             DispatchMessageW(&msg);
         }
         if (!c->recording) return 1;
-        if (GetTickCount() - start > limit_ms) return 0;
     }
 }
 

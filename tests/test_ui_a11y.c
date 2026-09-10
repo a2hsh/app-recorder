@@ -375,13 +375,12 @@ TEST(every_element_of_the_live_accessibility_tree_has_a_name)
     WalkStats st;
 
     if (!ui_start(&h)) {
-        printf("      SKIPPED: could not create a window (no interactive "
-               "window station?)\n");
+        SKIP("could not create a window (no interactive window station?)");
         ui_stop(&h);
         return;
     }
     if (!uia_open(&c, h.frame)) {
-        printf("      SKIPPED: UI Automation client unavailable here\n");
+        SKIP("UI Automation client unavailable here");
         uia_close(&c);
         ui_stop(&h);
         return;
@@ -415,9 +414,9 @@ TEST(the_frames_own_name_and_control_type_are_right)
     UiaClient c;
     wchar_t name[256];
 
-    if (!ui_start(&h)) { printf("      SKIPPED: no window\n"); ui_stop(&h); return; }
+    if (!ui_start(&h)) { SKIP("no window"); ui_stop(&h); return; }
     if (!uia_open(&c, h.frame)) {
-        printf("      SKIPPED: no UIA\n"); uia_close(&c); ui_stop(&h); return;
+        SKIP("no UIA"); uia_close(&c); ui_stop(&h); return;
     }
 
     el_name(c.root, name, 256);
@@ -445,7 +444,7 @@ TEST(both_panes_are_named_from_the_catalog_and_keyboard_focusable)
     HWND panes[2];
     AprStrId ids[2];
 
-    if (!ui_start(&h)) { printf("      SKIPPED: no window\n"); ui_stop(&h); return; }
+    if (!ui_start(&h)) { SKIP("no window"); ui_stop(&h); return; }
 
     tree = apr_ui_app_pane(h.app, APR_PANE_TREE);
     canvas = apr_ui_app_pane(h.app, APR_PANE_CANVAS);
@@ -453,7 +452,7 @@ TEST(both_panes_are_named_from_the_catalog_and_keyboard_focusable)
     ASSERT_NOT_NULL(canvas);
 
     if (!uia_open(&c, h.frame)) {
-        printf("      SKIPPED: no UIA\n"); uia_close(&c); ui_stop(&h); return;
+        SKIP("no UIA"); uia_close(&c); ui_stop(&h); return;
     }
 
     panes[0] = tree;   ids[0] = APR_S_UI_PANE_TREE;
@@ -515,7 +514,7 @@ TEST(f6_really_moves_focus_between_panes)
     HWND tree, canvas, before, after;
     int tries;
 
-    if (!ui_start(&h)) { printf("      SKIPPED: no window\n"); ui_stop(&h); return; }
+    if (!ui_start(&h)) { SKIP("no window"); ui_stop(&h); return; }
 
     tree = apr_ui_app_pane(h.app, APR_PANE_TREE);
     canvas = apr_ui_app_pane(h.app, APR_PANE_CANVAS);
@@ -536,7 +535,7 @@ TEST(f6_really_moves_focus_between_panes)
            (void *)before, (void *)tree, (void *)canvas);
 
     if (before == NULL) {
-        printf("      SKIPPED: the UI thread never took focus in this session\n");
+        SKIP("the UI thread never took focus in this session");
         ui_stop(&h);
         return;
     }
@@ -593,7 +592,7 @@ TEST(every_menu_item_is_named_and_carries_a_unique_mnemonic)
     HMENU bar;
     int top, n, i, j;
 
-    if (!ui_start(&h)) { printf("      SKIPPED: no window\n"); ui_stop(&h); return; }
+    if (!ui_start(&h)) { SKIP("no window"); ui_stop(&h); return; }
 
     bar = GetMenu(h.frame);
     ASSERT_NOT_NULL(bar);
@@ -669,7 +668,7 @@ TEST(the_menu_reads_from_the_catalog_not_from_literals)
     HMENU bar;
     wchar_t label[128];
 
-    if (!ui_start(&h)) { printf("      SKIPPED: no window\n"); ui_stop(&h); return; }
+    if (!ui_start(&h)) { SKIP("no window"); ui_stop(&h); return; }
 
     bar = GetMenu(h.frame);
     ASSERT_NOT_NULL(bar);
@@ -689,7 +688,7 @@ TEST(unimplemented_commands_are_disabled_but_still_present_and_named)
     HMENU bar;
     UINT state;
 
-    if (!ui_start(&h)) { printf("      SKIPPED: no window\n"); ui_stop(&h); return; }
+    if (!ui_start(&h)) { SKIP("no window"); ui_stop(&h); return; }
 
     bar = GetMenu(h.frame);
     ASSERT_NOT_NULL(bar);
@@ -724,7 +723,7 @@ TEST(the_frame_never_carries_layout_rtl_even_in_an_rtl_language)
     ASSERT_EQ_INT(1, apr_str_is_rtl());
 
     if (!ui_start(&h)) {
-        printf("      SKIPPED: no window\n");
+        SKIP("no window");
         ui_stop(&h);
         (void)apr_str_set_language(MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US));
         return;
@@ -759,7 +758,7 @@ TEST(the_structure_panel_moves_to_the_trailing_side_in_an_rtl_language)
     ASSERT_FALSE(apr_failed(&e));
 
     if (!ui_start(&h)) {
-        printf("      SKIPPED: no window\n");
+        SKIP("no window");
         ui_stop(&h);
         (void)apr_str_set_language(MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US));
         return;
@@ -827,7 +826,7 @@ TEST(every_operation_that_builds_a_graph_is_on_the_menu_and_named)
         { APR_CMD_HELP_ABOUT,    APR_S_UI_MENU_HELP_ABOUT }
     };
 
-    if (!ui_start(&h)) { printf("      SKIPPED: no window\n"); ui_stop(&h); return; }
+    if (!ui_start(&h)) { SKIP("no window"); ui_stop(&h); return; }
 
     bar = GetMenu(h.frame);
     ASSERT_NOT_NULL(bar);
@@ -884,7 +883,7 @@ TEST(every_accelerated_operation_advertises_its_key_on_the_menu_item)
         { APR_CMD_HELP_KEYS,     L"F1" }
     };
 
-    if (!ui_start(&h)) { printf("      SKIPPED: no window\n"); ui_stop(&h); return; }
+    if (!ui_start(&h)) { SKIP("no window"); ui_stop(&h); return; }
 
     bar = GetMenu(h.frame);
     ASSERT_NOT_NULL(bar);

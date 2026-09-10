@@ -253,7 +253,7 @@ TEST(the_tray_tooltip_can_say_paused_and_carries_the_recorded_length)
     const wchar_t *args[1];
 
     (void)apr_str_init();
-    if (!tray_up(&t)) { printf("      SKIPPED: no window station\n"); return; }
+    if (!tray_up(&t)) { SKIP("no window station"); return; }
 
     apr_tray_set_status(t.tray, APR_TRAY_RECORDING, L"00:00:12");
     ASSERT_EQ_INT(APR_TRAY_RECORDING, (int)apr_tray_state(t.tray));
@@ -281,7 +281,7 @@ TEST(the_tray_menu_offers_pause_and_resume)
     int      i, n, saw_pause = 0, saw_resume = 0;
 
     (void)apr_str_init();
-    if (!tray_up(&t)) { printf("      SKIPPED: no window station\n"); return; }
+    if (!tray_up(&t)) { SKIP("no window station"); return; }
 
     /* Recording and not paused: Pause is live, Resume is greyed. Greyed and
      * PRESENT -- an item that vanishes says nothing to a screen reader. */
@@ -521,7 +521,7 @@ TEST(pausing_and_resuming_are_both_announced_and_both_change_the_state)
     UiHost  h;
     wchar_t buf[TXT_CCH];
 
-    if (!ui_start(&h)) { printf("      SKIPPED: no window station\n"); ui_stop(&h); return; }
+    if (!ui_start(&h)) { SKIP("no window station"); ui_stop(&h); return; }
 
     ASSERT_TRUE(start_recording(&h));
     ASSERT_FALSE(apr_controller_paused(h.ctl));
@@ -552,7 +552,7 @@ TEST(the_tray_tooltip_follows_the_recording_into_the_pause_and_out_again)
      * does tell the tray, so Windows+B answers "paused" while it is paused. */
     UiHost h;
 
-    if (!ui_start(&h)) { printf("      SKIPPED: no window station\n"); ui_stop(&h); return; }
+    if (!ui_start(&h)) { SKIP("no window station"); ui_stop(&h); return; }
 
     ASSERT_EQ_INT(APR_TRAY_IDLE, (int)apr_controller_tray_state(h.ctl));
     ASSERT_TRUE(start_recording(&h));
@@ -581,7 +581,7 @@ TEST(a_pause_while_the_window_is_not_in_front_goes_out_as_a_balloon)
     unsigned before;
     wchar_t  buf[TXT_CCH];
 
-    if (!ui_start(&h)) { printf("      SKIPPED: no window station\n"); ui_stop(&h); return; }
+    if (!ui_start(&h)) { SKIP("no window station"); ui_stop(&h); return; }
 
     ASSERT_TRUE(start_recording(&h));
     apr_controller_test_set_foreground(h.ctl, 0);   /* not in front */
@@ -617,7 +617,7 @@ TEST(a_paused_recording_still_refuses_to_be_edited_and_says_why)
     wchar_t buf[TXT_CCH];
     size_t  buses;
 
-    if (!ui_start(&h)) { printf("      SKIPPED: no window station\n"); ui_stop(&h); return; }
+    if (!ui_start(&h)) { SKIP("no window station"); ui_stop(&h); return; }
 
     ASSERT_TRUE(start_recording(&h));
     accel(&h, APR_CMD_RECORD_PAUSE);
@@ -641,7 +641,7 @@ TEST(the_pause_pair_is_greyed_the_right_way_round_at_every_moment)
      * happened. Grey is the answer to the question, not a decoration. */
     UiHost h;
 
-    if (!ui_start(&h)) { printf("      SKIPPED: no window station\n"); ui_stop(&h); return; }
+    if (!ui_start(&h)) { SKIP("no window station"); ui_stop(&h); return; }
 
     /* Idle: neither. */
     ASSERT_FALSE(apr_ui_app_command_enabled(h.app, APR_CMD_RECORD_PAUSE));
@@ -675,7 +675,7 @@ TEST(the_keys_are_answered_out_loud_even_when_there_is_nothing_to_pause)
     UiHost  h;
     wchar_t buf[TXT_CCH];
 
-    if (!ui_start(&h)) { printf("      SKIPPED: no window station\n"); ui_stop(&h); return; }
+    if (!ui_start(&h)) { SKIP("no window station"); ui_stop(&h); return; }
 
     accel(&h, APR_CMD_RECORD_PAUSE);
     ASSERT_WSTR_EQ(apr_str(APR_S_UI_ANN_NOT_RECORDING), said(&h, buf, TXT_CCH));
@@ -707,7 +707,7 @@ TEST(the_elapsed_clock_is_recorded_time_and_stops_while_paused)
     UiHost  h;
     int64_t at_pause, after;
 
-    if (!ui_start(&h)) { printf("      SKIPPED: no window station\n"); ui_stop(&h); return; }
+    if (!ui_start(&h)) { SKIP("no window station"); ui_stop(&h); return; }
 
     ASSERT_TRUE(start_recording(&h));
     Sleep(250);

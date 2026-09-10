@@ -20,6 +20,8 @@
  * gapless stream.
  */
 #include "test_runner.h"
+#include "test_wait.h"
+#include "test_engine.h"
 
 #include "capture.h"
 #include "clock.h"
@@ -27,16 +29,6 @@
 
 #include <windows.h>
 #include <string.h>
-
-static void skip(const char *why, const AprErr *e)
-{
-    wchar_t buf[512];
-    printf("      SKIPPED: %s\n", why);
-    if (e) {
-        apr_err_format(e, buf, 512);
-        printf("      reason: %ls\n", buf);
-    }
-}
 
 /* ==========================================================================
  * Argument checking -- no hardware involved
@@ -146,7 +138,7 @@ TEST(a_process_tap_on_this_very_process_is_gapless_and_silent)
 
     e = apr_capture_create(&cfg, rb, &c);
     if (apr_failed(&e)) {
-        skip("no process-loopback activation on this machine", &e);
+        apr_test_skip_capture("no process-loopback activation on this machine", &e);
         rb_destroy(rb);
         return;
     }
@@ -154,11 +146,28 @@ TEST(a_process_tap_on_this_very_process_is_gapless_and_silent)
     t_start = apr_qpc_now();
     e = c->vt->start(c);
     if (apr_failed(&e)) {
-        skip("process loopback would not start", &e);
+        apr_test_skip_capture("process loopback would not start", &e);
         apr_capture_destroy(c);
         rb_destroy(rb);
         return;
     }
+
+    /* WAIT for the first packet rather than assuming one has arrived. A cold
+     * audio engine takes its time -- measured at ~1 s for the first tap on a
+     * GitHub runner -- and "no engine at all" is then simply the case where it
+     * never comes. See test_engine.h. */
+    if (apr_test_wait_for_frames(c, APR_TEST_ENGINE_FIRST_FRAME_MS) == 0) {
+        apr_test_skip_capture("the audio engine fed this tap nothing; there is "
+                              "none on this machine", NULL);
+        c->vt->stop(c);
+        apr_capture_destroy(c);
+        rb_destroy(rb);
+        return;
+    }
+
+    /* Now spend a real window, so the drift assertion below has something to
+     * measure. This one IS a sleep and has to be: it is buying 400 ms of
+     * timeline, not waiting for an event (test_wait.h, "what this is not for"). */
     Sleep(400);
     c->vt->stop(c);
     t_stop = apr_qpc_now();
@@ -217,12 +226,25 @@ TEST(a_process_tap_stops_cleanly_and_twice)
     ASSERT_FALSE(apr_failed(&e));
 
     e = apr_capture_create(&cfg, rb, &c);
-    if (apr_failed(&e)) { skip("no process-loopback activation", &e); rb_destroy(rb); return; }
+    if (apr_failed(&e)) {
+        apr_test_skip_capture("no process-loopback activation", &e);
+        rb_destroy(rb);
+        return;
+    }
 
     e = c->vt->start(c);
-    if (apr_failed(&e)) { skip("would not start", &e); apr_capture_destroy(c); rb_destroy(rb); return; }
+    if (apr_failed(&e)) {
+        apr_test_skip_capture("would not start", &e);
+        apr_capture_destroy(c);
+        rb_destroy(rb);
+        return;
+    }
 
-    Sleep(50);
+    /* This case is about stop() being idempotent, not about frames -- but stop
+     * before the engine has ever fed the pump is a different code path from
+     * stop after it has, and the one worth testing is the second. Bounded, and
+     * a machine with no engine simply goes on to the stops. */
+    (void)apr_test_wait_for_frames(c, APR_TEST_ENGINE_FIRST_FRAME_MS);
     c->vt->stop(c);
     c->vt->stop(c);          /* idempotent */
     apr_capture_destroy(c);  /* close implies stop a third time */
@@ -252,7 +274,7 @@ TEST(the_default_capture_endpoint_opens_at_the_session_format)
 
     e = apr_capture_create(&cfg, rb, &c);
     if (apr_failed(&e)) {
-        skip("no capture endpoint on this machine", &e);
+        apr_test_skip_capture("no capture endpoint on this machine", &e);
         rb_destroy(rb);
         return;
     }

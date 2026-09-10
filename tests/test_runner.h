@@ -28,6 +28,9 @@
  *   - An ASSERT_* failure prints file(line), the expression, and the expected
  *     vs. actual values, then RETURNS from the test case. Later assertions in
  *     that case do not run (they would typically fault). Other cases still run.
+ *   - SKIP("why") marks the running case as skipped. It does NOT return: the
+ *     caller still has its fixture to take down, and a macro that walked out
+ *     of the case would leak a window or a capture. Say it, clean up, return.
  *   - The process exit code is the number of failed cases, capped at 125, so
  *     ctest reports failure.
  *   - `test_xxx.exe <substring>` runs only the cases whose name contains
@@ -48,6 +51,9 @@
 #include <math.h>
 #include <time.h>
 
+#include <windows.h>
+#include <mmsystem.h>     /* timeBeginPeriod; WIN32_LEAN_AND_MEAN drops it */
+
 /* This header defines helpers that any single test file will only partly use.
  * C4505 (unreferenced static function removed) is expected and not a defect. */
 #pragma warning(disable : 4505)
@@ -67,6 +73,7 @@ static TrTest g_tr_tests[TR_MAX_TESTS];
 static int    g_tr_test_count;
 static int    g_tr_case_failed;   /* failing assertions in the running case */
 static long   g_tr_case_asserts;  /* assertions executed in the running case */
+static int    g_tr_case_skipped;  /* the running case called SKIP() */
 
 static void tr_register(const char *name, TrTestFn fn)
 {
@@ -319,6 +326,66 @@ static void tr_fail_mem(const char *file, int line, const char *expr,
     } while (0)
 
 /* ------------------------------------------------------------------------
+ * SKIPPING, LOUDLY.
+ *
+ * Design section 11: nothing in CI may depend on hardware being present, so a
+ * case that needs a live audio engine, a window station or UI Automation says
+ * SKIPPED where there is none. The danger in that is obvious and this tree has
+ * already been bitten by it once: a skip that looks exactly like a pass is a
+ * defect wearing a green tick. (The apartment regression survived a whole
+ * green suite that way.)
+ *
+ * So a skip is:
+ *
+ *   NAMED    -- the reason is printed, at the case, in the case's own output.
+ *   MARKED   -- the case reports [  SKIPPED ] rather than [       OK ], and
+ *               the suite's closing line carries the count.
+ *   COLLECTED -- and this is the part that survives ctest, which throws away
+ *               the output of a suite that passed. Every skip is appended to
+ *               the file named by APPRECORDER_SKIP_LOG (CMake points every
+ *               test at one file under the build directory), and build.cmd
+ *               prints the lot after the run. A skip on a CI runner is then
+ *               visible in the CI log without anyone re-running anything.
+ *
+ * SKIP does not return. The caller owns a fixture -- a window, a capture, a
+ * ring -- and walking out of the case from inside a macro would leak it.
+ * ------------------------------------------------------------------------ */
+
+static const char *g_tr_case_name = "";
+
+static void tr_skip(const char *file, int line, const char *why)
+{
+    const char *log;
+
+    g_tr_case_skipped = 1;
+    printf("      SKIPPED: %s\n", why ? why : "(no reason given)");
+    fflush(stdout);
+
+    log = getenv("APPRECORDER_SKIP_LOG");
+    if (log && *log) {
+        FILE *f;
+        /* Append mode, one fprintf: several suites run at once and each writes
+         * a single short line, which the CRT hands to the OS as one appending
+         * write. This is a diagnostic, not a ledger. */
+        if (fopen_s(&f, log, "a") == 0 && f) {
+            fprintf(f, "%s(%d): %s -- %s\n", file, line,
+                    g_tr_case_name, why ? why : "(no reason given)");
+            fclose(f);
+        }
+    }
+}
+
+/* Say what was skipped and why. Then clean up and return, at the call site. */
+#define SKIP(why) tr_skip(__FILE__, __LINE__, (why))
+
+/* The same, with printf arguments, for reasons that carry a value. */
+#define SKIPF(fmt, ...)                                                    \
+    do { char tr_sb_[512];                                                 \
+         _snprintf_s(tr_sb_, sizeof tr_sb_, _TRUNCATE, (fmt), __VA_ARGS__);\
+         tr_skip(__FILE__, __LINE__, tr_sb_);                              \
+    } while (0)
+
+/* ------------------------------------------------------------------------
  * Driver.
  *
  * Every case is timed and the figure is printed beside it. A suite that takes
@@ -336,7 +403,19 @@ static long tr_millis(void)
 int main(int argc, char **argv)
 {
     const char *filter = NULL;
-    int i, ran = 0, failed = 0, list_only = 0;
+    int i, ran = 0, failed = 0, skipped = 0, list_only = 0;
+
+    /* MAKE THE POLL STEP REAL. tests/test_wait.h polls every APR_TEST_POLL_MS,
+     * which is written as one millisecond -- but Sleep(1) sleeps to the next
+     * timer interrupt, and the default period is 15.625 ms. Measured on the
+     * author's workstation: Sleep(1) took 13.05 ms as the machine sits, and
+     * 1.45 ms with the period raised. With hundreds of waits in a UI suite,
+     * that difference is seconds per suite and it is pure latency.
+     *
+     * Since Windows 10 2004 this affects only the calling process's own waits,
+     * so it is not a change to the machine the suite is running on. It is
+     * released below rather than left set. */
+    (void)timeBeginPeriod(1);
 
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--list") == 0) list_only = 1;
@@ -346,11 +425,13 @@ int main(int argc, char **argv)
     if (g_tr_test_count == 0) {
         printf("test_runner: no tests registered -- this is a build defect, "
                "not an empty suite.\n");
+        (void)timeEndPeriod(1);
         return 2;
     }
 
     if (list_only) {
         for (i = 0; i < g_tr_test_count; i++) printf("%s\n", g_tr_tests[i].name);
+        (void)timeEndPeriod(1);
         return 0;
     }
 
@@ -365,6 +446,8 @@ int main(int argc, char **argv)
         printf("[ RUN      ] %s\n", g_tr_tests[i].name);
         g_tr_case_failed  = 0;
         g_tr_case_asserts = 0;
+        g_tr_case_skipped = 0;
+        g_tr_case_name    = g_tr_tests[i].name;
         fflush(stdout);
         ms = tr_millis();
         g_tr_tests[i].fn();
@@ -374,6 +457,12 @@ int main(int argc, char **argv)
             printf("[   FAILED ] %s (%ld assertion%s run, %ld ms)\n",
                    g_tr_tests[i].name, g_tr_case_asserts,
                    g_tr_case_asserts == 1 ? "" : "s", ms);
+        } else if (g_tr_case_skipped) {
+            /* A skip is NOT a pass and must never read like one. */
+            skipped++;
+            printf("[  SKIPPED ] %s (%ld assertion%s, %ld ms)\n",
+                   g_tr_tests[i].name, g_tr_case_asserts,
+                   g_tr_case_asserts == 1 ? "" : "s", ms);
         } else {
             printf("[       OK ] %s (%ld assertion%s, %ld ms)\n",
                    g_tr_tests[i].name, g_tr_case_asserts,
@@ -381,13 +470,21 @@ int main(int argc, char **argv)
         }
         fflush(stdout);
     }
+    g_tr_case_name = "";
 
     if (filter && ran == 0) {
         printf("test_runner: filter \"%s\" matched no tests\n", filter);
+        (void)timeEndPeriod(1);
         return 2;
     }
 
-    printf("\n%d run, %d passed, %d failed\n", ran, ran - failed, failed);
+    if (skipped) {
+        printf("\n%d run, %d passed, %d failed, %d SKIPPED\n",
+               ran, ran - failed - skipped, failed, skipped);
+    } else {
+        printf("\n%d run, %d passed, %d failed\n", ran, ran - failed, failed);
+    }
+    (void)timeEndPeriod(1);
     return failed > 125 ? 125 : failed;
 }
 

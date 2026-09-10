@@ -264,7 +264,7 @@ TEST(an_available_update_is_said_out_loud)
     AprUpdateResult r;
     const wchar_t *args[2];
 
-    if (!ui_start(&h)) { printf("      SKIPPED: no window station\n"); ui_stop(&h); return; }
+    if (!ui_start(&h)) { SKIP("no window station"); ui_stop(&h); return; }
 
     apr_controller_test_set_foreground(h.ctl, 1);   /* the window is in front */
     apr_controller_test_set_update_answer(h.ctl, 0);
@@ -287,7 +287,7 @@ TEST(an_available_update_reaches_a_hidden_window_through_the_notification_area)
     wchar_t balloon[TXT_CCH];
     const wchar_t *args[2];
 
-    if (!ui_start(&h)) { printf("      SKIPPED: no window station\n"); ui_stop(&h); return; }
+    if (!ui_start(&h)) { SKIP("no window station"); ui_stop(&h); return; }
 
     /* This application spends its recordings minimised, which is exactly where
      * a status-bar live region reaches nobody. */
@@ -315,7 +315,7 @@ TEST(a_refused_release_is_announced_loudly_and_is_not_the_network_sentence)
     AprUpdateResult r;
     wchar_t got[TXT_CCH], failed_sentence[TXT_CCH];
 
-    if (!ui_start(&h)) { printf("      SKIPPED: no window station\n"); ui_stop(&h); return; }
+    if (!ui_start(&h)) { SKIP("no window station"); ui_stop(&h); return; }
 
     apr_controller_test_set_foreground(h.ctl, 0);
     result_of(&r, APR_UPDATE_REFUSED, APR_UPDATE_WHY_TIMER, L"9.9.9");
@@ -345,7 +345,7 @@ TEST(a_check_nobody_asked_for_stays_quiet_when_there_is_no_news)
     AprUpdateResult r;
     wchar_t before[TXT_CCH], after[TXT_CCH];
 
-    if (!ui_start(&h)) { printf("      SKIPPED: no window station\n"); ui_stop(&h); return; }
+    if (!ui_start(&h)) { SKIP("no window station"); ui_stop(&h); return; }
 
     said(&h, before, TXT_CCH);
 
@@ -374,7 +374,7 @@ TEST(a_check_the_user_asked_for_always_answers)
     AprUpdateResult r;
     const wchar_t *args[1];
 
-    if (!ui_start(&h)) { printf("      SKIPPED: no window station\n"); ui_stop(&h); return; }
+    if (!ui_start(&h)) { SKIP("no window station"); ui_stop(&h); return; }
 
     apr_controller_test_set_foreground(h.ctl, 1);
 
@@ -404,7 +404,7 @@ TEST(the_menu_command_says_it_is_looking)
     wchar_t got[TXT_CCH];
     int ok;
 
-    if (!ui_start(&h)) { printf("      SKIPPED: no window station\n"); ui_stop(&h); return; }
+    if (!ui_start(&h)) { SKIP("no window station"); ui_stop(&h); return; }
 
     /* Ctrl+nothing: this is a menu item. Sent exactly as the menu sends it.
      * The check that follows runs on a worker and, with no release key
@@ -424,7 +424,7 @@ TEST(declining_the_prompt_installs_nothing)
     UiHost h;
     AprUpdateResult r;
 
-    if (!ui_start(&h)) { printf("      SKIPPED: no window station\n"); ui_stop(&h); return; }
+    if (!ui_start(&h)) { SKIP("no window station"); ui_stop(&h); return; }
 
     apr_controller_test_set_foreground(h.ctl, 1);
     apr_controller_test_set_update_answer(h.ctl, 0);      /* "Not now" */
@@ -481,7 +481,7 @@ TEST(an_update_is_refused_out_loud_while_a_recording_is_running)
     HANDLE          idle;
     int ok;
 
-    if (!ui_start(&h)) { printf("      SKIPPED: no window station\n"); ui_stop(&h); return; }
+    if (!ui_start(&h)) { SKIP("no window station"); ui_stop(&h); return; }
 
     memset(&fake, 0, sizeof fake);
     http.get = fake_get;
@@ -534,7 +534,7 @@ TEST(accepting_stages_a_verified_build_and_says_it_installs_on_the_next_start)
     };
     DWORD n;
 
-    if (!ui_start(&h)) { printf("      SKIPPED: no window station\n"); ui_stop(&h); return; }
+    if (!ui_start(&h)) { SKIP("no window station"); ui_stop(&h); return; }
 
     n = GetTempPathW(MAX_PATH, dir);
     if (n == 0 || n >= MAX_PATH) { ui_stop(&h); FAIL("no temp directory"); }
