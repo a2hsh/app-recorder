@@ -1218,6 +1218,34 @@ static int is_running(AprRunner *r) { return apr_runner_running(r); }
 static int is_paused(AprRunner *r)  { return apr_runner_paused(r); }
 static int not_paused(AprRunner *r) { return !apr_runner_paused(r); }
 
+/* apr_runner_wait RETURNING IS NOT THE STOPPED NOTICE HAVING BEEN DELIVERED.
+ *
+ * src/core/runner.c signals finished_event -- which is what apr_runner_wait
+ * waits on -- and only THEN calls the observer with APR_RUN_EV_STOPPED, in
+ * that order, on the loop's own thread. So a case that waits and then reads
+ * the tally is reading it from between those two lines whenever the machine
+ * schedules it that way, and asserts that a notice which is about to arrive
+ * has not arrived. Measured: one Release run in ten, under load.
+ *
+ * Waiting for the notice itself is the fix on this side, and it is what
+ * test_wait.h asks for -- wait for the thing you are about to assert, on the
+ * one backstop, not on a ceiling somebody guessed. It does not soften
+ * anything: the count is still asserted to be exactly one afterwards, and a
+ * notice that never comes still fails, one minute later, with a message.
+ *
+ * WORTH THE AUTHOR'S DECISION, NOT AN AGENT'S: the ordering in runner.c could
+ * just as well be the other way round, so that "the wait returned" implies
+ * "every observer has been told". That is a stronger public contract and it
+ * costs one moved line -- but it is a change to what the product promises,
+ * and nothing in this task asked for it. */
+static int stopped_notice_arrived(const Tally *t)
+{
+    int ok;
+
+    APR_WAIT_UNTIL(ok, t->count[APR_RUN_EV_STOPPED] > 0);
+    return ok;
+}
+
 TEST(the_runner_announces_the_pause_and_the_resume_in_that_order)
 {
     /* A state the author cannot hear is a trap, and the resume is the half
@@ -1273,6 +1301,7 @@ TEST(the_runner_announces_the_pause_and_the_resume_in_that_order)
     ASSERT_TRUE(saw_resume > saw_pause);
 
     /* And the file was never closed in between. */
+    ASSERT_TRUE(stopped_notice_arrived(&t));
     ASSERT_EQ_INT(1, t.count[APR_RUN_EV_STOPPED]);
     ASSERT_EQ_INT(1, t.count[APR_RUN_EV_FINISHING]);
     ASSERT_FALSE(apr_runner_paused(r));
@@ -1420,6 +1449,7 @@ TEST(stopping_while_paused_still_closes_the_files)
     apr_runner_request_stop(r);
     ASSERT_TRUE(apr_runner_wait(r, APR_TEST_WAIT_MS));
 
+    ASSERT_TRUE(stopped_notice_arrived(&t));
     ASSERT_EQ_INT(1, t.count[APR_RUN_EV_STOPPED]);
     ASSERT_FALSE(apr_runner_paused(r));
     ASSERT_GT_INT(0, (int)wav_data_bytes(f.path));

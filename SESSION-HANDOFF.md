@@ -6249,3 +6249,187 @@ entered `vendor/`; `bcrypt` and `winhttp` are in-box and are the whole reason.
   start, which is the one thing it cannot rely on.
 - **`docs/` does not describe `update` yet.** The docs were being written in
   parallel by another agent while this landed; `apprecorder help` is correct.
+
+---
+
+## 2026-09-10 -- The keyboard walks over the Structure panel: three flakes, measured
+
+**Reported:** `tests/test_ui_behaviour.c(1398): FAILED ASSERT_TRUE(visited[i])`,
+about one full `ctest` run in five, in
+`arrowing_down_the_structure_panel_does_not_yank_focus_out_of_it` -- the
+regression guard for BUGS.md C2. The focus assertion above it was NOT the one
+failing, so focus stayed in the tree and a row was simply never reached.
+
+Three separate defects were found under that one symptom, all three measured
+rather than argued, and a fourth was ruled out.
+
+### 1. A POSTED key and a fifteen-millisecond sleep -- `test_ui_tree.c`
+
+`the_keyboard_alone_reaches_every_row` is the same walk over a bare panel. It
+POSTED each keystroke and then `Sleep(KEY_SETTLE_MS)` for it, which is a bet
+that 15 ms is enough on a busy machine. **Measured on the baseline under
+`ctest -j 8`: one run in fifteen fails `test_ui_tree.c(963)` with "row 0 was
+never reached by Down Arrow"** -- Home had not been processed yet when the
+first caret read happened, so every read lagged the posted key by one and the
+row Home selected was never observed.
+
+**Fix:** the walk SENDS the keys. A cross-thread `SendMessageW` does not return
+until the window's own thread has finished handling the message, so the caret
+has already moved when the next line reads it. Nothing about arrow keys in a
+TreeView needs the frame's pre-translate filter, which is the only thing
+posting bought. No sleep, no bound left to cross -- and the case went from
+**2.09 s to 0.52 s**.
+
+### 2. The fixture window was a citizen of the desktop -- `tests/test_window.h` (new)
+
+Eight suites build a REAL frame on the real interactive desktop. Two things
+reach in from outside and both land in the middle of an assertion:
+
+**ACTIVATION CLEARS THE THREAD'S FOCUS.** Keyboard focus is a property of a
+thread's input queue, and a thread whose window is DEACTIVATED loses its focus
+window outright. `GetGUIThreadInfo(tid).hwndFocus` -- how four suites ask
+"where is the keyboard" -- then reads NULL for reasons that have nothing to do
+with the product. `SW_SHOWNOACTIVATE` is no protection: Windows hands the
+foreground on when the previous holder exits, and a `ctest -j 8` run is
+forty-one processes appearing and exiting, eight at a time. **Measured: three
+concurrent runs of the behaviour walk failed 91 times in 360 on
+`ASSERT_TRUE(focus == f.h.tv)`, every one with focus reading NULL.**
+
+**AND THE PERSON AT THE MACHINE IS AN INPUT DEVICE.** If the fixture window can
+hold the foreground, the author's own keystrokes are delivered to it. Down
+Arrow walks VISIBLE items, so ONE stray Left collapses the bus row and puts its
+whole subtree out of reach -- without moving focus, so the focus assertions
+still pass and the completeness one fails alone. **Reproduced exactly:
+injecting a single `VK_LEFT` into the walk gives `Down Arrow reached 1 of 3
+rows without losing focus` and `ASSERT_TRUE(visited[i])` at the reported line,
+with `TVIS_EXPANDED` cleared on the bus item.**
+
+**Fix:** `apr_test_isolate_frame(HWND)`, called by all eight suites the moment
+the frame exists and before anything can focus it -- `WS_EX_NOACTIVATE` (it can
+never become the foreground window, so it can never be deactivated and no typed
+key is ever routed to it), `WS_EX_TOOLWINDOW` (out of Alt+Tab), and moved just
+below the primary monitor (a click or a hover reaches a NOACTIVATE window just
+the same; below the primary rather than at -32000 so the nearest-monitor rule
+still gives it the primary's DPI, which these suites assert on). `WS_VISIBLE`
+is untouched -- `cycle_pane` only focuses a VISIBLE pane.
+
+**The same 3x120 hammer that failed 91/360 now fails 0/360.**
+
+### 3. The assertion was not weakened, and it was not wrong
+
+`tree_panel.c` expands every depth-0 row on build and nothing in the product
+ever collapses one, so "Down reaches every model row" is true of a panel nobody
+has interfered with. It stands exactly as written.
+
+What was added is `tests/test_treeview.h`, shared by both suites: when a row
+goes unreached, they now say WHICH of the two possible reasons it was -- the
+control does not hold the row at all (a product defect: `tp_build` drops a row
+whose label came out empty), or an ancestor is COLLAPSED (something outside the
+test pressed Left or clicked). Plus, in the behaviour suite, the caret trail
+(item handle -> row, per press) is printed on failure. A bare "expected 1,
+actual 0" read exactly like the C2 focus-steal regression coming back, which is
+the worst thing a guard can do.
+
+### 4. HONEST RESIDUE -- one occurrence is still unexplained
+
+During a SERIAL Release `ctest` run, with the isolation already in place, the
+reported assertion fired once more: `Down Arrow reached 1 of 3`, and the new
+explain-on-failure said **"row 1 was never reached, and it is present with
+every ancestor expanded"** for both missing rows. So on that occasion nothing
+was collapsed and nothing was missing -- the caret simply did not advance,
+while focus stayed on the tree for all seventeen presses.
+
+That rules out the collapsed-node explanation for that instance. It has not
+recurred in **30 consecutive `-j 8` runs, 60 standalone Release runs of the
+suite, or 15 serial Debug runs**. The caret trail added in this pass exists so
+that the next occurrence names itself: whether the caret item stayed the same
+handle, went NULL, or moved while reporting the same lParam distinguishes
+"comctl32 ignored the key", "the tree was rebuilt under the walk" and "the
+model changed", and no more guessing will be needed.
+
+### Also fixed: `apr_runner_wait` returning is not the STOPPED notice
+
+`tests/test_pause.c(1276)` failed once in ten Release runs. `src/core/runner.c`
+signals `finished_event` -- what `apr_runner_wait` waits on -- and only THEN
+calls the observer with `APR_RUN_EV_STOPPED`. A case that waits and immediately
+reads the tally is reading it from between those two lines. Both sites now wait
+for the notice itself (test_wait.h's one backstop) before asserting the count
+is exactly one.
+
+**Left for the author:** the ordering in `runner.c` could be the other way
+round, so that "the wait returned" implies "every observer has been told". That
+is a stronger public contract and one moved line, but it changes what the
+product promises, so it was not done here.
+
+### Found, diagnosed, NOT fixed (both pre-existing, both proven so)
+
+- **`a_close_that_runs_out_of_patience_says_that_rather_than_repeating_itself`
+  hangs.** Running the Release suite standalone 60 times: **7 hangs with the
+  baseline code and 7 with these changes** -- identical, so it is not from this
+  pass. Under `-j 8` it once took **890 s** and then failed
+  `ASSERT_WSTR_EQ(want, got)` at line 2239. It records, closes, answers a
+  dialog and waits for the timeout sentence; the waits are all on the 60 s
+  backstop, so 890 s means something in that path blocks on something else.
+  Worth its own look.
+- **`test_action_ogg.c(1407)`
+  `a_mid_stream_write_failure_is_reported_and_the_prefix_survives`** failed once
+  in fifteen serial Release runs: the peak came back **302 Hz against 440 +/- 3**.
+  The case feeds six seconds of tone as fast as it can into a write-behind ring
+  with the disk gated at 12 KB, so how much clean tone lands before the ring
+  overruns -- and the overrun policy turns holes into silence -- depends on how
+  the writer thread was scheduled. The analysis window (250 ms to 1.25 s) can
+  therefore contain a hole. Not a UI walk, so left alone.
+
+### Also worth knowing: the tests hit the network and the real registry
+
+`src/platform/update_key.c` now holds a real key, so `apr_update_have_key()` is
+1 and **every UI test process starts a real update check** on controller
+creation. It is gated by `apr_update_due()` against
+`HKCU\Software\apprecorder\Update` -- the author's real setting -- so during a
+test run one process every five minutes makes a genuine HTTPS request to
+`github.com/a2hsh/app-recorder/...` and rewrites `LastCheck`. The URL is still
+the placeholder and 404s, so the outcome is `APR_UPDATE_NONE` and nothing is
+announced. But the 2026-08-30 note ("no test contacts the network") stopped
+being true when the key was pasted in. An `apr_update_state_test_redirect()` in
+the UI fixtures, the way `test_ui_update.c` already does it, would put it back.
+
+### `build.cmd` now runs `ctest -j 8`
+
+That change was made by the author during this session, not by this pass, and
+it is left exactly as he wrote it. It matters here: it means a "full ctest run"
+is now eight test processes at once, which is precisely the activation churn
+defect 2 is about -- and it is what the verification below was run under.
+
+### Verification
+
+`build.cmd Debug` and `build.cmd Release`, `/W4 /WX` clean, and **15 consecutive
+full `ctest -j 8` runs in each configuration with no failure**:
+
+| Runs | Config | Result | Wall each |
+|---|---|---|---|
+| 15 | Debug, `-j 8` | 41/41, no failures | 41.8-43.8 s |
+| 15 | Release, `-j 8` | 41/41, no failures | 14.4-16.4 s |
+| 15 | Debug, serial | 41/41, no failures | 74-108 s |
+
+Before/after on the same command, same machine:
+
+| Build | Runs | Failures |
+|---|---|---|
+| baseline, `-j 8` Debug | 15 | 1 (`test_ui_tree.c(963)`, "row 0 was never reached") |
+| these changes, `-j 8` Debug | 15 | 0 |
+| baseline, 3x concurrent behaviour walk | 360 | 91 (`focus == f.h.tv`, focus NULL) |
+| these changes, same hammer | 360 | 0 |
+
+### Files
+
+New: `tests/test_window.h`, `tests/test_treeview.h`. Changed: the eight UI
+suites (one call each) plus `test_ui_tree.c` (the walk) and
+`test_ui_behaviour.c` (diagnostics) and `test_pause.c` (the notice wait).
+No product code was changed. Nothing committed.
+
+### Safety (AGENTS.md rule 1)
+
+Nothing was rendered to any audio device; no player was written or run; every
+source is `APR_SRC_FAKE`. The fixture windows are now positioned off the
+primary monitor, so a test run is quieter on the desktop than it was.
+`APPRECORDER_NO_TRAY=1` is untouched and still set by CMake for every test.

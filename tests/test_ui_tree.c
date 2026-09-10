@@ -39,6 +39,8 @@
  *   rather than faked. The pure cases need neither and always run.
  */
 #include "test_runner.h"
+#include "test_treeview.h"
+#include "test_window.h"
 #include "test_wait.h"
 
 #include <windows.h>
@@ -516,6 +518,10 @@ static DWORD WINAPI ui_thread(LPVOID param)
     }
 
     h->frame = apr_ui_app_hwnd(h->app);
+    /* The fixture window is not a citizen of the desktop: it must not be
+     * able to take the foreground, and no pointer may reach it. See
+     * tests/test_window.h -- this runs before anything can focus it. */
+    apr_test_isolate_frame(h->frame);
     apr_ui_app_show(h->app, SW_SHOWNORMAL);
     {
         MSG msg;
@@ -878,21 +884,29 @@ TEST(custom_draw_ran_and_the_accessibility_tree_is_still_intact)
     live_stop(&L);
 }
 
-/* A SETTLE, NOT A CEILING, and the difference matters.
+/* THERE IS NO SETTLE HERE ANY MORE, AND THAT IS THE POINT.
  *
- * The walk below presses Down more times than there are rows on purpose, so at
- * the bottom the caret is SUPPOSED to stop moving -- which means "wait until it
- * moves" is the wrong wait: it would spend its bound on every press past the
- * end, and it would also read the caret before a posted key had been processed
- * and miss the row that key selected. What each iteration needs is simply time
- * for one posted keystroke to be handled, and fifteen milliseconds is what this
- * has always given it. */
-#define KEY_SETTLE_MS 15
+ * This walk used to POST each keystroke and then Sleep(15) for it, because
+ * "wait until the caret moves" is the wrong wait for a walk that deliberately
+ * presses past the last row: at the bottom the caret is SUPPOSED to stop, so
+ * a move-wait would spend its bound on every press past the end. But a sleep
+ * per press is a bet that fifteen milliseconds is enough on a busy machine,
+ * and this suite tree has been cleaned of exactly that bet once already.
+ *
+ * SendMessageW settles it instead of timing it: a cross-thread send does not
+ * return until the window's own thread has finished handling the message, so
+ * the caret has already moved when the next line reads it. The arrow keys the
+ * walk presses are the TreeView's own -- nothing about them needs the frame's
+ * pre-translate filter, which is the only thing posting would buy. Same
+ * technique as tests/test_ui_behaviour.c's walk, and it takes the case from
+ * seconds to milliseconds with no bound left to cross. */
 
 /* Which window the UI thread's own queue believes has the keyboard.
  * GetGUIThreadInfo rather than UIA's GetFocusedElement: the latter is
  * per-desktop and needs the window to be foreground, which a test launched by
- * a build system is not. */
+ * a build system is not -- and which tests/test_window.h now makes impossible
+ * on purpose, so that nothing outside the test can clear this thread's focus
+ * by taking the foreground away from it. */
 static HWND thread_focus_hwnd(HANDLE thread)
 {
     GUITHREADINFO gti;
@@ -940,26 +954,30 @@ TEST(the_keyboard_alone_reaches_every_row)
         ASSERT_TRUE(f == L.tv);
     }
 
-    PostMessageW(L.tv, WM_KEYDOWN, VK_HOME, 0);
-    PostMessageW(L.tv, WM_KEYUP, VK_HOME, 0);
+    /* SENT, not posted -- see the note above thread_focus_hwnd. */
+    SendMessageW(L.tv, WM_KEYDOWN, VK_HOME, 0);
+    SendMessageW(L.tv, WM_KEYUP, VK_HOME, 0);
 
     for (tries = 0; tries < (int)n * 3 + 8; ++tries) {
         HTREEITEM cur;
         int row;
 
-        Sleep(KEY_SETTLE_MS);          /* see KEY_SETTLE_MS: a settle, not a bound */
         cur = tv_next(L.tv, TVGN_CARET, NULL);
         row = tv_row(L.tv, cur);
         if (row >= 0 && row < MAXROWS && !visited[row]) {
             visited[row] = 1;
             count++;
         }
-        PostMessageW(L.tv, WM_KEYDOWN, VK_DOWN, 0);
-        PostMessageW(L.tv, WM_KEYUP, VK_DOWN, 0);
+        SendMessageW(L.tv, WM_KEYDOWN, VK_DOWN, 0);
+        SendMessageW(L.tv, WM_KEYUP, VK_DOWN, 0);
     }
 
     for (i = 0; i < (int)n; ++i) {
-        if (!visited[i]) printf("      row %d was never reached by Down Arrow\n", i);
+        /* THE TWO REASONS A ROW GOES UNREACHED ARE NOT THE SAME DEFECT: the
+         * control does not hold the row, or it holds it under a COLLAPSED
+         * parent. Down walks visible items, so a collapsed ancestor hides a
+         * whole subtree without touching focus. Say which. */
+        if (!visited[i]) apr_test_tv_explain_unreached(L.tv, i);
         ASSERT_TRUE(visited[i]);
     }
     printf("      Down Arrow reached %d of %d rows\n", count, (int)n);

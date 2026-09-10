@@ -106,7 +106,11 @@ foreach(test_file ${TEST_SRC})
   # build a real controller, which builds a real tray icon and fires real
   # shell notifications -- read aloud by a screen reader, on every run.
   # Setting this here rather than per-file means a new UI suite cannot forget.
-  set_tests_properties(${test_name} PROPERTIES ENVIRONMENT "APPRECORDER_NO_TRAY=1")
+  # NO_UPDATE for the same reason: a controller with a real signing key
+  # compiled in starts a genuine HTTPS request and rewrites HKCU on the
+  # machine running the suite.
+  set_tests_properties(${test_name} PROPERTIES
+    ENVIRONMENT "APPRECORDER_NO_TRAY=1;APPRECORDER_NO_UPDATE=1")
 endforeach()
 
 # ---------------------------------------------------------------------------

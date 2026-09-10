@@ -50,6 +50,7 @@
  *   run, because they need no window.
  */
 #include "test_runner.h"
+#include "test_window.h"
 #include "test_wait.h"
 
 #include <windows.h>
@@ -102,6 +103,10 @@ static DWORD WINAPI ui_thread(LPVOID param)
     }
 
     h->frame = apr_ui_app_hwnd(h->app);
+    /* The fixture window is not a citizen of the desktop: it must not be
+     * able to take the foreground, and no pointer may reach it. See
+     * tests/test_window.h -- this runs before anything can focus it. */
+    apr_test_isolate_frame(h->frame);
     apr_ui_app_show(h->app, SW_SHOWNORMAL);
 
     /* Pump once so the window is fully realised before the client connects. */

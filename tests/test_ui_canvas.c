@@ -42,6 +42,7 @@
  *   key press drives.
  */
 #include "test_runner.h"
+#include "test_window.h"
 
 #include <windows.h>
 #include <commctrl.h>
@@ -334,6 +335,10 @@ static DWORD WINAPI ui_thread(LPVOID param)
         return 1;
     }
     h->frame = apr_ui_app_hwnd(h->app);
+    /* The fixture window is not a citizen of the desktop: it must not be
+     * able to take the foreground, and no pointer may reach it. See
+     * tests/test_window.h -- this runs before anything can focus it. */
+    apr_test_isolate_frame(h->frame);
     h->canvas = apr_ui_app_pane(h->app, APR_PANE_CANVAS);
     apr_ui_app_show(h->app, SW_SHOWNORMAL);
 

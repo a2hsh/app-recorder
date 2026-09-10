@@ -50,6 +50,8 @@
  *   something to act on; it is finalized on teardown and the file is deleted.
  */
 #include "test_runner.h"
+#include "test_treeview.h"
+#include "test_window.h"
 #include "test_wait.h"
 
 #include <windows.h>
@@ -211,6 +213,10 @@ static DWORD WINAPI ui_thread(LPVOID param)
     }
 
     h->frame  = apr_ui_app_hwnd(h->app);
+    /* The fixture window is not a citizen of the desktop: it must not be
+     * able to take the foreground, and no pointer may reach it. See
+     * tests/test_window.h -- this runs before anything can focus it. */
+    apr_test_isolate_frame(h->frame);
     h->canvas = apr_ui_app_pane(h->app, APR_PANE_CANVAS);
     h->tree   = apr_ui_app_pane(h->app, APR_PANE_TREE);
     h->tv     = h->tree ? apr_tree_panel_treeview(h->tree) : NULL;
@@ -1193,7 +1199,16 @@ TEST(a_writable_name_is_accepted_at_add_time_and_still_creates_nothing)
 
 /* Focus, as the thread that owns the window sees it. GetGUIThreadInfo rather
  * than UIA's GetFocusedElement: the latter is per-desktop and needs the window
- * to be foreground, which a test launched by a build system is not. */
+ * to be foreground, which a test launched by a build system is not.
+ *
+ * AND WHAT THIS READS IS A PROPERTY OF THE THREAD'S INPUT QUEUE, NOT OF THE
+ * PRODUCT. A thread whose window is DEACTIVATED loses its focus window
+ * outright, so this starts answering NULL the moment anything else on the
+ * desktop takes the foreground -- which, in a ctest run of forty-one processes
+ * appearing and exiting, used to happen often enough to fail one run in four.
+ * tests/test_window.h is what stops it: the fixture window cannot hold the
+ * foreground, so it can never be deactivated, so this answer is the product's
+ * alone. Do not soften the assertions built on it; keep the window isolated. */
 static HWND focus_on_ui_thread(UiHost *h)
 {
     GUITHREADINFO gti;
@@ -1344,9 +1359,22 @@ TEST(arrowing_down_the_structure_panel_does_not_yank_focus_out_of_it)
      * So: F6 into the tree, press Down, and focus is yanked to the canvas --
      * the reader announces the canvas node instead of the row, and the next
      * Down drives the canvas. Everything past the first row is unreachable,
-     * and these rows' sentences are the entire purpose of the panel. */
+     * and these rows' sentences are the entire purpose of the panel.
+     *
+     * THIS CASE ALSO USED TO FLAKE, and the reason is worth keeping: Down
+     * walks VISIBLE items, so one keystroke that nobody in this file sent --
+     * a Left arrow typed by the person at the machine into a fixture window
+     * that had taken the foreground -- collapses the bus row and puts its
+     * whole subtree out of reach, while focus never moves and every other
+     * assertion still passes. Reproduced exactly: "reached 1 of 3". The fix
+     * is that the fixture window is no longer reachable from the desktop at
+     * all (tests/test_window.h); the explain-on-failure below is so that if
+     * anything ever gets in again it says so instead of looking like the
+     * focus-steal regression coming back. */
     Fix f;
     int visited[APR_TREE_MAX_ROWS];
+    int trail[APR_TREE_MAX_ROWS * 3 + 8];
+    HTREEITEM caret[APR_TREE_MAX_ROWS * 3 + 8];
     size_t want_rows;
     int i, tries, reached = 0;
 
@@ -1384,7 +1412,10 @@ TEST(arrowing_down_the_structure_panel_does_not_yank_focus_out_of_it)
         }
         ASSERT_TRUE(focus == f.h.tv);
 
+        caret[tries] = (HTREEITEM)SendMessageW(f.h.tv, TVM_GETNEXTITEM,
+                                               TVGN_CARET, 0);
         row = tv_caret_row(f.h.tv);
+        trail[tries] = row;
         if (row >= 0 && row < APR_TREE_MAX_ROWS && !visited[row]) {
             visited[row] = 1;
             reached++;
@@ -1395,6 +1426,28 @@ TEST(arrowing_down_the_structure_panel_does_not_yank_focus_out_of_it)
 
     printf("      Down Arrow reached %d of %d rows without losing focus\n",
            reached, (int)want_rows);
+    /* A ROW THAT WAS NOT REACHED HAS TO NAME ITS OWN REASON.
+     *
+     * There are only two, and they are not the same defect: the row is not in
+     * the control at all, or it is there with a COLLAPSED parent above it --
+     * Down walks visible items, so a collapsed ancestor puts a whole subtree
+     * out of reach while focus never moves and every other assertion here
+     * passes. That second one is what a stray Left arrow does, and a bare
+     * "expected 1, actual 0" gave no way to tell it from the focus-steal
+     * regression this case exists to guard. */
+    if (reached != (int)want_rows) {
+        printf("      TRAIL (caret item -> row) over %d presses:\n", tries);
+        for (i = 0; i < tries; ++i) {
+            printf("        %2d: %p -> %d\n", i, (void *)caret[i], trail[i]);
+        }
+        printf("      live item count now %d, model rows %d\n",
+               (int)SendMessageW(f.h.tv, TVM_GETCOUNT, 0, 0),
+               (int)apr_tree_panel_rows(f.g, NULL, 0));
+        fflush(stdout);
+    }
+    for (i = 0; i < (int)want_rows; ++i) {
+        if (!visited[i]) apr_test_tv_explain_unreached(f.h.tv, i);
+    }
     for (i = 0; i < (int)want_rows; ++i) ASSERT_TRUE(visited[i]);
 
     fix_down(&f);

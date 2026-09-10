@@ -2205,8 +2205,26 @@ AprErr apr_controller_create(AprUiApp *app, AprController **out)
      * Started here rather than in main() so that everything it can say has a
      * window to say it in -- an update prompt with no parent is a dialog a
      * screen reader user meets with no context. */
-    start_update_check(c, APR_UPDATE_WHY_STARTUP);
-    SetTimer(c->frame, APR_CTL_TIMER_UPDATE, APR_UPDATE_INTERVAL_MS, NULL);
+    /* A TEST MUST LEAVE NO TRACE ON THE MACHINE RUNNING IT -- the same rule
+     * that keeps a suite's tray icon out of a real notification area, and it
+     * broke the moment update_key.c stopped being zeros.
+     *
+     * Eight suites build a real controller. With a real key compiled in, every
+     * one of those processes began a genuine HTTPS request and rewrote
+     * LastCheck under HKCU on the developer's own machine. Nothing was
+     * announced, because the URL still 404s -- which is exactly why it went
+     * unnoticed rather than why it was harmless.
+     *
+     * Set by CMake for every test, present and future, so a new UI suite
+     * cannot forget. The gate is here rather than inside update.c because the
+     * `update` COMMAND must still work when a person runs it deliberately;
+     * what must not happen on its own is the unattended cadence. */
+    if (GetEnvironmentVariableW(L"APPRECORDER_NO_UPDATE", NULL, 0) == 0) {
+        start_update_check(c, APR_UPDATE_WHY_STARTUP);
+        SetTimer(c->frame, APR_CTL_TIMER_UPDATE, APR_UPDATE_INTERVAL_MS, NULL);
+    } else {
+        APR_INFO(L"update: APPRECORDER_NO_UPDATE is set; no automatic checks");
+    }
 
     *out = c;
     return apr_ok();
