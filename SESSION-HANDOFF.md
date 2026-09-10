@@ -6828,3 +6828,99 @@ built a real notification-area icon and could have raised real shell balloons,
 and started a real update check. No audio was rendered. It also produced three
 spurious failures, which is how it was noticed. Every measurement reported above
 was taken through ctest with both variables set.
+
+---
+
+## 2026-09-10 (later) — v0.0.1 IS PUBLISHED
+
+https://github.com/a2hsh/app-recorder/releases/tag/v0.0.1
+
+### Getting CI green took three more rounds, and two were real defects
+
+The agent's work landed first (commit `def17a2`) and took the Debug run from
+662 s to 66 s. CI was still red, twice, and neither was a flake.
+
+**Round 1 -- one recording path per process.** The fixture named its WAV after
+the PID alone, so every case in `test_ui_behaviour` recorded to one path and
+relied on `DeleteFileW` to clear it. That is a race against the PREVIOUS case's
+encoder: while its handle is open the delete fails and
+`apr_out_probe_writable` returns a sharing violation. A counter removes the
+ordering dependency. `test_ui_pause.c` and `test_ui_update.c` had the identical
+shape and got the same fix; `test_ui_dialogs.c` did not need it (one name per
+case).
+
+**And the worse half of round 1.** `fix_up()` answered a fixture that would not
+build by printing the reason and returning 0 -- and every call site answers 0 by
+returning from the case with NO assertion run, which the runner prints as
+`[ OK ]`. Two of the three cases this broke PASSED WITH ZERO ASSERTIONS, and the
+printed reason went where ctest sends the output of a passing suite, which is
+nowhere. It is a failure now. Proved by forcing every fixture to fail: 21 cases
+that used to report OK now report FAILED with the reason.
+
+**Round 2 -- two notions of "recording" that do not flip together.**
+`apr_controller_recording()` is the controller's flag, set while it handles
+Ctrl+R. `apr_graph_running()` is what `canvas_busy()` (src/ui/canvas.c) asks
+before refusing an edit, and it is not true until the runner ticks. Tests waited
+on the first and then pressed a key expecting the refusal -- so in that window
+the key was ACCEPTED and the assertion compared "that cannot be changed while a
+recording is running" against "Disconnecting Teams...". `test_ui_pause` lost the
+same window from the other end: Ctrl+P went to a recording that had not started,
+the pause never took, and `wait_paused()` burned its full 60 s.
+
+Both now wait for BOTH flags (`rec_started()` in test_ui_behaviour, six call
+sites; `start_recording()` in test_ui_pause).
+
+**Neither round was reproducible here.** Ten runs pinned to two cores
+(`start /affinity 3`) passed both with and without the fixes. This workstation
+closes both windows too fast. The evidence in each case was the CI log itself,
+which is why reading it mattered more than re-running locally.
+
+### CI, green on both
+
+| Config | Before | After |
+|---|---|---|
+| Debug | 662.54 s, failing | **66.79 s, 41/41** |
+| Release | 15.97 s, failing | **19.18 s, 41/41** |
+
+Two cases skip on the runner and say so: both want a default capture endpoint,
+which a GitHub runner has not got. That is the skip log doing its job.
+
+### The release
+
+Built from the tag, signed, verified, tagged, published. Assets:
+`apprecorder.exe` (1,046,016 bytes), `apprecorder-wait.cmd`, `release.json`,
+`release.json.sig`, `apprecorder-0.0.1-src.zip` (2.4 MB, 494 entries).
+
+**The source zip is the LGPL section 6 obligation, and it was checked rather
+than assumed**: LICENSE, THIRD-PARTY-NOTICES.md, vendor/lame/{COPYING,LICENSE},
+vendor/{opus,ogg}/COPYING, vendor/jsmn/LICENSE and 29 LAME .c files are all in
+it.
+
+**Verified the way a stranger would**, after publishing: downloaded all three
+assets through the `releases/latest/download/` redirect the updater itself uses
+and ran `apprelease.py verify` against the PUBLIC key in update_key.c. Signature
+verifies, hash matches, version 0.0.1.
+
+**And the updater was proved end to end** by running the DOWNLOADED binary:
+`apprecorder version` says 0.0.1, and `apprecorder update` fetched the live
+manifest, verified it against its own compiled-in key, compared versions and
+answered "apprecorder 0.0.1 is the newest version." That is the whole
+highest-risk path, exercised against the real release.
+
+Note: CI's Release exe is 1036.5 KB against this machine's 1021.5 KB -- MSVC
+14.51 on the runner, 14.44 here. Expected; the docs say "just over 1 MB".
+
+### Still open
+
+- **Arabic**: 565 strings. The author's own task; ux-araby then a Gemini pass,
+  keeping «إمكانية الوصول».
+- **Real-device capture** still has no automated coverage, and the two CI skips
+  are the visible edge of that. It needs the author present.
+- `--quality` for Opus: the CLI clamps 0..10, the encoder accepts 0..11, so
+  complexity 10 is reachable only as the default (quality 0). Documented
+  accurately rather than changed during a release.
+- The author should back up `%USERPROFILE%\.apprecorder\release-key.pem` before
+  travelling. `apprelease.py verify` now proves it matches the key compiled into
+  the shipped binary; if it is lost, no future release can update any install.
+- In-app help is a browser link (Help -> Documentation), not embedded offline
+  help. Deliberate for a single-exe product, but revisit if it annoys.
