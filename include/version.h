@@ -68,6 +68,17 @@ extern "C" {
     APR_VER_W(APR_VERSION_MINOR) L"."                                          \
     APR_VER_W(APR_VERSION_PATCH)
 
+/* WHERE THIS PROGRAM COMES FROM. One owner, for the same reason the version is:
+ * three separate places want it -- the About box's licence notice, the Help
+ * menu's documentation item, and the updater's download URL -- and a repository
+ * that moves must not leave two of them pointing at the old one.
+ *
+ * It is deliberately NOT in the string catalog. A URL is not prose, nothing
+ * about it changes between languages, and a translator handed it as a
+ * translatable string is a translator who can typo the updater's origin. Rule 6
+ * governs sentences; this is an address. */
+#define APR_PROJECT_URL L"https://github.com/a2hsh/app-recorder"
+
 typedef struct AprVersion {
     int major;
     int minor;

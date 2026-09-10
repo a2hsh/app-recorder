@@ -45,6 +45,8 @@
  */
 #include "ui_controller.h"
 
+#include <shellapi.h>
+
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -399,6 +401,7 @@ static void update_commands(AprController *c)
     apr_ui_app_enable_command(c->app, APR_CMD_RECORD_RESUME, rec && c->paused);
     apr_ui_app_enable_command(c->app, APR_CMD_HELP_KEYS, 1);
     apr_ui_app_enable_command(c->app, APR_CMD_HELP_ABOUT, 1);
+    apr_ui_app_enable_command(c->app, APR_CMD_HELP_DOCS, 1);
     /* NEVER GREYED, not even while recording. Asking whether a newer build
      * exists opens no file and touches no graph; it is APPLYING one that rule
      * 1 forbids, and that refusal is said out loud in apply_update() rather
@@ -1827,6 +1830,34 @@ static void handle_update(AprController *c, const AprUpdateResult *r)
     }
 }
 
+/* Help -> Documentation. Hands APR_PROJECT_URL to whatever the user has set as
+ * their browser.
+ *
+ * IT REPORTS ITS OWN FAILURE, and that is the whole reason this is not a
+ * one-line ShellExecuteW at the call site. A browser that does not open leaves
+ * NOTHING on screen and nothing spoken: no window appears, no error is raised,
+ * and a sighted user at least sees that nothing happened. Somebody working by
+ * screen reader gets silence that is indistinguishable from a menu item that
+ * did its job. So the failure path names the address out loud, which is also
+ * the only form of the answer that is any use without a browser. */
+static int open_documentation(AprController *c)
+{
+    /* ShellExecuteW's success test is "> 32". The return is an HINSTANCE for
+     * compatibility with 16-bit Windows and is not a handle. */
+    HINSTANCE r = ShellExecuteW(c->frame, L"open", APR_PROJECT_URL,
+                                NULL, NULL, SW_SHOWNORMAL);
+    if ((INT_PTR)r > 32) return 1;
+
+    {
+        const wchar_t *args[1];
+        args[0] = APR_PROJECT_URL;
+        APR_WARN(L"ui: no browser opened for %ls (ShellExecuteW -> %p)",
+                 APR_PROJECT_URL, (void *)r);
+        say(c, APR_S_UI_DLG_DOCS_FAILED, args, 1);
+    }
+    return 1;
+}
+
 /* The user asked. Bypasses the five-minute interval (but not the opt-out) and
  * says so first, because a menu item that appears to do nothing for two
  * seconds is a menu item somebody presses again. */
@@ -1958,6 +1989,8 @@ int apr_controller_command(AprController *c, int command_id)
     case APR_CMD_HELP_ABOUT:
         apr_dlg_about(c->frame);
         return 1;
+    case APR_CMD_HELP_DOCS:
+        return open_documentation(c);
     case APR_CMD_HELP_UPDATE:
         return do_check_update(c);
 

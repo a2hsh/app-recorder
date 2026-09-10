@@ -249,6 +249,17 @@ void apr_ui_set_accessible_role(HWND hwnd, long msaa_role);
  * that way has to be a named, mnemonic menu item like every other operation. */
 #define APR_CMD_HELP_UPDATE     0x0503
 
+/* Open the documentation (APR_PROJECT_URL, version.h) in the default browser.
+ *
+ * THE DOCS ARE NOT IN THE BINARY, AND SAYING SO IS THE HONEST DESIGN. This
+ * product is one executable that installs nothing; there is no help file beside
+ * it to open, and embedding a copy would mean shipping documentation that goes
+ * stale the moment it is written while the real thing is a click away. What the
+ * menu item owes the user is a NAMED, KEYBOARD-REACHABLE way to reach it, and
+ * a sentence naming the address if no browser opens -- not a promise of
+ * offline help this shape of program cannot keep. */
+#define APR_CMD_HELP_DOCS       0x0504
+
 /* ---------------------------------------------------------------------------
  * THE FRAME'S KEYBOARD MODEL IS DATA, FOR THE SAME REASON THE CANVAS'S IS
  *

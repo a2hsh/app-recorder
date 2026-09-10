@@ -194,9 +194,13 @@ extern "C" {
  * Where a release lives
  * ------------------------------------------------------------------------- */
 
-/* The stable redirect. Not the API -- see section 3. */
+/* The stable redirect. Not the API -- see section 3.
+ *
+ * Built from APR_PROJECT_URL (version.h) rather than spelled out again, so that
+ * moving the repository cannot leave the updater fetching from the old one
+ * while the About box names the new one. */
 #define APR_UPDATE_BASE_URL \
-    L"https://github.com/a2hsh/app-recorder/releases/latest/download/"
+    APR_PROJECT_URL L"/releases/latest/download/"
 
 #define APR_UPDATE_MANIFEST_NAME  L"release.json"
 #define APR_UPDATE_SIG_NAME       L"release.json.sig"

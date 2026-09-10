@@ -332,6 +332,7 @@
 #define APR_EN_UI_MENU_HELP              "&Help"
 #define APR_EN_UI_MENU_HELP_KEYS         "&Keyboard Shortcuts\tF1"
 #define APR_EN_UI_MENU_HELP_ABOUT        "&About apprecorder"
+#define APR_EN_UI_MENU_HELP_DOCS         "&Documentation"
 
 /* ---------------------------------------------------------------------------
  * The canvas (src/ui/canvas.c, src/ui/node_window.c).
@@ -440,6 +441,7 @@
 #define APR_EN_UI_KEY_VIEW_TREE                 "Show or hide the structure panel"
 #define APR_EN_UI_KEY_VIEW_DARK                 "Switch between light and dark appearance"
 #define APR_EN_UI_KEY_HELP_KEYS                 "Show this list of keyboard shortcuts"
+#define APR_EN_UI_KEY_HELP_DOCS                 "Open the apprecorder documentation in your browser"
 
 /* The names of keys that are not a printable character. IN THE CATALOG, not in
  * C: the modifiers already were, so a shortcut rendered half in the interface
@@ -666,6 +668,7 @@
 #define APR_EN_UI_DLG_DISCARD_OK          "Discard the changes"
 #define APR_EN_UI_DLG_FORMAT_NEEDED       "Choose a format for this output first."
 #define APR_EN_UI_DLG_CREATE_FAILED       "That window could not be opened. This is a fault in apprecorder, not something you did."
+#define APR_EN_UI_DLG_DOCS_FAILED         "The documentation could not be opened in a browser. It is at %1!s!."
 #define APR_EN_UI_DLG_OUT_BITRATE          "Bitrate in kilobits per second, 0 for the format's own default"
 #define APR_EN_UI_DLG_OUT_QUALITY          "Quality, 0 for the format's own default"
 #define APR_EN_UI_DLG_SAVE_AUDIO_TITLE     "Where to save this recording"
@@ -695,6 +698,7 @@
 #define APR_EN_UI_DLG_KEYS_COL_KEY         "Key"
 #define APR_EN_UI_DLG_ABOUT_TITLE          "About apprecorder"
 #define APR_EN_UI_DLG_ABOUT_BODY           "%1!s! %3!s! -- %2!s!"
+#define APR_EN_UI_DLG_ABOUT_LEGAL          "%1!s! is free software under the MIT License.\n\nIt includes libmp3lame, licensed under the GNU Lesser General Public License, version 2 or later; libopus and libogg, licensed under the 3-clause BSD License; and jsmn, licensed under the MIT License.\n\nThe source code for %1!s! and for each of those libraries is published with every release at %2!s!."
 #define APR_EN_UI_DLG_NAME_NEEDED          "Give it a name first."
 #define APR_EN_UI_DLG_PATH_NEEDED          "Choose where to save the recording first."
 #define APR_EN_UI_DLG_PICK_NEEDED          "Choose something from the list first."
@@ -1207,6 +1211,7 @@ END
 #define APR_AR_UI_MENU_HELP(id)           /* not translated yet */
 #define APR_AR_UI_MENU_HELP_KEYS(id)      /* not translated yet */
 #define APR_AR_UI_MENU_HELP_ABOUT(id)     /* not translated yet */
+#define APR_AR_UI_MENU_HELP_DOCS(id)      /* not translated yet */
 
 /* Canvas -- untranslated. These are SPOKEN sentences, so the ux-araby pass has
  * to hear them read aloud rather than translate them word by word. */
@@ -1278,6 +1283,7 @@ END
 #define APR_AR_UI_KEY_VIEW_TREE(id)             /* not translated yet */
 #define APR_AR_UI_KEY_VIEW_DARK(id)             /* not translated yet */
 #define APR_AR_UI_KEY_HELP_KEYS(id)             /* not translated yet */
+#define APR_AR_UI_KEY_HELP_DOCS(id)             /* not translated yet */
 #define APR_AR_UI_KEYNAME_TAB(id)               /* not translated yet */
 #define APR_AR_UI_KEYNAME_ENTER(id)             /* not translated yet */
 #define APR_AR_UI_KEYNAME_SPACE(id)             /* not translated yet */
@@ -1434,6 +1440,7 @@ END
 #define APR_AR_UI_DLG_DISCARD_OK(id)       /* not translated yet */
 #define APR_AR_UI_DLG_FORMAT_NEEDED(id)    /* not translated yet */
 #define APR_AR_UI_DLG_CREATE_FAILED(id)    /* not translated yet */
+#define APR_AR_UI_DLG_DOCS_FAILED(id)      /* not translated yet */
 #define APR_AR_UI_DLG_OUT_BITRATE(id)          /* not translated yet */
 #define APR_AR_UI_DLG_OUT_QUALITY(id)          /* not translated yet */
 #define APR_AR_UI_DLG_SAVE_AUDIO_TITLE(id)     /* not translated yet */
@@ -1463,6 +1470,7 @@ END
 #define APR_AR_UI_DLG_KEYS_COL_KEY(id)         /* not translated yet */
 #define APR_AR_UI_DLG_ABOUT_TITLE(id)          /* not translated yet */
 #define APR_AR_UI_DLG_ABOUT_BODY(id)           /* not translated yet */
+#define APR_AR_UI_DLG_ABOUT_LEGAL(id)          /* not translated yet */
 #define APR_AR_UI_DLG_NAME_NEEDED(id)          /* not translated yet */
 #define APR_AR_UI_DLG_PATH_NEEDED(id)          /* not translated yet */
 #define APR_AR_UI_DLG_PICK_NEEDED(id)          /* not translated yet */

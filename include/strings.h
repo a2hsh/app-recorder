@@ -331,7 +331,8 @@
     X(UI_MENU_HIDE_TO_TRAY,        1344)                                      \
     X(UI_MENU_HELP,                1350)                                      \
     X(UI_MENU_HELP_KEYS,           1351)                                      \
-    X(UI_MENU_HELP_ABOUT,          1352)
+    X(UI_MENU_HELP_ABOUT,          1352)                                      \
+    X(UI_MENU_HELP_DOCS,           1353)
 
 /* ---- the canvas: what a screen reader says when it lands on a node, and
  * what it says when the graph changes under the user's hands.
@@ -425,6 +426,7 @@
     X(UI_KEY_VIEW_TREE,            1571)                                      \
     X(UI_KEY_VIEW_DARK,            1572)                                      \
     X(UI_KEY_HELP_KEYS,            1573)                                      \
+    X(UI_KEY_HELP_DOCS,            1574)                                      \
     X(UI_KEYNAME_TAB,              1480)                                      \
     X(UI_KEYNAME_ENTER,            1481)                                      \
     X(UI_KEYNAME_SPACE,            1482)                                      \
@@ -591,7 +593,13 @@
  * The EXCLUDE entries (UI_DLG_SYSTEM_*) are worded to design 4.1.1: it records
  * EVERYTHING the machine plays and it walks the target's process tree, so
  * naming a launcher holds back everything the launcher started. Never word it
- * as "everything except X", and never make it a default. ---- */
+ * as "everything except X", and never make it a default.
+ *
+ * UI_DLG_ABOUT_LEGAL is not decoration and must not be trimmed for length.
+ * libmp3lame is LGPL and requires that a recipient of the BINARY be told so
+ * somewhere they will actually see it. Somebody who downloads only
+ * apprecorder.exe never sees README.md or THIRD-PARTY-NOTICES.md, so the About
+ * box is where that obligation is met. docs/licensing.md is the long form. ---- */
 #define APR_STR_LIST_UI_DLG(X)                                          \
     X(UI_DLG_OK,                    1650)                                 \
     X(UI_DLG_CANCEL,                1651)                                 \
@@ -678,7 +686,9 @@
     X(UI_DLG_DISCARD_BODY,        1732)                                     \
     X(UI_DLG_DISCARD_OK,          1733)                                     \
     X(UI_DLG_FORMAT_NEEDED,       1734)                                     \
-    X(UI_DLG_CREATE_FAILED,       1735)
+    X(UI_DLG_CREATE_FAILED,       1735)                                      \
+    X(UI_DLG_ABOUT_LEGAL,         1736)                                      \
+    X(UI_DLG_DOCS_FAILED,         1737)
 
 
 /* ---- the notification area.

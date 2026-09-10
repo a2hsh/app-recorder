@@ -23,7 +23,7 @@ build.cmd Release test
 
 Output lands in `build\Debug\` or `build\Release\`. The product is a single `apprecorder.exe`, with `apprecorder-wait.cmd` copied beside it by the build. There is nothing else to ship.
 
-A Release build is around 961 KB. The Debug build is much larger and is not a shipping number.
+A Release build is 1,046,016 bytes — just over 1 MB. The ceiling is 10 MB and CI enforces it; the headroom is there for bus effects and VST hosting. The Debug build is much larger and is not a shipping number.
 
 ## Running the tests
 
@@ -31,11 +31,25 @@ A Release build is around 961 KB. The Debug build is much larger and is not a sh
 build.cmd Release test
 ```
 
-That is 38 suites, and they should all pass. They need no audio hardware: the core is testable against a synthetic source by design, so continuous integration and agent-driven development never depend on a microphone being plugged in.
+That is 41 suites, and they should all pass. They need no audio hardware: the core is testable against a synthetic source by design, so continuous integration and agent-driven development never depend on a microphone being plugged in.
 
-**No test plays audio, and none touches an audio output device.** The suite sets `APPRECORDER_NO_TRAY` so that the user-interface suites cannot fire real shell notifications, which a screen reader would read aloud on every run.
+They run in parallel, one worker per core, capped at 8. Most suites are pure computation and finish in hundredths of a second; the wall clock is set by the few that are not.
 
-One caveat: a handful of suites poll for asynchronous announcements and are timing-sensitive under heavy machine load. A single run occasionally loses one of them and it passes immediately on its own. If a run is not clean, re-run the failing suite before hunting for a bug.
+### A test leaves no trace on the machine running it
+
+**No test plays audio, and none touches an audio output device.** Beyond that, the build sets three environment variables for every suite so that a new one cannot forget:
+
+- `APPRECORDER_NO_TRAY` — no tray icon and no shell notifications, which a screen reader would otherwise read aloud on every run.
+- `APPRECORDER_NO_UPDATE` — no HTTPS request and no registry write. A suite that reaches github.com is also a suite that fails on an aeroplane.
+- `APPRECORDER_SKIP_LOG` — where a skipped case records itself.
+
+Nine of the suites create real top-level windows on the real desktop and assert about focus, activation and what UI Automation reports. Those hold a `RESOURCE_LOCK`, so ctest never runs two of them at once no matter how many workers there are — focus is a property of the desktop, which is a single shared resource ctest otherwise knows nothing about.
+
+### Read the skipped list
+
+`build.cmd` prints the cases that skipped, after the run. ctest keeps the output of a suite that *failed* and discards the rest, so a case that skipped for want of an audio engine — the one line explaining why a green run proved less than it looks — was otherwise invisible.
+
+A skip is not a pass. If something skipped that should not have, that is the result, not a footnote to it.
 
 ## Where the dependencies come from
 

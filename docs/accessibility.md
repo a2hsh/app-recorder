@@ -38,6 +38,8 @@ Press **F1** at any time for the live version of this list. It is generated from
 
 F6 and Alt+F4 are the platform's own. Rebinding either would be worse than leaving them to Windows.
 
+A few operations are on the menu with no shortcut, because there is no key worth spending on them: **Help → Documentation** opens the online documentation in your browser, **Help → Check for Updates** asks now rather than waiting for the next automatic check, and **Help → About apprecorder** gives the version and the licence notice. They are named, mnemonic menu items like everything else — "no mouse-only paths" applies to them too — and they appear in the F1 list as operations without a key rather than being left out of it.
+
 ### The signal-flow canvas
 
 | Key | Action |
@@ -138,4 +140,4 @@ Everything above is written so that Arabic can be added without rebuilding it. N
 
 Layout direction is a parameter, not a constant. In a right-to-left layout the graph reads right to left — sources on the right, outputs on the left — and the geometric arrow keys swap with it. **Logical order never flips.** Tab order, the accessibility tree and the structure panel stay source → bus → action in every language. Only the painting mirrors.
 
-**Arabic is not shipped yet.** Roughly 500 catalog strings are still awaiting translation, and the build reports the outstanding count. Today apprecorder runs in English.
+**Arabic is not shipped yet.** 565 catalog strings are still awaiting translation, and the build reports the outstanding count. Today apprecorder runs in English.

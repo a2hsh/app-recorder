@@ -54,15 +54,34 @@ If it is ever STOLEN, generate a new one, put the new public half in
 update_key.c, and publish that build signed WITH THE OLD KEY -- that is the last
 release the old key can make, and it is what carries everyone onto the new one.
 Then stop using the old key.
+
+===============================================================================
+`verify` NEEDS NO SECRET, ON PURPOSE
+
+It checks the signature against the PUBLIC key in src/platform/update_key.c --
+the same bytes the shipped binary trusts -- and not against the signing key.
+
+That is what makes it useful twice. Anyone can run it on a downloaded release
+without holding anything private, which is the property a signed release is
+supposed to have. And on the author's own machine it catches the one release
+mistake that is otherwise invisible until it is too late: signing with a key
+whose public half is NOT the one compiled into the exe being shipped. Verified
+against the private key, that release passes every check here and then fails on
+every machine in the field, silently, for weeks.
+
+Run it before uploading. It is the last thing standing between a bad keypair
+and a release nobody can install.
 """
 
 import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, utils as asym_utils
 
@@ -136,6 +155,66 @@ def load_key(path):
     return serialization.load_pem_private_key(p.read_bytes(), password=None)
 
 
+# ---------------------------------------------------------------------------
+# The PUBLIC key, read out of the source file the product compiles in.
+#
+# VERIFY MUST NOT USE THE PRIVATE KEY. Checking a signature against the very
+# key that just produced it is nearly a tautology: it passes whatever `sign`
+# emitted, and it cannot see the one mistake that actually ships a broken
+# release -- a keypair that does not match the bytes in update_key.c. That
+# build trusts a different key, refuses the manifest, and every install in the
+# field stops updating, which is discovered weeks later by somebody who cannot
+# update to the fix.
+#
+# So the trust anchor here is the same one the binary uses: the array in
+# src/platform/update_key.c. That also makes verification something ANYONE can
+# do -- the public key is in the repository, the release is on GitHub, and no
+# secret is involved -- which is the property a signed release is supposed to
+# have and did not.
+# ---------------------------------------------------------------------------
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_PUBKEY_C = REPO_ROOT / "src" / "platform" / "update_key.c"
+
+
+def load_pubkey_c(path):
+    """Read g_public_key[] out of update_key.c as an EC public key."""
+    p = Path(path).expanduser()
+    if not p.exists():
+        sys.exit("no public key source at %s" % p)
+
+    text = p.read_text(encoding="utf-8", errors="replace")
+    start = text.find("g_public_key")
+    if start < 0:
+        sys.exit("%s does not define g_public_key" % p)
+    start = text.find("{", start)
+    end = text.find("}", start)
+    if start < 0 or end < 0:
+        sys.exit("%s: could not find the g_public_key initializer" % p)
+
+    raw = bytes(
+        int(tok, 16)
+        for tok in re.findall(r"0[xX][0-9a-fA-F]{1,2}", text[start:end])
+    )
+    if len(raw) != 64:
+        sys.exit(
+            "%s: g_public_key is %d bytes, expected 64" % (p, len(raw))
+        )
+    if not any(raw):
+        # The same meaningful zero as apr_update_have_key(). A build with this
+        # key does not check for updates at all, so a release signed against it
+        # could never be installed by anything.
+        sys.exit(
+            "%s is still all zeros -- this build has no trusted key and its\n"
+            "updater does not look. Run `keygen` and paste the printed array\n"
+            "in before signing a release." % p
+        )
+
+    x = int.from_bytes(raw[:32], "big")
+    y = int.from_bytes(raw[32:], "big")
+    return ec.EllipticCurvePublicNumbers(x, y, ec.SECP256R1()).public_key()
+
+
 def raw_signature(key, data):
     """ECDSA P-256 over `data`, as the 64 raw bytes r||s that BCrypt wants."""
     der = key.sign(data, ec.ECDSA(hashes.SHA256()))
@@ -201,20 +280,41 @@ def cmd_verify(args):
     if len(sig) != 64:
         sys.exit("release.json.sig is %d bytes, expected 64" % len(sig))
 
-    key = load_key(args.key)
-    pub = key.public_key()
+    pub = load_pubkey_c(args.pubkey)
     r = int.from_bytes(sig[:32], "big")
     s = int.from_bytes(sig[32:], "big")
-    pub.verify(asym_utils.encode_dss_signature(r, s), blob,
-               ec.ECDSA(hashes.SHA256()))
-    print("signature verifies")
+    try:
+        pub.verify(asym_utils.encode_dss_signature(r, s), blob,
+                   ec.ECDSA(hashes.SHA256()))
+    except InvalidSignature:
+        # SAY WHAT THIS MEANS. A bare InvalidSignature traceback is the one
+        # outcome that must not look like the tool broke: this is the sentence
+        # somebody sees when a release was tampered with, and it is printed to
+        # people who did not write this script.
+        sys.exit(
+            "SIGNATURE DOES NOT VERIFY.\n"
+            "\n"
+            "release.json in %s was not signed by the key in %s.\n"
+            "It has been altered since it was signed, or it was signed by\n"
+            "somebody else. Do not install this release." % (d, args.pubkey)
+        )
+    print("signature verifies against %s" % args.pubkey)
 
     manifest = json.loads(blob)
     exe = d / manifest["asset"]
     if exe.is_file():
         got = hashlib.sha256(exe.read_bytes()).hexdigest()
         if got != manifest["sha256"]:
-            sys.exit("HASH MISMATCH: %s is not what the manifest describes" % exe)
+            sys.exit(
+                "HASH MISMATCH.\n"
+                "\n"
+                "%s is not the file the signed manifest describes.\n"
+                "  signed:   %s\n"
+                "  this file: %s\n"
+                "The manifest is genuine, so the executable beside it has been\n"
+                "swapped. Do not install this release."
+                % (exe, manifest["sha256"], got)
+            )
         print("%s matches the signed hash" % exe.name)
     else:
         print("(%s is not in this directory; hash not checked)" % manifest["asset"])
@@ -243,7 +343,10 @@ def main():
 
     v = sub.add_parser("verify", help="check a release directory the way the product will")
     v.add_argument("--dir", default="dist")
-    v.add_argument("--key", default=str(DEFAULT_KEY))
+    # The PUBLIC key the product compiles in -- not the signing key. See
+    # load_pubkey_c(). No secret is needed to verify a release, and requiring
+    # one would mean only the author could.
+    v.add_argument("--pubkey", default=str(DEFAULT_PUBKEY_C))
     v.set_defaults(func=cmd_verify)
 
     args = ap.parse_args()

@@ -15,7 +15,7 @@ apprecorder [command] [options]
 | First argument | What you get |
 |---|---|
 | nothing | the window, empty |
-| `record`, `list-apps`, `list-devices`, `help`, `version`, `save-session` | the command line |
+| `record`, `list-apps`, `list-devices`, `save-session`, `update`, `help`, `version` | the command line |
 | anything starting with `-` | the command line |
 | a lone `*.json` file | the window, opened on that session |
 | anything else | refused, and named back to you |
@@ -63,8 +63,39 @@ Similarly, `--gain` applies to the source written just before it, and `--format`
 | `list-apps` | List the applications playing audio right now. |
 | `list-devices` | List this computer's audio capture devices. |
 | `save-session` | Describe a recording and write it down instead of making it. Takes the same grammar as `record`. |
+| `update` | Check whether a newer apprecorder has been published. |
 | `help` | Print the whole surface. |
 | `version` | Print which build this is. |
+
+### `update`
+
+```
+apprecorder update [--install] [--enable | --disable]
+```
+
+Prints whether this is the newest version. Typing the command counts as asking,
+so it goes to the network immediately rather than waiting for the five-minute
+interval — but it still honours the opt-out, and says updates are off rather
+than quietly making the request you refused.
+
+| Option | Meaning |
+|---|---|
+| `--install` | Download the newer version and put it in place at the next start. |
+| `--enable` | Check for newer versions from now on. Changes the setting and checks nothing. |
+| `--disable` | Stop checking for newer versions. Changes the setting and checks nothing. |
+
+`--enable` and `--disable` cannot both be given: apprecorder remembers this
+setting, so it would be remembering the wrong one.
+
+**Neither toggle touches the network**, and the symmetry is what makes that
+believable. `--disable` obviously must not make one last callback on its way
+out. If `--enable` made one, the two commands would differ in whether they
+reach the network, which is not something anybody would remember correctly.
+
+A download that fails verification exits **2**, not 4. It is not a failed
+download; it is a file claiming to be apprecorder that the signing key did not
+sign, and it gets an exit code that a script can tell apart from a flaky
+network. See [updating.md](updating.md).
 
 ## Sources
 
@@ -108,7 +139,11 @@ Each one joins the bus opened most recently.
 
 Formats are `wav`, `mp3` and `ogg`. The extension usually decides: `mix.wav`, `mix.mp3`, `mix.opus`. `mix.ogg` also reaches the Opus encoder, so you do not have to remember which of the two spellings this build wanted.
 
-For MP3, `--quality 0` means constant bitrate at `--bitrate` (192 kbps by default) and `--quality 1` to `10` mean variable bitrate at V0 to V9, in which case `--bitrate` is not used. For Opus, encoding is always variable bitrate, `--bitrate` defaults to 96 kbps stereo or 64 mono, and `--quality` sets encoder complexity.
+**`--quality` means a different thing in each format**, which is why `0` is spelled "leave it to the encoder" rather than "lowest".
+
+For **MP3**, `--quality 0` means constant bitrate at `--bitrate` (192 kbps by default). `--quality 1` to `10` mean variable bitrate at V0 to V9, and `--bitrate` is then unused.
+
+For **Opus**, encoding is always variable bitrate and `--bitrate` sets it — 96 kbps stereo or 64 mono by default. `--quality` sets encoder *complexity*, which trades CPU for quality at the same bitrate rather than changing the bitrate: `0` means libopus's own default of complexity 10, and `1` to `10` mean complexity 0 to 9. So `--quality 1` is the cheapest and `--quality 0` is the most thorough, which reads backwards until you remember that `0` means "do not tune this".
 
 `--out` names may contain `{date}`, `{time}`, `{bus}`, `{n}` and `{ext}`. A name that is already a recording is never overwritten; the new take is saved beside it.
 
@@ -153,6 +188,8 @@ These are contract. They are documented in the help text, scripts branch on them
 | 5 | A source could not be opened or could not be started. |
 | 6 | Recording finished and every file plays, but something went wrong while it ran. |
 | 7 | apprecorder failed and has no better description for it than that. |
+
+`update` reuses two of them rather than inventing its own. A download that could not be fetched is **4**, the ordinary "a file did not work" code. A download that *arrived* and failed verification is **2** — the command was fine and the machine is fine; what turned up is not a release this key signed. Those two must not be folded together: one means the network is unreliable, the other means somebody is trying something.
 
 **6 is the one worth branching on.** It means the files are fine but the session is not what you asked for: a source died mid-recording, a session file lost a source, an output stopped saving. A run that quietly returns 0 after recording three hours of silence is the failure this code exists to prevent.
 

@@ -1872,5 +1872,26 @@ void apr_dlg_about(HWND owner)
     args[1] = apr_str(APR_S_APP_TAGLINE);
     args[2] = APR_VERSION_STRING;
     apr_str_format(APR_S_UI_DLG_ABOUT_BODY, body, DLG_TEXT_CCH, args, 3);
+
+    /* THE LICENCE NOTICE IS A DISTRIBUTION OBLIGATION, NOT A CREDITS ROLL.
+     * libmp3lame is LGPL, and the LGPL requires that a recipient of the BINARY
+     * be told it is in there and where to get the source to relink it. Somebody
+     * who downloads apprecorder.exe on its own never sees README.md or
+     * THIRD-PARTY-NOTICES.md, so this dialog is the only place that reaches
+     * them. Do not shorten it to fit a layout. docs/licensing.md is the long
+     * form and explains exactly which words are load-bearing. */
+    {
+        wchar_t legal[DLG_TEXT_CCH];
+        const wchar_t *largs[2];
+        size_t used = wcslen(body);
+
+        largs[0] = apr_str(APR_S_APP_NAME);
+        largs[1] = APR_PROJECT_URL;
+        apr_str_format(APR_S_UI_DLG_ABOUT_LEGAL, legal, DLG_TEXT_CCH, largs, 2);
+
+        _snwprintf_s(body + used, DLG_TEXT_CCH - used, _TRUNCATE,
+                     L"\n\n%ls", legal);
+    }
+
     apr_dlg_say(owner, APR_S_UI_DLG_ABOUT_TITLE, body);
 }

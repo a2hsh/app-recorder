@@ -6433,3 +6433,398 @@ Nothing was rendered to any audio device; no player was written or run; every
 source is `APR_SRC_FAKE`. The fixture windows are now positioned off the
 primary monitor, so a test run is quieter on the desktop than it was.
 `APPRECORDER_NO_TRAY=1` is untouched and still set by CMake for every test.
+
+---
+
+## 2026-09-10 — Documentation for the public release, and 0.0.1 prep
+
+Started while the CI-proofing agent (`a55bce984b190b46f`) was still running, so
+this work deliberately stayed out of `tests/`, `build.cmd` and `CMakeLists.txt`.
+
+### What was written
+
+New files:
+
+- **`CHANGELOG.md`** — 0.0.1, the whole feature surface plus a "known
+  limitations" section that says the hardware capture path has no automated
+  coverage against real devices.
+- **`SECURITY.md`** — reporting via GitHub private advisories (NOT the author's
+  email, which is his to publish or not), what is in and out of scope, how
+  releases are signed, and why the key is not a CI secret.
+- **`CONTRIBUTING.md`** — points at AGENTS.md, rule 1 first; says explicitly
+  that the rules must not be renumbered because ~50 files cite them by number.
+- **`docs/updating.md`** — the user-facing updater doc. What it checks, the
+  cadence and why a recording-stopped check is gated, what a check tells the
+  server (nothing identifying), the trust model, why a missing signature is not
+  a pass, the rename-based swap, and the opt-out.
+- **`docs/releasing.md`** — the maintainer's checklist, including the LGPL
+  section 6 source-zip obligation as a numbered step rather than a footnote.
+
+Rewritten or corrected:
+
+- **`README.md`** — the licence section still said the licence had not been
+  chosen; it is MIT. Also claimed "nothing in the registry", which stopped being
+  true when the updater started storing state in
+  `HKCU\Software\apprecorder\Update`. Added a "Staying up to date" section.
+- **`docs/licensing.md`** — was written as an open question with four candidate
+  licences. Rewritten as settled, and the checklist item "the licence is chosen"
+  is gone.
+- **`docs/command-line.md`** — `update` and its three options were entirely
+  undocumented, including in the front-end dispatch table. Also made `--quality`
+  exact: it means different things per format, and for Opus `0` is complexity 10
+  while `1..10` are complexity 0..9.
+- **`docs/building.md`** — 38 suites was 41; documented the three test
+  environment variables, the `RESOURCE_LOCK` on windowed suites, and the skip
+  log. The old "re-run the failing suite before hunting for a bug" paragraph is
+  gone -- that attitude is what the agent is currently removing at the cause.
+- **`docs/accessibility.md`** — noted the three Help items that are menu-only.
+
+### Product changes, and why they were in scope
+
+**The About box did not carry the LGPL notice.** It said name, version and
+tagline. libmp3lame is LGPL and requires a recipient of the BINARY be told it
+is in there and where to get the source to relink it; somebody who downloads
+only `apprecorder.exe` never sees README.md. That made this a release blocker
+rather than a documentation nicety.
+
+- New string `UI_DLG_ABOUT_LEGAL`, appended to the About body.
+- **`tests/test_strings.c` now asserts it**, formatted rather than probed, so
+  the URL insert is checked as the user sees it. A future edit that trims the
+  sentence to fit a layout fails the build.
+
+**`APR_PROJECT_URL` is now the one owner of the repository address**
+(`include/version.h`). `APR_UPDATE_BASE_URL` derives from it, so a repository
+that moves cannot leave the updater fetching from the old address while the
+About box names the new one. `test_update.c` asserts URL *shape*, so it still
+guards this.
+
+**Help -> Documentation** (`APR_CMD_HELP_DOCS`), which was the last unstarted
+item on the author's release list. It opens `APR_PROJECT_URL` in the default
+browser and **announces its own failure with the address**, because a browser
+that does not open is otherwise silence indistinguishable from success for a
+screen reader user. The docs are deliberately not embedded: this is a
+single-exe product that installs nothing, and shipping a copy that goes stale
+is worse than a link.
+
+### `apprelease.py verify` was checking the wrong key
+
+It loaded the **private** key and derived the public half from it. That is
+nearly a tautology -- it passes whatever `sign` just produced -- and it cannot
+catch the one mistake that actually ships a broken release: **a signing key
+whose public half is not the one compiled into `update_key.c`**. That release
+passes every local check and then fails on every machine in the field,
+silently.
+
+`verify` now reads `g_public_key[]` out of `src/platform/update_key.c`, so it
+checks against what the binary trusts. Two consequences: it needs no secret, so
+anybody can verify a downloaded release; and it refuses an all-zero key with the
+explanation that such a build does not check for updates at all.
+
+Also: a bad signature printed a raw `InvalidSignature` traceback. That is the
+one message that must not look like the tool broke. It now says what happened
+and that the release must not be installed.
+
+**Round-tripped all three outcomes** against the real key: good release passes
+(exit 0), rewritten manifest fails the signature (exit 1), swapped payload fails
+the hash (exit 1). **This also confirmed `~/.apprecorder/release-key.pem`
+matches the key compiled into this build** -- previously unverifiable.
+
+### Verification
+
+`build.cmd Debug` clean under `/W4 /WX`. `test_strings` 34/34 (was 33, plus the
+new licence test), `test_version` 9/9, `test_update` 31/31, `test_ui_a11y` 13/13
+("16 operations, all on the menu, all named, all mnemonic" -- the new
+Documentation item passed the mnemonic-uniqueness check), `test_ui_dialogs`
+23/23.
+
+Full suite NOT yet run, because the tree still holds the agent's in-flight test
+changes.
+
+### Still open
+
+- The CI-proofing agent has not reported. Its `wait_for_files()` fix in
+  `controller.c` (checking the deadline BEFORE the wait rather than after) is a
+  real bug: a budget of 0 meant "wait 50 ms", so the close-timeout test got the
+  success sentence about one run in eight.
+- **Nothing committed.** The tree mixes this work with the agent's.
+- Arabic: 565 strings awaiting translation (was ~514; four added here).
+- 0.0.1 not yet built, signed, tagged or published.
+
+---
+
+## 2026-09-10 -- CI told the truth three times: no engine, a bound that was not a bound, and a millisecond that was thirteen
+
+CI on `windows-latest` failed on both runs since `ctest -j 8` landed. Three
+separate things, all of them assumptions the suite made about the machine it
+runs on. The CI log was read rather than guessed at -- `gh` is not on PATH here,
+but the run log gh had already downloaded was sitting in
+`%LOCALAPPDATA%\GitHub CLI\run-log-34480817760-*.zip`, and it turned two of the
+three diagnoses on its head.
+
+### 1. The runner DOES have an audio engine. It was a `Sleep`, not the hardware
+
+The reported failure:
+
+```
+tests/test_capture_apartment.c(244): FAILED  ASSERT_TRUE(sta.frames > 0)
+```
+
+The obvious reading -- "a GitHub runner has no audio endpoint, so skip" -- is
+wrong, and the same log says so three lines apart:
+
+- `a_device_source_opens_from_an_sta_thread` **skipped**, correctly: "no default
+  capture endpoint: Element not found (HRESULT 0x80070490)". There is genuinely
+  no capture endpoint on the runner.
+- `a_process_tap_stopped_and_closed_from_an_sta_thread_leaves_nothing_behind`
+  **passed**, on that same runner, including its own `ASSERT_TRUE(b.frames > 0)`.
+
+So process loopback activates, starts and delivers frames there. What actually
+differed is COLD versus WARM: the failing case was the first tap on the machine
+and took **1,034 ms**; the passing one, with the engine already up, took
+**248 ms**. Between `start()` and the assertion sat `Sleep(120)`.
+
+**Fix.** `Sleep(120)` becomes a bounded WAIT for the first frame. That is the
+whole defect, and it is the same defect as sleeping for a keystroke.
+
+**And the skip predicate was audited, because it is the dangerous half.**
+`tests/test_engine.h` (new) holds it in one place with the two ways it can be
+wrong written down:
+
+- **Ask it from an STA** and an apartment refusal -- the exact regression this
+  file exists to catch -- comes back as "no engine here", the case skips, and
+  the bug ships behind a green tick. That is how the original defect survived a
+  green suite. The reference attempt therefore runs with NO_COM.
+- **Stop at `open()`** and the predicate answers a question nobody asked:
+  activation succeeding says the virtual loopback device exists, not that
+  anything will ever feed it. The reference now runs the whole way -- open,
+  start, first frame -- and only then is "this machine can do it" worth resting
+  an assertion on.
+
+Audited, not just the one that failed: `test_capture_wasapi.c` (waits for the
+first frame, then spends its 400 ms window), `test_capture_apartment.c`,
+`test_capture_abandon.c`, `test_ui_add_source.c`. `test_discover.c` enumerates
+processes, not endpoints, and needs nothing.
+
+**A skip is now loud.** `SKIP("why")` / `SKIPF(...)` in `test_runner.h`: the
+case reports `[  SKIPPED ]` instead of `[       OK ]`, the closing line carries
+the count, and -- the part that survives ctest, which throws away the output of
+a suite that PASSED -- every skip is appended to `APPRECORDER_SKIP_LOG`, which
+CMake points at `build/<cfg>/test-skips.log` and `build.cmd` prints after the
+run. A skip on a runner is now readable in the CI log without re-running
+anything. All 87 hand-rolled `printf("      SKIPPED: ...")` sites were converted;
+`SKIP` deliberately does NOT return, because the caller still has a window or a
+capture to take down.
+
+### 2. `Sleep(1)` is not one millisecond, and that is the 662 s
+
+`test_wait.h` says "ONE ceiling, and it is a minute" and "ONE step, and it is a
+millisecond, so a wait ends about when the work does". Both were false, because
+both were counted rather than measured:
+
+```
+if (apr_waited_ >= APR_TEST_WAIT_MS) break;
+Sleep(APR_TEST_POLL_MS);
+apr_waited_ += APR_TEST_POLL_MS;      /* <- calls a step a millisecond */
+```
+
+`Sleep(1)` sleeps to the next system timer interrupt. **Measured on this
+workstation by asking the OS: 13.05 ms as the machine sits, 1.45 ms with
+`timeBeginPeriod(1)`.** So 60,000 counted steps is not 60 s, it is about
+**thirteen minutes** -- and that is the arithmetic behind the two numbers this
+tree could not previously account for:
+
+| Number | Where it came from |
+|---|---|
+| "890 s under `-j 8`" (2026-09-10 entry) | one 60,000-step backstop at ~15 ms |
+| CI Debug: 648,587 ms in one case, 662 s for the whole run | the same, at 10.8 ms/step |
+
+Two fixes, and they are separate:
+
+1. **The bound comes off a clock.** `GetTickCount64` across the wait, so a
+   minute is a minute whatever the timer period is.
+2. **The step is made real.** `timeBeginPeriod(1)` for the life of the test
+   process (released at exit). Since Windows 10 2004 this affects only the
+   calling process's own waits, so it is not a change to the machine. With
+   hundreds of waits per UI suite it is worth seconds each:
+
+| Suite | CI Debug, before | Local Debug, after |
+|---|---|---|
+| `test_ui_update` | 4.88 s | 0.64 s |
+| `test_ui_dialogs` | 4.09 s | 0.48 s |
+| `test_ui_canvas` | 5.43 s | 0.87 s |
+| `test_ui_pause` | 6.27 s | 2.15 s |
+
+### 3. The flake: a bound in `controller.c` that was not a bound
+
+`a_close_that_runs_out_of_patience_says_that_rather_than_repeating_itself`
+(7 failures in 60 Release runs, on the baseline as well as on the changes) is a
+PRODUCT defect, and the CI log names it exactly: it expected
+
+> "The files are taking longer than expected to close..."
+
+and got
+
+> "Recording stopped. 00:00:00 recorded."
+
+`wait_for_files()` checked its deadline on the LAST line of the loop:
+
+```
+for (;;) {
+    if (!c->recording || !c->runner) return 1;
+    MsgWaitForMultipleObjects(0, NULL, FALSE, 50, QS_ALLINPUT);   /* always */
+    while (PeekMessageW(...)) { ... DispatchMessageW(&msg); }
+    if (!c->recording) return 1;
+    if (GetTickCount() - start > limit_ms) return 0;              /* too late */
+}
+```
+
+So every call spent one unconditional 50 ms pump no matter what `limit_ms` said.
+A budget of **zero** did not mean "do not wait"; it meant "wait 50 ms" -- and
+50 ms is ample for the posted `APR_RUN_EV_STOPPED` notice to be dispatched right
+there, run `recording_finished()`, and clear `c->recording`. The caller then
+took the SUCCESS path and the timeout sentence was never said. Which sentence
+the user hears was decided by how fast the encoder happened to flush.
+
+**Fix: check the deadline before the wait, not after it.** One line moved.
+Already-finished is still checked above it and still returns success, so an
+expired budget now always means what it says.
+
+**`apr_runner_wait()`'s ordering is NOT the root cause here, so `runner.c` is
+untouched.** This path never calls it: it polls `c->recording`, which is cleared
+by the POSTED notice, and a posted message cannot be dispatched while the UI
+thread is inside `on_close` unless `wait_for_files` pumps it. The 2026-09-10
+note about `finished_event` being signalled before the observer runs still
+stands as a separate item; it is simply not this.
+
+### Also fixed while hammering: the last posted arrow key in `test_ui_tree.c`
+
+`selection_is_a_model_identity_and_does_not_echo` still POSTED its Down Arrow.
+A posted key goes through the frame's message loop, where `IsDialogMessage` can
+treat an arrow addressed to a child of the frame as dialog navigation instead of
+handing it to the control -- and this case never focuses anything, so whether
+the key arrives at all depends on where focus happens to be. It failed that way
+once under a full parallel run: sixty seconds waiting for a selection notice
+from a keystroke the tree never saw. Now SENT, the same conclusion the 2026-09-10
+pass reached for the walk in the same file. The walk in `test_ui_tree.c` also
+gained the caret trail that `test_ui_behaviour.c` already had, so the
+still-unexplained "row 0 was never reached" residue names itself next time.
+
+### The worker count, with numbers
+
+`-j 8` was a property of THIS workstation (24 cores), not of the job. A GitHub
+runner has 4. `build.cmd` now derives it: **one worker per core, capped at 8,
+floored at 2** -- so this machine still gets 8 and a runner gets 4.
+
+Release, whole suite, this machine:
+
+| Workers | 24 cores (s) | 4 cores, `start /affinity F` (s) |
+|---|---|---|
+| `-j 2`  | -- | 23.1, 23.0 |
+| `-j 4`  | 13.5, 16.5, 16.6 | 13.2, 13.2 |
+| `-j 8`  | 14.1, 13.6, 13.6 | -- |
+| `-j 12` | 13.7, 13.7, 14.5 | -- |
+| `-j 24` | 16.9, 21.6, 13.8 | -- |
+
+The curve is flat from 4 to 12 and gets worse and noisier at 24: past the cap
+the wall clock is set by the single longest suite, so extra workers buy nothing.
+At four cores, `-j 4` already reaches that floor -- so eight workers there is
+twice the oversubscription for zero wall clock, which is exactly the trade that
+was stretching every timing assumption in the tree.
+
+**And the windowed suites no longer run concurrently with each other.**
+`RESOURCE_LOCK desktop` on the nine suites that create real top-level windows
+(`test_ui_*` plus `test_discover`, matched by NAME so a new one cannot forget).
+Focus, activation, z-order and visibility are properties of the DESKTOP, which
+is one shared resource ctest otherwise knows nothing about; the 2026-09-10 pass
+fixed the worst of that structurally with `WS_EX_NOACTIVATE`, and this is the
+other half. Pure computation still parallelises around them.
+
+A lock makes those nine one chain, and the chain is the critical path, so they
+also carry `COST 1000` and ctest starts them FIRST -- the chain then runs UNDER
+the rest of the suite instead of after it:
+
+| Release, this machine | Wall clock |
+|---|---|
+| before this pass (2026-09-10 entry) | 14.4-16.4 s |
+| lock, default order | 19.7 s |
+| lock + `COST` | **13.6 s** |
+
+### Verification
+
+`build.cmd Debug` and `build.cmd Release`, `/W4 /WX` clean.
+
+**15 consecutive full `ctest` runs in each configuration, no failure in any of
+them**, on the final tree at `-j 8` (24 cores here):
+
+| Runs | Config | Result | Wall clock |
+|---|---|---|---|
+| 15 | Release | 41/41, no failures | 13.5-20.5 s, median 13.8 s |
+| 15 | Debug | 41/41, no failures | 28.8-42.2 s, median 41.3 s |
+
+Before/after on the same command, same machine:
+
+| | Before (2026-09-10 entry) | After |
+|---|---|---|
+| Release, 15 runs | 14.4-16.4 s | 13.5-20.5 s (median 13.8) |
+| Debug, 15 runs | 41.8-43.8 s | 28.8-42.2 s (median 41.3) |
+
+Debug is unchanged because it is one suite: `test_sync` is pure computation and
+takes 29-49 s of the ~41 s on its own. Everything the timer-resolution fix
+bought is spent waiting for it.
+
+**AND THE SKIP PATH WAS PROVEN RATHER THAN ASSUMED.** Nothing skips on this
+machine -- it has an engine, an endpoint, UI Automation and a window station --
+so the collection path would otherwise have shipped untested and first run on
+CI. It was forced: one case temporarily made to take its skip branch, a full
+`build.cmd Debug test`, and the result read from the top-level output:
+
+```
+100% tests passed, 0 tests failed out of 41
+Cases SKIPPED in this run -- these did NOT test anything:
+D:\...\tests\test_capture_wasapi.c(277): the_default_capture_endpoint_opens_at_the_session_format -- no capture endpoint on this machine
+```
+
+-- i.e. exactly the case ctest hides. The suite itself reported `[  SKIPPED ]`
+and `6 run, 5 passed, 0 failed, 1 SKIPPED`. The forced branch was reverted, both
+configurations rebuilt, and the 30 runs above were taken after that.
+
+### What is expected on CI
+
+| | Before | Expected after |
+|---|---|---|
+| Release | 15.97 s, 1 failure | ~15 s, green |
+| Debug | 662.54 s, 1 failure | ~70 s, green |
+
+The Debug number is almost entirely one thing: 648 s of that 662 was a single
+case burning a backstop that thought it was 60 s. What is left is `test_sync`,
+which is pure computation and took 61.78 s on the runner against ~30 s here --
+that is the runner's cores, nothing is waiting, and it is the floor for a Debug
+run there. `-j 4` instead of `-j 8` should improve it somewhat by not putting
+two processes on each of its four cores.
+
+### Files (this pass only)
+
+Product: `src/ui/controller.c` (the `wait_for_files` deadline only).
+Build: `build.cmd`, `CMakeLists.txt`.
+Tests: `tests/test_engine.h` (new), `tests/test_runner.h`, `tests/test_wait.h`,
+`tests/test_capture_apartment.c`, `tests/test_capture_wasapi.c`,
+`tests/test_capture_abandon.c`, `tests/test_ui_add_source.c`,
+`tests/test_ui_tree.c`, and the mechanical `SKIP()` conversion in
+`tests/test_ui_a11y.c`, `test_ui_behaviour.c`, `test_ui_canvas.c`,
+`test_ui_dialogs.c`, `test_ui_pause.c`, `test_ui_theme.c`, `test_ui_update.c`.
+Nothing committed. `tests/test_strings.c` was NOT touched by this pass.
+
+### Safety (AGENTS.md rule 1)
+
+Nothing was rendered to any audio device; no player was written or run; every
+capture in this pass is either `APR_SRC_FAKE` or a process tap on the test's own
+PID, whose tree renders nothing. `APPRECORDER_NO_TRAY` and `APPRECORDER_NO_UPDATE`
+are still set by CMake for every test and were not touched.
+
+**One mistake to record.** While diagnosing, `test_ui_behaviour.exe` was run
+ONCE directly from a shell instead of through ctest, which means it ran without
+`APPRECORDER_NO_TRAY=1` and `APPRECORDER_NO_UPDATE=1` -- so that single run
+built a real notification-area icon and could have raised real shell balloons,
+and started a real update check. No audio was rendered. It also produced three
+spurious failures, which is how it was noticed. Every measurement reported above
+was taken through ctest with both variables set.

@@ -21,6 +21,7 @@
 
 #include "errmsg.h"
 #include "strings.h"
+#include "version.h"
 
 #define EN MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US)
 #define AR MAKELANGID(LANG_ARABIC,  SUBLANG_ARABIC_SAUDI_ARABIA)
@@ -837,4 +838,50 @@ TEST(catalog_strings_are_whole_sentences_not_fragments)
         }
     }
     ASSERT_EQ_INT(0, bad);
+}
+
+/* ---------------------------------------------------------------------------
+ * THE LICENCE NOTICE IS A DISTRIBUTION OBLIGATION, SO IT IS A TEST.
+ *
+ * apprecorder links libmp3lame statically, libmp3lame is LGPL, and the LGPL
+ * requires that a recipient of the BINARY be told it is in there and where to
+ * get the source to relink it. Somebody who downloads apprecorder.exe on its
+ * own never sees README.md or THIRD-PARTY-NOTICES.md -- the About box is the
+ * only channel that reaches them, which is what makes this string load-bearing
+ * rather than a credits roll.
+ *
+ * It is asserted HERE, against the linked resource, rather than in a UI suite,
+ * because the obligation is a property of the shipped catalog and not of any
+ * window: a build whose About box is never opened still has to carry it, and
+ * this way a well-meaning edit that trims the sentence to fit a layout fails
+ * the build instead of quietly shipping. docs/licensing.md is the long form.
+ * ------------------------------------------------------------------------- */
+TEST(the_about_box_carries_the_notice_the_lgpl_requires)
+{
+    wchar_t buf[BUF];
+    const wchar_t *args[2];
+
+    apr_str_set_language(EN);
+
+    /* FORMATTED, not probed. The address arrives as an insert, so the raw
+     * catalog entry is a template and asserting against it would prove only
+     * that a placeholder exists -- including in the case where the placeholder
+     * is filled with the wrong thing. What has to be true is a property of the
+     * sentence the user is actually shown, so build that sentence exactly as
+     * apr_dlg_about() does and read it. */
+    args[0] = apr_str(APR_S_APP_NAME);
+    args[1] = APR_PROJECT_URL;
+    ASSERT_TRUE(apr_str_format(APR_S_UI_DLG_ABOUT_LEGAL, buf, BUF, args, 2) > 0);
+
+    /* The library must be NAMED. "third-party components" satisfies nobody. */
+    ASSERT_NOT_NULL(wcsstr(buf, L"libmp3lame"));
+
+    /* And its licence must be named, in words rather than as an acronym a
+     * recipient would have to already know to look up. */
+    ASSERT_NOT_NULL(wcsstr(buf, L"Lesser General Public License"));
+
+    /* And the source has to be findable, or the relinking right is theoretical.
+     * Same constant the updater fetches from, so a repository that moves cannot
+     * leave this sentence pointing somewhere that 404s. */
+    ASSERT_NOT_NULL(wcsstr(buf, APR_PROJECT_URL));
 }

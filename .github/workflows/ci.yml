@@ -1,7 +1,11 @@
 # Build and test on every push and pull request.
 #
-# WHAT THIS DOES NOT DO: sign or publish a release. See release.yml for why the
-# signing key is deliberately not a GitHub secret.
+# WHAT THIS DOES NOT DO: sign or publish a release, and there is deliberately no
+# workflow that does. The signing key is not a GitHub secret, because the point
+# of signing is that compromising this account is not enough to publish a binary
+# that installs itself on other people's machines -- a key held by CI hands that
+# capability straight back. Releases are signed by hand: see SECURITY.md and
+# docs/releasing.md.
 name: CI
 
 on:
