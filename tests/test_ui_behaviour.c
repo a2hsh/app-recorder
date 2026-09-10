@@ -135,6 +135,9 @@ typedef struct UiHost {
     AprErr         create_err;
 } UiHost;
 
+/* Distinguishes one fixture's recording from the next one's. See build_setup. */
+static LONG g_fixture_seq;
+
 static void build_setup(UiHost *h)
 {
     Setup *s = &h->setup;
@@ -172,11 +175,22 @@ static void build_setup(UiHost *h)
         DWORD n = GetTempPathW(MAX_PATH, dir);
 
         if (n == 0 || n >= MAX_PATH) { s->err = APR_ERR(APR_E_IO, L"no temp dir"); return; }
-        swprintf(s->out_path, MAX_PATH, L"%sapr_behaviour_%lu.wav", dir,
-                 (unsigned long)GetCurrentProcessId());
-        /* The name is fixed per process, so anything an earlier case left
-         * behind would be found by the collision policy and push this take
-         * to a different name. Start from a clean folder. */
+        /* ONE PATH PER FIXTURE, NOT ONE PER PROCESS.
+         *
+         * This used to be the pid alone, so every case in the suite recorded to
+         * the same file and relied on DeleteFileW to clear it first. That is a
+         * race with the PREVIOUS case's encoder: the delete fails while its
+         * handle is still open, apr_out_probe_writable then fails with a
+         * sharing violation, and the fixture does not get built. It held on a
+         * fast machine and lost on a two-core CI runner, where it produced a
+         * failure three cases away from its cause -- the graph was simply not
+         * recording, so a key that should have been refused was accepted.
+         *
+         * A counter removes the ordering dependency rather than racing it, the
+         * way tests/test_action_wav.c already does. */
+        swprintf(s->out_path, MAX_PATH, L"%sapr_behaviour_%lu_%ld.wav", dir,
+                 (unsigned long)GetCurrentProcessId(),
+                 InterlockedIncrement(&g_fixture_seq));
         DeleteFileW(s->out_path);
         memset(&ac, 0, sizeof ac);
         ac.out_path = s->out_path;
@@ -600,8 +614,27 @@ static int fix_up(Fix *f, int source, int bus, int edge, int output)
     }
     f->up = 1;
     if (!f->h.setup.built) {
+        /* A FIXTURE THAT DID NOT BUILD IS A FAILURE, NOT A QUIET RETURN.
+         *
+         * This used to print the reason and return 0, and every call site
+         * answers 0 by returning from the case -- with no assertion run, which
+         * the runner reports as [ OK ]. So a case that tested NOTHING counted
+         * towards a green suite, and the printed reason went wherever ctest
+         * sends the output of a suite that passed, which is nowhere.
+         *
+         * That is how the pid-collision above stayed invisible: it broke three
+         * cases, one of which failed loudly for an unrelated-looking reason and
+         * two of which "passed" with 0 assertions. Whatever stops a fixture
+         * being built is either a defect here or a defect in the product, and
+         * both deserve a red line. The genuinely environmental case -- no
+         * interactive window station -- is a SKIP above and stays one. */
         wchar_t why[512];
         apr_err_format(&f->h.setup.err, why, 512);
+        /* FAIL() ends in a bare `return`, which this int-returning helper
+         * cannot use; the primitives underneath it are what the macro is made
+         * of, and SKIP above is already called the same way. */
+        TR_COUNT();
+        tr_fail_head(__FILE__, __LINE__, "the fixture was built");
         printf("      could not build the fixture: %ls\n", why);
         return 0;
     }

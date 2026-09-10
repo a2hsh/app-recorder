@@ -129,8 +129,14 @@ static void build_graph(UiHost *h)
 
     n = GetTempPathW(MAX_PATH, dir);
     if (n == 0 || n >= MAX_PATH) { h->failed = 1; return; }
-    _snwprintf_s(h->out_path, MAX_PATH, _TRUNCATE, L"%lsapr_uiupd_%lu.wav",
-                 dir, (unsigned long)GetCurrentProcessId());
+    /* Per fixture, not per process -- same reason as tests/test_ui_pause.c. */
+    {
+        static LONG seq;
+        _snwprintf_s(h->out_path, MAX_PATH, _TRUNCATE,
+                     L"%lsapr_uiupd_%lu_%ld.wav", dir,
+                     (unsigned long)GetCurrentProcessId(),
+                     InterlockedIncrement(&seq));
+    }
     DeleteFileW(h->out_path);
 
     memset(&ac, 0, sizeof ac);

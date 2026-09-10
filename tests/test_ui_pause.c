@@ -361,8 +361,17 @@ static void build_graph(UiHost *h)
 
     n = GetTempPathW(MAX_PATH, dir);
     if (n == 0 || n >= MAX_PATH) { h->failed = 1; return; }
-    _snwprintf_s(h->out_path, MAX_PATH, _TRUNCATE, L"%lsapr_uipause_%lu.wav",
-                 dir, (unsigned long)GetCurrentProcessId());
+    /* Per fixture, not per process: the pid alone means every case in this
+     * suite records to one path and relies on DeleteFileW to clear it, which
+     * loses to the previous case's encoder while its handle is still open.
+     * See tests/test_ui_behaviour.c, where that race reached CI. */
+    {
+        static LONG seq;
+        _snwprintf_s(h->out_path, MAX_PATH, _TRUNCATE,
+                     L"%lsapr_uipause_%lu_%ld.wav", dir,
+                     (unsigned long)GetCurrentProcessId(),
+                     InterlockedIncrement(&seq));
+    }
     DeleteFileW(h->out_path);
 
     memset(&ac, 0, sizeof ac);
