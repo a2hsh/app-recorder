@@ -2,15 +2,21 @@
 
 Two separate questions live on this page. The first is open. The second is not, and it binds a binary release the moment one is uploaded.
 
-## apprecorder's own licence — NOT YET CHOSEN
+## apprecorder's own licence — MIT
 
-> **PLACEHOLDER — the author's decision is needed here.**
->
-> No licence has been chosen for apprecorder's own source. Until one is, this repository has no stated terms, which by default means all rights reserved and nobody may redistribute or modify it.
->
-> Replace this section with the chosen licence, add the full text as a `LICENSE` file at the repository root, and update the licence line in `README.md`.
+apprecorder is released under the **MIT License**. The full text is in
+[`LICENSE`](../LICENSE) at the repository root.
 
-Three things are worth knowing before that decision is made.
+MIT asks for one thing: keep the copyright notice and the permission notice with
+the software. Beyond that you may use, modify, redistribute and sell it, in open
+or closed products.
+
+**That covers apprecorder's own code, and nothing else.** The vendored libraries
+keep their own terms, and one of them binds anyone who distributes a *binary* —
+see below. A permissive licence on the program does not dissolve an obligation
+attached to a library inside it.
+
+Three things are worth knowing about why the choice was free.
 
 **The MP3 dependency does not force your hand.** LAME is LGPL-2.0-or-later, and the LGPL is specifically designed so that a library can be linked into a program under a different licence, including a proprietary one. It attaches an obligation to the *release* (see below), not a licence to the program.
 
