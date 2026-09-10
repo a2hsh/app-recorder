@@ -642,6 +642,31 @@ static int fix_up(Fix *f, int source, int bus, int edge, int output)
     return f->g != NULL;
 }
 
+/* Ctrl+R has been sent; wait until the recording is REALLY under way.
+ *
+ * THERE ARE TWO NOTIONS OF "RECORDING" AND THEY DO NOT FLIP TOGETHER.
+ * apr_controller_recording() is the controller's own flag, set while it handles
+ * the command. apr_graph_running() is what the CANVAS asks before refusing an
+ * edit (canvas_busy, src/ui/canvas.c), and it does not become true until the
+ * runner is actually ticking.
+ *
+ * Waiting only for the first one therefore returns during a window in which the
+ * canvas does not yet consider the graph busy -- so a key that the case expects
+ * to be refused out loud is instead accepted, and the assertion compares the
+ * refusal against whatever the key really did. This machine closes that window
+ * too fast to notice; a two-core CI runner does not, which is exactly where it
+ * showed up.
+ *
+ * Waiting for BOTH is what "the recording has started" was always supposed to
+ * mean here. */
+static int rec_started(Fix *f)
+{
+    int ok;
+    APR_WAIT_UNTIL(ok, apr_controller_recording(f->h.ctl) &&
+                       apr_graph_running(f->g));
+    return ok;
+}
+
 static void fix_down(Fix *f)
 {
     if (f->up) ui_stop(&f->h);
@@ -1020,7 +1045,7 @@ static void sibling_take(const wchar_t *path, int take, wchar_t *out, size_t cch
 static int one_take(Fix *f, int ms)
 {
     accel(&f->h, APR_CMD_RECORD_START);
-    if (!apr_controller_recording(f->h.ctl)) return 0;
+    if (!rec_started(f)) return 0;
 
     /* THE ONE SLEEP IN THIS FILE THAT IS NOT A POLL, AND IT CANNOT BE ANYTHING
      * ELSE. These cases assert that the take on disk is a playable file with
@@ -1576,7 +1601,7 @@ TEST(an_editing_key_pressed_while_recording_says_why_it_was_refused)
     }
 
     accel(&f.h, APR_CMD_RECORD_START);
-    if (!apr_controller_recording(f.h.ctl)) {
+    if (!rec_started(&f)) {
         fix_down(&f);
         FAIL("the recording did not start");
     }
@@ -1628,7 +1653,7 @@ TEST(a_canvas_key_that_would_rewire_a_running_graph_is_refused_in_words)
     ASSERT_TRUE(focus_node(&f.h, si));
 
     accel(&f.h, APR_CMD_RECORD_START);
-    if (!apr_controller_recording(f.h.ctl)) {
+    if (!rec_started(&f)) {
         fix_down(&f);
         FAIL("the recording did not start");
     }
@@ -1681,7 +1706,7 @@ TEST(stop_recording_and_close_actually_ends_the_process)
     if (!fix_up(&f, 1, 1, 1, 1)) { fix_down(&f); return; }
 
     accel(&f.h, APR_CMD_RECORD_START);
-    if (!apr_controller_recording(f.h.ctl)) {
+    if (!rec_started(&f)) {
         fix_down(&f);
         FAIL("the recording did not start");
     }
@@ -1805,7 +1830,7 @@ TEST(the_tree_says_a_bus_is_recording_while_it_is_recording)
     bus_row.bus  = BUS(&f);
 
     accel(&f.h, APR_CMD_RECORD_START);
-    if (!apr_controller_recording(f.h.ctl)) {
+    if (!rec_started(&f)) {
         fix_down(&f);
         FAIL("the recording did not start");
     }
@@ -2249,7 +2274,7 @@ TEST(a_close_that_runs_out_of_patience_says_that_rather_than_repeating_itself)
     apr_controller_test_set_close_wait_ms(f.h.ctl, 0);
 
     accel(&f.h, APR_CMD_RECORD_START);
-    if (!apr_controller_recording(f.h.ctl)) {
+    if (!rec_started(&f)) {
         fix_down(&f);
         FAIL("the recording did not start");
     }
@@ -2636,7 +2661,7 @@ TEST(the_close_dialogs_buttons_are_wide_enough_for_their_own_captions)
     if (!fix_up(&f, 1, 1, 1, 1)) { fix_down(&f); return; }
 
     accel(&f.h, APR_CMD_RECORD_START);
-    if (!apr_controller_recording(f.h.ctl)) {
+    if (!rec_started(&f)) {
         fix_down(&f);
         FAIL("the recording did not start");
     }

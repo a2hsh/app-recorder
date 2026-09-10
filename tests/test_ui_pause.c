@@ -503,7 +503,14 @@ static int start_recording(UiHost *h)
     int ok;
 
     accel(h, APR_CMD_RECORD_START);
-    APR_WAIT_UNTIL(ok, apr_controller_recording(h->ctl));
+    /* BOTH FLAGS, not just the controller's. apr_graph_running() is what the
+     * canvas and the graph itself ask before refusing an edit, and it does not
+     * become true until the runner is ticking. Returning in between meant a
+     * pause could be sent to a recording that had not started, so the pause
+     * never took and wait_paused() burned its whole ceiling. See rec_started()
+     * in tests/test_ui_behaviour.c for the same window. */
+    APR_WAIT_UNTIL(ok, apr_controller_recording(h->ctl) &&
+                       apr_graph_running(h->graph));
     sync_ui(h);
     return ok;
 }
