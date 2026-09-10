@@ -10,3 +10,4 @@ build/
 *.ogg
 *.m4a
 !tests/golden/*.wav
+dist/
