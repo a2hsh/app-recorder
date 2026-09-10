@@ -19,21 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-apprecorder itself is MIT. It links third-party libraries with their own terms,
-and one of them places an obligation on anyone distributing a BINARY:
-
-  libmp3lame (vendor/lame/)   LGPL-2.0-or-later
-      Statically linked. LGPL section 6 requires that a recipient be able to
-      relink the work with a modified version of the library, so a binary
-      release must ship either the object files or this source tree, together
-      with vendor/lame/COPYING and a visible notice. This obligation attaches
-      to the release, not to apprecorder's own licence.
-
-  libogg  (vendor/ogg/)       BSD-3-Clause  -- reproduce the notice
-  libopus (vendor/opus/)      BSD-3-Clause  -- reproduce the notice
-  jsmn    (vendor/jsmn/)      MIT           -- reproduce the notice
-
-See docs/licensing.md for the release checklist.

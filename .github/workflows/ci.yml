@@ -1,0 +1,72 @@
+# Build and test on every push and pull request.
+#
+# WHAT THIS DOES NOT DO: sign or publish a release. See release.yml for why the
+# signing key is deliberately not a GitHub secret.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # A newer push makes an older run pointless. Cancel it rather than queueing.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    # windows-latest ships MSVC, the Windows SDK, CMake and Ninja. build.cmd
+    # locates the toolchain with vswhere rather than a hardcoded path, which is
+    # what lets the same script serve a laptop and a runner.
+    runs-on: windows-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        config: [Debug, Release]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show the toolchain this runner actually has
+        shell: cmd
+        run: |
+          "%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          cmake --version
+          ninja --version
+
+      - name: Build and test (${{ matrix.config }})
+        shell: cmd
+        # Warnings are errors (/W4 /WX), so a compiler newer than the one used
+        # locally fails here rather than in someone's release.
+        run: build.cmd ${{ matrix.config }} test
+
+      - name: Report the size of the shipping binary
+        if: matrix.config == 'Release'
+        shell: pwsh
+        run: |
+          $exe = Get-Item build\Release\apprecorder.exe
+          $kb = [Math]::Round($exe.Length / 1KB, 1)
+          "apprecorder.exe: $kb KB" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+          # The ceiling is 10 MB (AGENTS.md rule 8). Fail loudly rather than
+          # letting it creep, since every dependency decision was made against it.
+          if ($exe.Length -gt 10MB) { throw "over the 10 MB ceiling" }
+
+      - name: Keep the build for inspection
+        if: matrix.config == 'Release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: apprecorder-unsigned-${{ github.sha }}
+          # UNSIGNED. This is for looking at, not for handing to anyone: the
+          # updater only accepts a build whose manifest was signed with the
+          # private key, which never comes near CI.
+          path: |
+            build/Release/apprecorder.exe
+            build/Release/apprecorder-wait.cmd
+          retention-days: 14
