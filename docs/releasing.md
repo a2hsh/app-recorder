@@ -4,14 +4,20 @@ This is the maintainer's checklist. If you are trying to *install* apprecorder,
 you want the [README](../README.md); if you want to know what the updater does
 to your machine, [updating.md](updating.md).
 
-A release is four things uploaded to one GitHub release:
+A release is five things uploaded to one GitHub release:
 
 | Asset | What it is |
 |---|---|
-| `apprecorder.exe` | The build. |
+| `app-recorder-win-x64.zip` | **What people download.** Both executables, the docs, the licence. |
+| `apprecorder.exe` | The build, loose. **This is what the updater fetches** — see below. |
 | `release.json` | The signed manifest: version, asset name, SHA-256, notes. |
 | `release.json.sig` | 64 raw bytes — the ECDSA P-256 signature over `release.json`. |
 | `apprecorder-<version>-src.zip` | The source, which the LGPL requires. See below. |
+
+**The loose `apprecorder.exe` is not optional.** `release.json` names it in its
+`asset` field, and the updater fetches exactly that name through the
+`releases/latest/download/` redirect. Publishing only the zip would leave every
+installed copy unable to update, and the failure would be silent.
 
 ## Before you start
 
@@ -53,7 +59,7 @@ a sudden jump is worth understanding before it ships rather than after.
 ```
 uv run tools/release/apprelease.py sign ^
   --exe build/Release/apprecorder.exe ^
-  --version 0.0.1 ^
+  --version 0.1.0 ^
   --notes-file release-notes.txt ^
   --out dist
 ```
@@ -77,7 +83,21 @@ the only thing that catches a keypair mismatch before the field does.
 
 Three lines and exit code 0, or do not upload.
 
-## 5. Assemble the source zip
+## 5. Assemble the download zip
+
+This is what the release page actually offers people, so it carries the docs
+too — somebody who downloads a recorder should not have to go back to a website
+to find out what a bus is.
+
+```
+uv run tools/release/appzip.py --build build/Release --out dist
+```
+
+It refuses to build a zip that is missing either executable: `apprecorder.com`
+without `apprecorder.exe` is a launcher with nothing to launch, and
+`apprecorder.exe` without `apprecorder.com` is the 0.0.1 bug back again.
+
+## 6. Assemble the source zip
 
 **This is a licence obligation, not a courtesy.** apprecorder links
 libmp3lame statically, libmp3lame is LGPL-2.0-or-later, and **LGPL section 6
@@ -91,36 +111,37 @@ whole repository at that tag, which is simpler to produce and simpler to
 defend:
 
 ```
-git archive --format=zip --prefix=apprecorder-0.0.1/ ^
-  -o dist/apprecorder-0.0.1-src.zip v0.0.1
+git archive --format=zip --prefix=apprecorder-0.1.0/ ^
+  -o dist/apprecorder-0.1.0-src.zip v0.1.0
 ```
 
 **This attaches the moment a compiled `apprecorder.exe` is uploaded anywhere** —
 a GitHub release, a website, a zip sent to one person. It is not satisfied by
 the repository merely existing somewhere; it travels with the binary.
 
-## 6. Tag and publish
+## 7. Tag and publish
 
 ```
-git tag -a v0.0.1 -m "apprecorder 0.0.1"
-git push origin v0.0.1
+git tag -a v0.1.0 -m "apprecorder 0.1.0"
+git push origin v0.1.0
 
-gh release create v0.0.1 ^
+gh release create v0.1.0 ^
+  dist/app-recorder-win-x64.zip ^
   dist/apprecorder.exe ^
   dist/release.json ^
   dist/release.json.sig ^
-  dist/apprecorder-0.0.1-src.zip ^
-  --title "apprecorder 0.0.1" ^
+  dist/apprecorder-0.1.0-src.zip ^
+  --title "apprecorder 0.1.0" ^
   --notes-file release-notes.txt
 ```
 
 **Upload order matters slightly.** An installed apprecorder that finds
 `release.json` with no `release.json.sig` beside it refuses the release and
 tries again later, which is correct but wastes a cycle. `gh release create`
-with all four assets in one call avoids the window entirely; if you upload them
+with all five assets in one call avoids the window entirely; if you upload them
 one at a time, put the signature or the exe last.
 
-## 7. Check what the field will see
+## 8. Check what the field will see
 
 ```
 apprecorder update

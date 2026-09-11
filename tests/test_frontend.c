@@ -10,11 +10,11 @@
  *   Everything else about a merged image is a property of the IMAGE and cannot
  *   be seen from inside the process that has it: the subsystem byte in the PE
  *   header, whether output survives a redirection the parent set up, whether a
- *   non-ASCII path comes back the same bytes, and whether the .cmd shim hands
- *   an exit code back. Those cases run the real apprecorder.exe. Every wait is
- *   bounded and every child is terminated if it overruns, because the failure
- *   this file exists to catch -- a command line that opens a window instead --
- *   is otherwise a hang.
+ *   non-ASCII path comes back the same bytes, and whether apprecorder.com puts
+ *   output where a script can read it and hands the exit code back. Those
+ *   cases run the real built images. Every wait is bounded and every child is
+ *   terminated if it overruns, because the failure this file exists to catch
+ *   -- a command line that opens a window instead -- is otherwise a hang.
  *
  * SAFETY (AGENTS.md rule 1): nothing here renders audio. The only recording
  * command used is --dry-run, which opens no device and writes no file, and the
@@ -369,14 +369,15 @@ static char *cap(void)
     return g_cap;
 }
 
-TEST(the_shipped_image_is_windows_subsystem)
+/* The Subsystem field out of a built image, or -1 if it cannot be read.
+ *
+ * There are two images now and the byte matters in OPPOSITE directions for
+ * them -- apprecorder.exe must be WINDOWS or every double-click flashes a
+ * console, apprecorder.com must be CONSOLE or it inherits no standard handles
+ * and stops being worth shipping -- so the reader is shared and each case says
+ * which answer it wants. */
+static int subsystem_of(const wchar_t *path)
 {
-    /* THE ONE BYTE THAT MAKES ONE EXECUTABLE POSSIBLE. A CONSOLE image flashes
-     * a black window on every double-click; the subsystem is fixed in the PE
-     * header and there is only one header now. Its cost -- cmd.exe not waiting
-     * -- is real, documented in frontend.h, accepted, and answered by
-     * apprecorder-wait.cmd. A well-meaning switch back to CONSOLE fails here
-     * rather than in somebody's shell three weeks later. */
     HANDLE f;
     DWORD  got = 0;
     unsigned char dos[64];
@@ -385,28 +386,36 @@ TEST(the_shipped_image_is_windows_subsystem)
     LARGE_INTEGER at;
     WORD   subsystem;
 
-    f = CreateFileW(APR_APP_EXE, GENERIC_READ, FILE_SHARE_READ, NULL,
+    f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL,
                     OPEN_EXISTING, 0, NULL);
-    ASSERT_TRUE(f != INVALID_HANDLE_VALUE);
-    if (f == INVALID_HANDLE_VALUE) return;
+    if (f == INVALID_HANDLE_VALUE) return -1;
 
-    ASSERT_TRUE(ReadFile(f, dos, sizeof dos, &got, NULL) && got == sizeof dos);
-    ASSERT_EQ_INT('M', dos[0]);
-    ASSERT_EQ_INT('Z', dos[1]);
+    if (!ReadFile(f, dos, sizeof dos, &got, NULL) || got != sizeof dos ||
+        dos[0] != 'M' || dos[1] != 'Z') { CloseHandle(f); return -1; }
     memcpy(&e_lfanew, dos + 0x3C, sizeof e_lfanew);
 
     at.QuadPart = e_lfanew;
     SetFilePointerEx(f, at, NULL, FILE_BEGIN);
-    ASSERT_TRUE(ReadFile(f, nt, sizeof nt, &got, NULL) && got == sizeof nt);
-    ASSERT_EQ_INT('P', nt[0]);
-    ASSERT_EQ_INT('E', nt[1]);
+    if (!ReadFile(f, nt, sizeof nt, &got, NULL) || got != sizeof nt ||
+        nt[0] != 'P' || nt[1] != 'E') { CloseHandle(f); return -1; }
 
     /* Signature 4 + IMAGE_FILE_HEADER 20 = 24; Subsystem sits at offset 68 of
      * the PE32+ optional header. */
     memcpy(&subsystem, nt + 24 + 68, sizeof subsystem);
-    ASSERT_EQ_INT(IMAGE_SUBSYSTEM_WINDOWS_GUI, (int)subsystem);
-
     CloseHandle(f);
+    return (int)subsystem;
+}
+
+TEST(the_shipped_image_is_windows_subsystem)
+{
+    /* THE ONE BYTE THAT MAKES ONE EXECUTABLE POSSIBLE. A CONSOLE image flashes
+     * a black window on every double-click; the subsystem is fixed in the PE
+     * header and there is only one header now. Its cost -- no standard handles
+     * from cmd.exe, and no waiting from PowerShell -- is real, documented in
+     * frontend.h, and answered by apprecorder.com rather than by giving this
+     * byte up. A well-meaning switch back to CONSOLE fails here rather than in
+     * somebody's shell three weeks later. */
+    ASSERT_EQ_INT(IMAGE_SUBSYSTEM_WINDOWS_GUI, subsystem_of(APR_APP_EXE));
 }
 
 TEST(a_command_reaches_the_command_line_and_its_output_reaches_the_pipe)
@@ -480,78 +489,136 @@ TEST(a_non_ascii_output_path_survives_the_round_trip)
 }
 
 /* ---------------------------------------------------------------------------
- * The scripting shim
+ * apprecorder.com -- the console front door
  * ------------------------------------------------------------------------- */
-#ifdef APR_APP_SHIM
+#ifdef APR_APP_COM
 
-TEST(the_shim_hands_back_the_exit_code)
+/* Read a whole small file as bytes. Used to look at what a `>` actually got. */
+static size_t slurp_file(const wchar_t *path, char *out, size_t cap_bytes)
 {
-    /* cmd.exe does not wait for a WINDOWS-subsystem image, so `apprecorder
-     * record ... && upload.ps1` stops sequencing. apprecorder-wait.cmd is the
-     * answer, and the ONLY thing it has to get right is the exit code: a shim
-     * that always returns 0 is worse than no shim, because every && in every
-     * script would then run whatever the recording did.
+    HANDLE f;
+    DWORD  got = 0;
+
+    out[0] = '\0';
+    f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    NULL, OPEN_EXISTING, 0, NULL);
+    if (f == INVALID_HANDLE_VALUE) return 0;
+    if (!ReadFile(f, out, (DWORD)(cap_bytes - 1), &got, NULL)) got = 0;
+    out[got] = '\0';
+    CloseHandle(f);
+    return (size_t)got;
+}
+
+TEST(the_com_survives_a_redirect_set_up_by_cmd_exe)
+{
+    /* THE CASE THAT CATCHES THE BUG SHIPPED IN 0.0.1, AND IT HAS TO GO THROUGH
+     * cmd.exe TO DO IT.
      *
-     * Skipped when this run has no console of its own: the child would then
-     * have nowhere to print, and a failing command with nowhere to print
-     * raises a modal dialog by design (frontend.h). A test must never leave
-     * one of those on the author's screen. */
-    wchar_t shim[MAX_PATH];
-    wchar_t cmd[1600];
+     * Note what does NOT catch it: run_capture, and the case above that uses
+     * it on apprecorder.exe. That helper hands the child a pipe explicitly
+     * through STARTUPINFO, and a WINDOWS-subsystem image honours handles it is
+     * GIVEN perfectly well -- which is why that case passes, and passed all
+     * through the broken version.
+     *
+     * The failure is cmd.exe's: asked to redirect a GUI-subsystem child it
+     * hands over no standard handles at all, so apprecorder.exe writes to the
+     * console it attached to and `apprecorder version > out.txt` leaves an
+     * EMPTY FILE. Measured, both ways: 0 bytes through the exe, 19 through the
+     * .com, same shell and same syntax.
+     *
+     * So this case shells out for real. It is the only form of the check that
+     * distinguishes the two, and a redirect that silently produces nothing is
+     * the failure mode a command line is least allowed to have. */
+    wchar_t dir[MAX_PATH], out[MAX_PATH], cmd[1600];
     DWORD   code = 0;
-    size_t  i;
 
-    if (!GetConsoleWindow()) {
-        printf("  (no console attached to this run; skipped)\n");
-        return;
-    }
-
-    /* cmd.exe's `start` wants backslashes. */
-    wcscpy_s(shim, MAX_PATH, APR_APP_SHIM);
-    for (i = 0; shim[i]; i++) if (shim[i] == L'/') shim[i] = L'\\';
+    if (!GetTempPathW(MAX_PATH, dir)) { ASSERT_TRUE(0); return; }
+    _snwprintf_s(out, MAX_PATH, _TRUNCATE, L"%lsapr_com_redirect_%lu.txt",
+                 dir, (unsigned long)GetCurrentProcessId());
+    DeleteFileW(out);
 
     /* /s makes cmd strip exactly the outermost pair of quotes, which is the
-     * only reliable way to pass a quoted path plus arguments after /c. */
-    _snwprintf_s(cmd, 1600, _TRUNCATE, L"cmd.exe /s /c \"\"%ls\" version\"",
-                 shim);
+     * only reliable way to pass quoted paths plus a redirect after /c. */
+    _snwprintf_s(cmd, 1600, _TRUNCATE,
+                 L"cmd.exe /s /c \"\"%ls\" version > \"%ls\"\"",
+                 APR_APP_COM, out);
     ASSERT_TRUE(run_capture(cmd, &code, cap()));
     ASSERT_EQ_INT((int)APR_CLI_OK, (int)code);
 
-    _snwprintf_s(cmd, 1600, _TRUNCATE, L"cmd.exe /s /c \"\"%ls\" recrod\"",
-                 shim);
-    ASSERT_TRUE(run_capture(cmd, &code, cap()));
-    ASSERT_EQ_INT((int)APR_CLI_USAGE, (int)code);
+    {
+        char   body[512];
+        size_t n = slurp_file(out, body, sizeof body);
+        if (n == 0) printf("      the redirect produced an EMPTY FILE\n");
+        ASSERT_TRUE(n > 0);
+        ASSERT_TRUE(strstr(body, "apprecorder") != NULL);
+    }
+    DeleteFileW(out);
 }
 
-TEST(the_shim_propagates_a_non_zero_code_it_produces_itself)
+TEST(the_com_puts_its_error_text_where_a_script_can_read_it)
 {
-    /* The case above needs a console; this one never does, and between them
-     * `exit /b %errorlevel%` is exercised with two different values.
-     *
-     * The shim finds the executable through %~dp0, so a copy of it on its own
-     * in a temp directory takes its own guard path: one line to stderr -- which
-     * IS inherited here, because nothing has gone through `start` yet -- and
-     * exit code 7. A shim that ended with a bare `exit /b`, or with no `exit`
-     * at all, returns 0 from this and every script downstream carries on as if
-     * the recording had worked. */
+    /* The half a script reads when something has gone wrong, and therefore the
+     * half that must not vanish into a console nobody is watching. */
+    wchar_t cmd[1600];
+    DWORD   code = 0;
+
+    _snwprintf_s(cmd, 1600, _TRUNCATE, L"\"%ls\" recrod", APR_APP_COM);
+    ASSERT_TRUE(run_capture(cmd, &code, cap()));
+    ASSERT_EQ_INT((int)APR_CLI_USAGE, (int)code);
+    ASSERT_TRUE(strstr(cap(), "recrod") != NULL);
+}
+
+TEST(the_com_is_a_console_image_or_none_of_the_above_works)
+{
+    /* The subsystem byte IS the feature. If somebody "tidies" this target to
+     * match the other one, every property above silently goes back to what it
+     * was -- so it is read out of the built file rather than assumed, the same
+     * way this suite already reads apprecorder.exe's. 3 == CONSOLE. */
+    ASSERT_EQ_INT(3, subsystem_of(APR_APP_COM));
+}
+
+TEST(the_com_hands_back_the_childs_exit_code_unchanged)
+{
+    /* The exit codes are contract (cli.h) and a launcher that invented one --
+     * or always returned 0 -- would break every script that branches on them,
+     * which is worse than having no launcher at all. */
+    wchar_t cmd[1600];
+    DWORD   code = 0;
+
+    _snwprintf_s(cmd, 1600, _TRUNCATE, L"\"%ls\" version", APR_APP_COM);
+    ASSERT_TRUE(run_capture(cmd, &code, cap()));
+    ASSERT_EQ_INT((int)APR_CLI_OK, (int)code);
+
+    _snwprintf_s(cmd, 1600, _TRUNCATE,
+                 L"\"%ls\" record --fake 440 --out \"\" --dry-run",
+                 APR_APP_COM);
+    ASSERT_TRUE(run_capture(cmd, &code, cap()));
+    ASSERT_TRUE(code != (DWORD)APR_CLI_OK);
+}
+
+TEST(the_com_on_its_own_says_so_rather_than_failing_silently)
+{
+    /* It finds its partner by swapping its own extension, so a copy of it by
+     * itself has nothing to run. That has to be a sentence and a non-zero
+     * code: a launcher that returned 0 with no output would let every script
+     * downstream carry on as though the recording had happened. */
     wchar_t dir[MAX_PATH], copy[MAX_PATH], cmd[1600];
     DWORD   code = 0;
 
     if (!GetTempPathW(MAX_PATH, dir)) { ASSERT_TRUE(0); return; }
-    wcscat_s(dir, MAX_PATH, L"apprecorder_shim_test");
+    wcscat_s(dir, MAX_PATH, L"apprecorder_com_test");
     CreateDirectoryW(dir, NULL);
-    _snwprintf_s(copy, MAX_PATH, _TRUNCATE, L"%ls\\apprecorder-wait.cmd", dir);
+    _snwprintf_s(copy, MAX_PATH, _TRUNCATE, L"%ls\\apprecorder.com", dir);
 
-    {   /* APR_APP_SHIM comes from CMake with forward slashes. */
+    {   /* APR_APP_COM comes from CMake with forward slashes. */
         wchar_t src[MAX_PATH];
         size_t  i;
-        wcscpy_s(src, MAX_PATH, APR_APP_SHIM);
+        wcscpy_s(src, MAX_PATH, APR_APP_COM);
         for (i = 0; src[i]; i++) if (src[i] == L'/') src[i] = L'\\';
         ASSERT_TRUE(CopyFileW(src, copy, FALSE) != 0);
     }
 
-    _snwprintf_s(cmd, 1600, _TRUNCATE, L"cmd.exe /s /c \"\"%ls\" version\"",
-                 copy);
+    _snwprintf_s(cmd, 1600, _TRUNCATE, L"\"%ls\" version", copy);
     ASSERT_TRUE(run_capture(cmd, &code, cap()));
     ASSERT_EQ_INT((int)APR_CLI_INTERNAL, (int)code);
     ASSERT_TRUE(strstr(cap(), "apprecorder.exe") != NULL);
@@ -560,5 +627,5 @@ TEST(the_shim_propagates_a_non_zero_code_it_produces_itself)
     RemoveDirectoryW(dir);
 }
 
-#endif /* APR_APP_SHIM */
+#endif /* APR_APP_COM */
 #endif /* APR_APP_EXE */

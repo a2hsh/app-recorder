@@ -72,5 +72,5 @@ jobs:
           # private key, which never comes near CI.
           path: |
             build/Release/apprecorder.exe
-            build/Release/apprecorder-wait.cmd
+            build/Release/apprecorder.com
           retention-days: 14

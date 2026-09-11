@@ -50,8 +50,8 @@ extern "C" {
 /* THE DEFINITION. Everything else in this file and in the product is derived
  * from these three integers. */
 #define APR_VERSION_MAJOR 0
-#define APR_VERSION_MINOR 0
-#define APR_VERSION_PATCH 1
+#define APR_VERSION_MINOR 1
+#define APR_VERSION_PATCH 0
 
 /* Stringize-then-widen, in that order: `#x` must run before `L##x` sees it,
  * which is the same two-step src/platform/err.c uses to turn a symbol into a

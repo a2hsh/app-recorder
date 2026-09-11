@@ -15,18 +15,29 @@
  * ===========================================================================
  * THE COST, STATED ONCE, HERE
  *
- *   A PE's subsystem is fixed in its header, and cmd.exe decides whether to
- *   wait for a child by reading that flag. The merged image is WINDOWS
- *   subsystem -- it has to be, or double-clicking it flashes a console -- so
- *   cmd returns to the prompt the instant the process starts:
+ *   A PE's subsystem is fixed in its header. The merged image is WINDOWS
+ *   subsystem -- it has to be, or double-clicking it flashes a console -- and
+ *   two shells treat such an image differently from a console one. Both costs
+ *   below were MEASURED, after an earlier version of this comment asserted the
+ *   wrong one:
  *
- *       apprecorder record ... && upload.ps1
+ *     - cmd.exe DOES wait for it (a `--duration 3` run takes 3.1 s and the
+ *       exit code is correct), but it hands a WINDOWS-subsystem child NO
+ *       standard handles, so `apprecorder version > out.txt` writes an empty
+ *       file. Output is not lost -- it goes to the attached console -- it just
+ *       does not follow a redirect, a pipe or a captured variable.
+ *     - PowerShell does NOT wait. It returns in hundredths of a second with no
+ *       exit code, so a scripted `record --duration 3600` reports success
+ *       while the recording is still running. It is the default shell on
+ *       Windows 11.
  *
- *   no longer sequences, and output interleaves with the next prompt. The exit
- *   code still exists and is still correct; nothing is waiting to read it.
- *   That is what apprecorder-wait.cmd is for -- see the top of that file. The
- *   author accepted this trade knowingly; do not "fix" it by flipping the
- *   subsystem back, which un-merges the executables.
+ *   Handles the image is GIVEN it honours (main.c leaves a live handle alone);
+ *   the problem is only that cmd gives it none.
+ *
+ *   apprecorder.com answers both -- a 4 KB CONSOLE-subsystem launcher beside
+ *   this image, found first because PATHEXT begins ".COM;.EXE". See
+ *   src/app/launcher.c. Do not "fix" any of this by flipping the subsystem
+ *   back, which un-merges the executables.
  *
  * ===========================================================================
  * THE DISPATCH RULE, AND WHY IT IS NOT "ANY ARGUMENT MEANS CLI"

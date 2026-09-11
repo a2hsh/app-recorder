@@ -302,9 +302,9 @@ endif()
 # WIN32 is not a preference. A CONSOLE image flashes a black window on every
 # double-click, which is not a thing to ship; the subsystem is fixed in the PE
 # header, so it has to be decided here, once, for both front ends. The cost is
-# real and is documented at the top of include/frontend.h: cmd.exe reads that
-# same flag to decide whether to wait, so it does not wait for us, and
-# apprecorder-wait.cmd exists to restore `&&` sequencing for scripts.
+# real and is documented at the top of include/frontend.h: a WINDOWS image is
+# handed no standard handles by cmd.exe and is not waited for by PowerShell, so
+# apprecorder.com (below) is the console front door that restores both.
 # tests/test_frontend.c reads the subsystem byte out of the built image, so a
 # well-meaning revert to CONSOLE fails the suite rather than the double-click.
 #
@@ -317,23 +317,46 @@ if(TARGET apprecorder_ui AND EXISTS ${CMAKE_SOURCE_DIR}/src/app/main.c)
   add_executable(apprecorder WIN32 ${CMAKE_SOURCE_DIR}/src/app/main.c)
   target_link_libraries(apprecorder PRIVATE apprecorder_ui)
 
-  # The scripting shim, beside the executable it wraps -- it finds the exe
-  # through %~dp0, so the two have to travel together.
-  add_custom_command(TARGET apprecorder POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${CMAKE_SOURCE_DIR}/apprecorder-wait.cmd
-            $<TARGET_FILE_DIR:apprecorder>/apprecorder-wait.cmd
-    VERBATIM)
+  # -------------------------------------------------------------------------
+  # apprecorder.com -- the CONSOLE front door, beside the WINDOWS image.
+  #
+  # PATHEXT's default begins ".COM;.EXE", so this is what a shell finds when
+  # somebody types "apprecorder", and being a console image it is handed the
+  # real standard handles and passes them to the child. That is what restores
+  # redirection, pipes and captured output, none of which a WINDOWS-subsystem
+  # image gets from cmd.exe -- and it is what makes PowerShell wait, which it
+  # otherwise does not. src/app/launcher.c has the measurements.
+  #
+  # NO CRT: /NODEFAULTLIB with its own entry point takes it from 132 KB to a
+  # few. /GS- because the stack cookie lives in the CRT, and the same reason
+  # forbids an automatic buffer big enough to need __chkstk.
+  # -------------------------------------------------------------------------
+  add_executable(apprecorder_com ${CMAKE_SOURCE_DIR}/src/app/launcher.c)
+  set_target_properties(apprecorder_com PROPERTIES
+    OUTPUT_NAME "apprecorder"
+    SUFFIX ".com")
+  # /GL- and /LTCG:OFF: this file DEFINES memset and memcpy (the optimiser
+  # emits calls to them from ordinary loops, and there is no CRT here to
+  # provide them), and whole-program optimisation refuses to let a translation
+  # unit define a compiler helper -- C2268. The target is a few KB either way.
+  target_compile_options(apprecorder_com PRIVATE /GS- /GL-)
+  target_link_options(apprecorder_com PRIVATE
+    /NODEFAULTLIB /ENTRY:apr_com_start /SUBSYSTEM:CONSOLE /MANIFEST:NO
+    /LTCG:OFF)
+  target_link_libraries(apprecorder_com PRIVATE kernel32)
+  # It resolves its partner by swapping its own extension, so the two travel
+  # together or neither works.
+  add_dependencies(apprecorder_com apprecorder)
 
   # tests/test_frontend.c runs the real image: its subsystem byte, its exit
   # codes, and whether its output reaches a redirected pipe with a non-ASCII
   # path intact. None of that can be asserted from inside the process, so the
   # path is handed to the suite rather than guessed at.
   if(TARGET test_frontend)
-    add_dependencies(test_frontend apprecorder)
+    add_dependencies(test_frontend apprecorder apprecorder_com)
     target_compile_definitions(test_frontend PRIVATE
       APR_APP_EXE=L"$<TARGET_FILE:apprecorder>"
-      APR_APP_SHIM=L"$<TARGET_FILE_DIR:apprecorder>/apprecorder-wait.cmd")
+      APR_APP_COM=L"$<TARGET_FILE:apprecorder_com>")
     # A dispatch bug that opened a window instead of running a command line
     # would otherwise hang here forever. The suite bounds every wait itself;
     # this is the second net.

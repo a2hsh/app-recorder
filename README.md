@@ -30,11 +30,22 @@ Windows 10 version 2004 (build 19041) or newer, 64-bit. Per-process audio captur
 
 ## Install
 
-Download `apprecorder.exe` and put it somewhere on your PATH. That is the install.
+Download **`app-recorder-win-x64.zip`**, unzip it anywhere, and run `apprecorder.exe`. That is the install — there is no installer, nothing is written to Program Files, and uninstalling is deleting the folder.
 
-`apprecorder-wait.cmd` ships beside it. You only need it for scripting; see [docs/command-line.md](docs/command-line.md) for why.
+Put that folder on your PATH if you want to use the command line from anywhere.
 
-Every release also carries `release.json` and `release.json.sig`. You do not need them to run apprecorder — they are what the updater checks — but they let you verify the download came from the author rather than from whoever last had access to the hosting account. See [SECURITY.md](SECURITY.md).
+Inside the zip:
+
+| | |
+|---|---|
+| `apprecorder.exe` | The program. Double-click it for the window. |
+| `apprecorder.com` | A 4 KB launcher that makes the command line behave properly in scripts. |
+| `docs\` | These pages, offline. |
+| `LICENSE`, `THIRD-PARTY-NOTICES.md` | The licence and the third-party notices. |
+
+**Keep `apprecorder.exe` and `apprecorder.com` in the same folder**, and type `apprecorder` rather than `apprecorder.exe`. Windows finds the `.com` first and you get working redirection, working pipes, and a shell that actually waits for the recording to finish. [docs/command-line.md](docs/command-line.md) explains why that is needed at all; the one-line version is that a program which can also open a window is not handed a console's standard handles.
+
+Every release also carries `apprecorder.exe` on its own, plus `release.json` and `release.json.sig`. The loose executable is what the updater downloads; the other two are what it checks. You do not need them to run apprecorder, but they let you verify the download came from the author rather than from whoever last had access to the hosting account. See [SECURITY.md](SECURITY.md).
 
 ## Staying up to date
 

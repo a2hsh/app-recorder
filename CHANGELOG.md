@@ -8,6 +8,59 @@ While the major number is `0`, the command grammar and the JSON field names may
 still change between releases. The exit codes may not: they are contract from
 0.0.1 onward, scripts branch on them, and they will not be renumbered.
 
+## 0.1.0 — 2026-09-11
+
+The command line now behaves like a command line. 0.0.1 shipped an executable
+that could not be redirected, piped or captured, and a scripting shim that
+solved the wrong half of the problem.
+
+### `apprecorder.com` replaces `apprecorder-wait.cmd`
+
+`apprecorder.exe` is a WINDOWS-subsystem image, because a console image flashes
+a black window on every double-click. Two consequences of that were measured,
+and one of them contradicted what 0.0.1's own documentation claimed:
+
+- **cmd.exe hands a WINDOWS-subsystem child no standard handles.** So
+  `apprecorder version > out.txt` wrote an **empty file**, and `|` and `$(...)`
+  captured nothing. cmd *does* wait for such a child and reports its exit code
+  correctly — the old shim existed to fix a wait that was never broken.
+- **PowerShell does not wait for one at all.** It returned in hundredths of a
+  second with no exit code, so a scripted `record --duration 3600` reported
+  success while the recording was still running. PowerShell is the default
+  shell on Windows 11.
+
+**`apprecorder.com`** is a 4 KB console-subsystem launcher that runs the
+executable with the real standard handles. `PATHEXT` is searched in order and
+begins `.COM;.EXE`, so typing `apprecorder` finds it — no new name to learn.
+Redirection, pipes, captured output, exit codes and waiting all work, in both
+shells. Ctrl+C is deliberately ignored by the launcher and left to apprecorder
+itself, so a take is still finalized rather than cut off.
+
+It is built without the C runtime (`/NODEFAULTLIB`, its own entry point), which
+is the difference between 4 KB and 132 KB.
+
+**`apprecorder-wait.cmd` is removed.** It used `start /wait`, and `start` is
+precisely what severs the standard handles — it made redirection worse while
+requiring a second name. Delete it if you have a copy.
+
+`tests/test_frontend.c` now pins this by shelling out through `cmd.exe` with a
+real `>` and asserting the file is not empty, because the in-process helper
+passes handles explicitly and therefore cannot see the defect at all.
+
+### Packaging
+
+- Releases now ship **`app-recorder-win-x64.zip`**: both executables, the
+  documentation offline, the licence and the third-party notices. Unzip and
+  run.
+- `apprecorder.exe` is still published as a loose asset, because that is what
+  the updater downloads and verifies.
+
+### Fixed
+
+- The About box and `Help → Documentation`, added in 0.0.1, are unchanged; the
+  licence notice they carry now also travels inside the zip as
+  `THIRD-PARTY-NOTICES.md`.
+
 ## 0.0.1 — 2026-09-10
 
 First public release.

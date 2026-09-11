@@ -14,25 +14,41 @@
 
 TEST(the_string_is_built_from_the_numbers)
 {
-    /* The point of the stringize-then-widen in version.h: this cannot be made
-     * to fail by editing one of the two, because there is only one. */
+    /* The point of the stringize-then-widen in version.h: the text cannot say
+     * something the integers do not.
+     *
+     * The expected value is FORMATTED FROM THE INTEGERS rather than written
+     * out. A literal here would be exactly the second copy this module exists
+     * to prevent -- and it was one, until 0.1.0: the assertion read
+     * ASSERT_WSTR_EQ(L"0.0.1", ...) directly beneath a comment explaining that
+     * there is only one place to edit. */
     AprVersion v = apr_version_current();
+    wchar_t    want[64];
 
     ASSERT_EQ_INT(APR_VERSION_MAJOR, v.major);
     ASSERT_EQ_INT(APR_VERSION_MINOR, v.minor);
     ASSERT_EQ_INT(APR_VERSION_PATCH, v.patch);
-    ASSERT_WSTR_EQ(L"0.0.1", APR_VERSION_STRING);
+
+    _snwprintf_s(want, 64, _TRUNCATE, L"%d.%d.%d", v.major, v.minor, v.patch);
+    ASSERT_WSTR_EQ(want, APR_VERSION_STRING);
 }
 
-TEST(this_build_reports_0_0_1)
+TEST(this_build_reports_0_1_0)
 {
-    /* The initial public release. If this number moves, it moves HERE and in
-     * version.h and nowhere else -- that is the whole reason the module
-     * exists. */
+    /* A TRIPWIRE, ON PURPOSE, and the only hardcoded version in the suite.
+     *
+     * Everything else here is derived, so it survives a bump untouched. This
+     * one does not, because the version is contract for the updater: it
+     * decides whether every installed copy replaces itself. Making a bump cost
+     * one deliberate edit in a file called test_version.c is the cheapest way
+     * to ensure nobody changes it by accident, or by a careless sed.
+     *
+     * If you are here because this failed after a bump: check the number is
+     * the one you meant, then change it. */
     AprVersion v = apr_version_current();
     ASSERT_EQ_INT(0, v.major);
-    ASSERT_EQ_INT(0, v.minor);
-    ASSERT_EQ_INT(1, v.patch);
+    ASSERT_EQ_INT(1, v.minor);
+    ASSERT_EQ_INT(0, v.patch);
 }
 
 /* ===========================================================================
@@ -131,10 +147,27 @@ TEST(a_refused_parse_zeroes_the_output)
 
 TEST(newer_than_current_is_the_whole_decision)
 {
-    ASSERT_TRUE(apr_version_is_newer_than_current(L"0.0.2"));
-    ASSERT_TRUE(apr_version_is_newer_than_current(L"0.1.0"));
-    ASSERT_TRUE(apr_version_is_newer_than_current(L"1.0.0"));
-    ASSERT_TRUE(apr_version_is_newer_than_current(L"v0.10.0"));
+    /* Built from the current version rather than written out, so a bump does
+     * not silently turn these into assertions about nothing. They were
+     * literals until 0.1.0, and "0.0.2 is newer" quietly became false the
+     * moment the minor moved -- which the suite caught, but only because it
+     * was checking the literal it was about to stop being true. */
+    AprVersion v = apr_version_current();
+    wchar_t    up_major[64], up_minor[64], up_patch[64], with_v[64];
+
+    _snwprintf_s(up_major, 64, _TRUNCATE, L"%d.%d.%d", v.major + 1, 0, 0);
+    _snwprintf_s(up_minor, 64, _TRUNCATE, L"%d.%d.%d", v.major, v.minor + 1, 0);
+    _snwprintf_s(up_patch, 64, _TRUNCATE, L"%d.%d.%d",
+                 v.major, v.minor, v.patch + 1);
+    /* The leading v a git tag carries, on a version ten minors ahead -- the
+     * lexicographic trap, in the form the updater actually receives it. */
+    _snwprintf_s(with_v, 64, _TRUNCATE, L"v%d.%d.%d",
+                 v.major, v.minor + 10, 0);
+
+    ASSERT_TRUE(apr_version_is_newer_than_current(up_patch));
+    ASSERT_TRUE(apr_version_is_newer_than_current(up_minor));
+    ASSERT_TRUE(apr_version_is_newer_than_current(up_major));
+    ASSERT_TRUE(apr_version_is_newer_than_current(with_v));
 
     ASSERT_FALSE(apr_version_is_newer_than_current(APR_VERSION_STRING));
     ASSERT_FALSE(apr_version_is_newer_than_current(L"0.0.0"));

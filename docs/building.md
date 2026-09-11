@@ -21,7 +21,7 @@ build.cmd test       build Debug, then run the test suite
 build.cmd Release test
 ```
 
-Output lands in `build\Debug\` or `build\Release\`. The product is a single `apprecorder.exe`, with `apprecorder-wait.cmd` copied beside it by the build. There is nothing else to ship.
+Output lands in `build\Debug\` or `build\Release\`. The product is `apprecorder.exe` plus the 4 KB `apprecorder.com` launcher beside it (see `src/app/launcher.c`). There is nothing else to ship.
 
 A Release build is 1,046,016 bytes — just over 1 MB. The ceiling is 10 MB and CI enforces it; the headroom is there for bus effects and VST hosting. The Debug build is much larger and is not a shipping number.
 

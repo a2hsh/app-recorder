@@ -22,23 +22,35 @@ apprecorder [command] [options]
 
 An unrecognised first argument fails rather than guessing. `apprecorder recrod --out x.wav` prints "recrod is not a command apprecorder has" and exits 1, instead of opening an empty window and losing the rest of the line.
 
-### Scripting: `apprecorder-wait.cmd`
+### The two files, and why there are two
 
-The executable is marked as a WINDOWS-subsystem image, because otherwise every double-click would flash a black console. `cmd.exe` reads that same flag to decide whether to wait for a child, so it does **not** wait for `apprecorder.exe`. The prompt comes back immediately and this stops sequencing:
+A release contains `apprecorder.exe` and `apprecorder.com`. **Keep them together, and type `apprecorder`** — you get the right one automatically, because `PATHEXT` is searched in order and its default begins `.COM;.EXE`.
+
+The reason is one bit in the executable's header. `apprecorder.exe` is a WINDOWS-subsystem image, because a console image flashes a black window on every double-click. Two shells treat such an image differently from an ordinary console program:
+
+- **cmd.exe** waits for it and reports its exit code correctly, but hands it **no standard handles**, so `apprecorder version > out.txt` writes an **empty file**. The output is not lost — it goes to the console — it just does not follow a redirect, a pipe, or a captured variable.
+- **PowerShell does not wait for it at all.** It returns in hundredths of a second with no exit code, so a scripted `record --duration 3600` reports success while the recording is still running.
+
+`apprecorder.com` is a 4 KB console-subsystem launcher that runs the executable and passes it the real handles. With it, everything behaves the way a command-line program should, in both shells:
 
 ```
+apprecorder list-devices --json > devices.json
+apprecorder version | findstr 0.
+$v = apprecorder version
 apprecorder record --exe teams.exe --out mix.wav && upload.ps1
 ```
 
-`apprecorder-wait.cmd` ships beside the executable and restores it. It waits, and hands back apprecorder's own exit code, so every `%ERRORLEVEL%` test and every `&&` means what it used to:
+Exit codes pass through unchanged, and Ctrl+C reaches apprecorder itself — the launcher deliberately ignores it and keeps waiting, so a take is still finalized rather than cut off.
+
+If you run `apprecorder.exe` explicitly, by full path or by typing the extension, you get the behaviour above and a redirect will produce an empty file. That is the only reason to prefer one name over the other, and typing `apprecorder` avoids it.
+
+**`--log-file` is unaffected by any of this.** It opens the file itself, so it works whichever way you start the program:
 
 ```
-apprecorder-wait record --exe teams.exe --out mix.wav && upload.ps1
+apprecorder record ... --log-file run.log --log-level info
 ```
 
-It is deliberately not named `apprecorder.cmd`: `PATHEXT` puts `.EXE` before `.CMD`, so a `.cmd` of that name beside the `.exe` would never be found and would look installed while doing nothing.
-
-**The shim does not carry redirection.** `start` does not hand its standard handles to the process it launches, so `apprecorder-wait record ... > log.txt` leaves the file empty. Redirect the executable directly for output, use the shim for sequencing, or use `--log-file`.
+> Versions before 0.1.0 shipped a different answer, `apprecorder-wait.cmd`. It used `start /wait` to restore a wait that cmd was already doing, and `start` is precisely what severs the standard handles — so it made redirection worse while requiring a second name to remember. It has been removed; delete it if you have a copy.
 
 ## The grammar is positional, and that is the point
 
